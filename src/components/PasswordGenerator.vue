@@ -155,7 +155,7 @@ const generate = () => {
   const array = new Uint32Array(config.value.length)
   crypto.getRandomValues(array)
   for (let i = 0; i < config.value.length; i++) {
-    result += chars[array[i] % chars.length]
+    result += chars[array[i]! % chars.length]
   }
   password.value = result
 }
