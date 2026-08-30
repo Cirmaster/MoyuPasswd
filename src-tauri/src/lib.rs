@@ -122,7 +122,7 @@ pub fn run() {
                         let _ = window.set_always_on_top(true);
                     } else {
                         // 创建新窗口
-                        let _window = tauri::WebviewWindowBuilder::new(
+                        let window = tauri::WebviewWindowBuilder::new(
                             app,
                             "quick-search",
                             tauri::WebviewUrl::App("quick-search.html".into())
@@ -133,9 +133,12 @@ pub fn run() {
                         .decorations(false)
                         .always_on_top(true)
                         .skip_taskbar(true)
+                        .focused(true)
                         .center()
                         .build()
                         .expect("创建快速搜索窗口失败");
+
+                        let _ = window.set_focus();
                     }
                 }
             }).expect("注册全局快捷键失败");
