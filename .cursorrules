@@ -1,0 +1,378 @@
+# 开发规范
+
+## 注释要求
+
+### Vue 组件 (.vue 文件)
+
+每个 Vue 组件必须包含以下注释：
+
+```vue
+<!--
+  组件名.vue - 组件简短描述
+
+  组件的详细说明，包括：
+  1. 功能点1
+  2. 功能点2
+  3. 功能点3
+
+  @example
+  ```vue
+  <MyComponent prop1="value" @event="handler" />
+  ```
+-->
+```
+
+### TypeScript/JavaScript 文件
+
+```typescript
+/**
+ * 文件名.ts - 文件简短描述
+ *
+ * 文件的详细说明
+ *
+ * @example
+ * ```ts
+ * const result = myFunction()
+ * ```
+ */
+```
+
+### 变量注释
+
+```typescript
+/** 变量用途说明 */
+const myVar = ref('')
+
+/** 变量用途说明，包含类型和默认值 */
+const config = ref({
+  /** 配置项1说明 */
+  option1: true,
+  /** 配置项2说明 */
+  option2: 'default',
+})
+```
+
+### 函数注释
+
+```typescript
+/**
+ * 函数功能说明
+ *
+ * @param param1 - 参数1说明
+ * @param param2 - 参数2说明
+ * @returns 返回值说明
+ *
+ * @example
+ * ```ts
+ * const result = myFunction('a', 'b')
+ * ```
+ */
+function myFunction(param1: string, param2: string): string {
+  // 实现说明
+}
+```
+
+### 代码块注释
+
+对于复杂逻辑，使用行内注释：
+
+```typescript
+// 步骤1：验证输入
+if (!input) return
+
+// 步骤2：处理数据
+const result = processData(input)
+
+// 步骤3：返回结果
+return result
+```
+
+### TODO 注释
+
+```typescript
+// TODO: 功能说明
+// FIXME: 问题说明
+// HACK: 临时方案说明
+```
+
+---
+
+## Rust / Tauri 后端注释规范
+
+### 模块文件 (mod.rs / lib.rs)
+
+```rust
+//! 模块名 - 模块简短描述
+//!
+//! 模块的详细说明，包括：
+//! 1. 功能点1
+//! 2. 功能点2
+//! 3. 功能点3
+//!
+//! # Examples
+//!
+//! ```rust
+//! use crate::module::function;
+//! let result = function();
+//! ```
+
+/// 模块内的公开函数说明
+pub fn function() {}
+```
+
+### 结构体注释
+
+```rust
+/// 结构体用途说明
+///
+/// 字段说明：
+/// - field1: 字段1说明
+/// - field2: 字段2说明
+///
+/// # Examples
+///
+/// ```rust
+/// let instance = MyStruct {
+///     field1: "value",
+///     field2: 42,
+/// };
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyStruct {
+    /// 字段1说明
+    pub field1: String,
+    /// 字段2说明
+    pub field2: i32,
+}
+```
+
+### 枚举注释
+
+```rust
+/// 枚举用途说明
+///
+/// 变体说明：
+/// - Variant1: 变体1说明
+/// - Variant2: 变体2说明
+#[derive(Debug, Clone)]
+pub enum MyEnum {
+    /// 变体1说明
+    Variant1,
+    /// 变体2说明
+    Variant2(String),
+}
+```
+
+### 函数注释
+
+```rust
+/// 函数功能说明
+///
+/// # Arguments
+///
+/// * `param1` - 参数1说明
+/// * `param2` - 参数2说明
+///
+/// # Returns
+///
+/// 返回值说明
+///
+/// # Errors
+///
+/// 错误情况说明
+///
+/// # Examples
+///
+/// ```rust
+/// let result = my_function("a", 42)?;
+/// ```
+pub fn my_function(param1: &str, param2: i32) -> Result<String, MyError> {
+    // 实现说明
+    Ok(result)
+}
+```
+
+### Tauri 命令注释
+
+```rust
+/// Tauri 命令：功能说明
+///
+/// 前端调用方式：
+/// ```typescript
+/// const result = await invoke('command_name', { param1: 'value' });
+/// ```
+///
+/// # Arguments
+///
+/// * `param1` - 参数1说明
+///
+/// # Returns
+///
+/// 返回值说明
+///
+/// # Errors
+///
+/// 错误情况说明
+#[tauri::command]
+pub async fn command_name(param1: String) -> Result<ReturnType, String> {
+    // 实现逻辑
+}
+```
+
+### 错误类型注释
+
+```rust
+/// 应用错误类型
+///
+/// 用于统一处理各种错误情况
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    /// 数据库错误
+    #[error("数据库错误: {0}")]
+    Database(#[from] rusqlite::Error),
+
+    /// 加密错误
+    #[error("加密错误: {0}")]
+    Crypto(String),
+
+    /// 认证错误
+    #[error("认证失败: {0}")]
+    Auth(String),
+
+    /// 未找到资源
+    #[error("未找到: {0}")]
+    NotFound(String),
+}
+```
+
+### 代码块注释
+
+对于复杂逻辑，使用行内注释：
+
+```rust
+// 步骤1：验证输入
+if input.is_empty() {
+    return Err(AppError::Validation("输入不能为空".into()));
+}
+
+// 步骤2：查询数据库
+let result = db.query(password_id)?;
+
+// 步骤3：解密数据
+let decrypted = crypto::decrypt(&result.encrypted_data)?;
+
+// 步骤4：返回结果
+Ok(decrypted)
+```
+
+### SQL 注释
+
+```rust
+/// 查询所有密码
+///
+/// 返回未删除的密码列表，按更新时间倒序排列
+const SQL_GET_ALL_PASSWORDS: &str = "
+    SELECT id, title, username, password_encrypted, url, notes, category_id, is_favorite, created_at, updated_at
+    FROM passwords
+    WHERE deleted_at IS NULL
+    ORDER BY updated_at DESC
+";
+```
+
+### Cargo.toml 注释
+
+```toml
+[dependencies]
+# Tauri 核心
+tauri = { version = "2", features = [] }
+
+# 数据库
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+
+# 加密
+aes-gcm = "0.10"  # AES-256-GCM 加密
+argon2 = "0.5"    # 密码哈希
+```
+
+### 常量注释
+
+```rust
+/// 密码最小长度
+const MIN_PASSWORD_LENGTH: usize = 8;
+
+/// 密码最大长度
+const MAX_PASSWORD_LENGTH: usize = 64;
+
+/// 自动锁定默认时间（分钟）
+const DEFAULT_AUTO_LOCK_MINUTES: u64 = 5;
+
+/// 剪贴板清除默认时间（秒）
+const DEFAULT_CLIPBOARD_CLEAR_SECONDS: u64 = 30;
+```
+
+---
+
+## 文件组织
+
+### 目录结构注释
+
+在 README.md 中保持目录结构说明更新。
+
+### 前端命名规范
+
+- 使用 PascalCase 命名组件文件（MyComponent.vue）
+- 使用 camelCase 命名 composable 文件（useXxx.ts）
+- 使用 camelCase 命名 store 文件（xxxStore.ts）
+
+### Rust 命名规范
+
+- 使用 snake_case 命名文件（my_module.rs）
+- 使用 snake_case 命名函数和变量（my_function）
+- 使用 PascalCase 命名结构体和枚举（MyStruct）
+- 使用 SCREAMING_SNAKE_CASE 命名常量（MY_CONSTANT）
+- 使用 snake_case 命名模块（my_module）
+
+## 代码风格
+
+### 前端
+
+- 使用 TypeScript 严格类型
+- 优先使用 Composition API
+- 使用 `<script setup>` 语法
+- 保持组件单一职责
+
+### Rust
+
+- 使用 `rustfmt` 格式化代码
+- 使用 `clippy` 检查代码质量
+- 优先使用 `Result` 处理错误
+- 使用 `?` 操作符传播错误
+- 避免 `unwrap()`，除非确定不会出错
+- 使用 `derive` 宏自动实现常用 trait
+
+## 提交规范
+
+- 使用 TypeScript 严格类型
+- 优先使用 Composition API
+- 使用 `<script setup>` 语法
+- 保持组件单一职责
+
+## 提交规范
+
+提交信息格式：
+```
+类型(范围): 简短描述
+
+详细描述（可选）
+
+相关Issue（可选）
+```
+
+类型：
+- feat: 新功能
+- fix: 修复
+- docs: 文档
+- style: 格式
+- refactor: 重构
+- test: 测试
+- chore: 构建/工具
