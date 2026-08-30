@@ -1,16 +1,15 @@
 <!--
-  CountdownWindow.vue - 倒计时悬浮窗口
+  CountdownWindow.vue - 全局倒计时悬浮窗口
 
-  只显示倒计时数字，点击数字关闭窗口。
+  在鼠标位置显示的倒计时，用于剪贴板清除。
+  点击数字取消倒计时并关闭窗口。
 -->
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { getCurrentWindow } from '@tauri-apps/api/window'
-import { listen } from '@tauri-apps/api/event'
 
 /** 剩余秒数 */
-const remaining = ref(30)
+const remaining = ref(10)
 
 /** 计时器 */
 let timer: ReturnType<typeof setInterval> | null = null
@@ -18,7 +17,9 @@ let timer: ReturnType<typeof setInterval> | null = null
 /**
  * 开始倒计时
  */
-const startCountdown = (seconds: number = 30) => {
+const startCountdown = (seconds: number = 10) => {
+  console.log('Starting countdown with', seconds, 'seconds')
+
   // 先停止之前的计时器
   if (timer) {
     clearInterval(timer)
@@ -52,35 +53,96 @@ const stopCountdown = () => {
  */
 const clearClipboard = async () => {
   try {
-    await navigator.clipboard.writeText('')
-  } catch {
-    // 忽略错误
+    // 使用 Tauri 剪贴板插件清除
+    const { writeText } = await import('@tauri-apps/plugin-clipboard-manager')
+    await writeText('')
+    console.log('Clipboard cleared')
+  } catch (e) {
+    console.error('Failed to clear clipboard with plugin, trying fallback:', e)
+    try {
+      // 备用方案：通过 invoke 调用后端
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('clear_clipboard')
+    } catch (e2) {
+      console.error('Fallback also failed:', e2)
+    }
   }
-  getCurrentWindow().close()
+  closeWindow()
+}
+
+/**
+ * 关闭窗口
+ */
+const closeWindow = async () => {
+  console.log('closeWindow called')
+
+  // 先停止光标跟随（不等待结果）
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    invoke('stop_follow_cursor').catch(err => console.warn('stop_follow_cursor failed:', err))
+  } catch (e) {
+    console.warn('Failed to invoke stop_follow_cursor:', e)
+  }
+
+  // 关闭窗口（必须执行）
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    console.log('Closing window...')
+    await win.close()
+    console.log('Window closed')
+  } catch (e) {
+    console.error('Failed to close window:', e)
+    // 尝试隐藏
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window')
+      await getCurrentWindow().hide()
+    } catch (e2) {
+      console.error('Failed to hide window:', e2)
+    }
+  }
 }
 
 /**
  * 点击数字取消倒计时并关闭
  */
-const handleClick = () => {
+const handleClick = async () => {
+  console.log('Countdown clicked, closing window...')
   stopCountdown()
-  getCurrentWindow().close()
+  await closeWindow()
 }
 
 /**
  * 初始化
  */
 onMounted(async () => {
-  // 监听启动倒计时事件
-  await listen<{ seconds: number }>('start-countdown', (event) => {
-    startCountdown(event.payload.seconds || 30)
-  })
+  try {
+    // 动态导入 Tauri API
+    const { invoke } = await import('@tauri-apps/api/core')
+    const { listen } = await import('@tauri-apps/api/event')
 
-  // 监听取消倒计时事件
-  await listen('cancel-countdown', () => {
-    stopCountdown()
-    getCurrentWindow().close()
-  })
+    // 从后端获取倒计时秒数并启动
+    const seconds = await invoke<number>('get_countdown_seconds')
+    console.log('Got countdown seconds from backend:', seconds)
+    startCountdown(seconds)
+
+    // 监听重置倒计时事件
+    await listen<{ seconds: number }>('reset-countdown', (event) => {
+      console.log('Received reset-countdown event:', event.payload)
+      startCountdown(event.payload.seconds || 10)
+    })
+
+    // 监听取消倒计时事件
+    await listen('cancel-countdown', () => {
+      console.log('Received cancel-countdown event')
+      stopCountdown()
+      closeWindow()
+    })
+
+    console.log('Countdown window initialized')
+  } catch (e) {
+    console.error('Failed to initialize countdown window:', e)
+  }
 })
 
 onUnmounted(() => {
@@ -90,7 +152,9 @@ onUnmounted(() => {
 
 <template>
   <div class="countdown-container" @click="handleClick">
-    <span class="countdown-number">{{ remaining }}</span>
+    <div class="countdown-circle">
+      <span class="countdown-number">{{ remaining }}</span>
+    </div>
   </div>
 </template>
 
@@ -102,32 +166,46 @@ onUnmounted(() => {
 }
 
 html, body {
+  width: 16px;
+  height: 16px;
   overflow: hidden;
   background: transparent;
+  -webkit-app-region: no-drag;
 }
 </style>
 
 <style scoped>
 .countdown-container {
-  width: 100%;
-  height: 100%;
+  width: 16px;
+  height: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(30, 30, 30, 0.9);
-  border-radius: 6px;
+  background: transparent;
   cursor: pointer;
   user-select: none;
 }
 
-.countdown-container:hover {
-  background: rgba(50, 50, 50, 0.95);
+.countdown-circle {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(37, 99, 235, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.countdown-circle:hover {
+  transform: scale(1.2);
+  background: rgba(59, 130, 246, 0.95);
 }
 
 .countdown-number {
-  font-size: 20px;
-  font-weight: bold;
-  color: #60a5fa;
-  font-family: monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffffff;
+  font-family: 'SF Mono', 'Fira Code', monospace;
 }
 </style>

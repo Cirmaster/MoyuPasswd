@@ -110,7 +110,7 @@ onUnmounted(() => {
         class="fixed z-[99999] pointer-events-none"
         :style="{
           left: `${x + 15}px`,
-          top: `${y - 30}px`,
+          top: `${y + 15}px`,
         }"
       >
         <div class="flex items-center justify-center w-8 h-8 rounded-full bg-blue-600/90 shadow-lg">

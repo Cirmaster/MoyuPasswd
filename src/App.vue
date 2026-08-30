@@ -16,20 +16,9 @@
 import { onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 import { useTheme } from '@/composables/useTheme'
-import { useCountdown } from '@/composables/useCountdown'
-import CaretCountdown from '@/components/CaretCountdown.vue'
 
 /** 主题管理 */
 const { initTheme } = useTheme()
-
-/** 全局倒计时 */
-const {
-  showCountdown,
-  countdownSeconds,
-  countdownX,
-  countdownY,
-  onCountdownEnd,
-} = useCountdown()
 
 /**
  * 组件挂载时初始化主题
@@ -41,11 +30,4 @@ onMounted(() => {
 
 <template>
   <RouterView />
-  <CaretCountdown
-    v-model:show="showCountdown"
-    :seconds="countdownSeconds"
-    :x="countdownX"
-    :y="countdownY"
-    @countdown-end="onCountdownEnd"
-  />
 </template>

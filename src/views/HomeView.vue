@@ -40,7 +40,6 @@ import {
 import { usePasswordStore, type PasswordItem } from '@/stores/password'
 import { useTheme } from '@/composables/useTheme'
 import { useAutoLock } from '@/composables/useAutoLock'
-import { useCountdown } from '@/composables/useCountdown'
 import PasswordFormDialog from '@/components/PasswordFormDialog.vue'
 import PasswordGenerator from '@/components/PasswordGenerator.vue'
 import QuickSearch from '@/components/QuickSearch.vue'
@@ -58,9 +57,6 @@ const { isDark, toggleTheme } = useTheme()
 /** 自动锁定 */
 useAutoLock()
 
-/** 全局倒计时 */
-const { startCountdownAt } = useCountdown()
-
 /**
  * 复制文本到剪贴板（带自动清除）
  * @param text - 要复制的文本
@@ -71,11 +67,15 @@ const copyToClipboard = async (text: string, event?: MouseEvent) => {
     await navigator.clipboard.writeText(text)
     showToast('success', '已复制')
 
-    // 获取鼠标位置显示倒计时
-    const x = event?.clientX ?? window.innerWidth / 2
-    const y = event?.clientY ?? window.innerHeight / 2
-    startCountdownAt(x, y, 10)
-  } catch {
+    // 获取鼠标位置并显示全局倒计时窗口
+    const x = event?.screenX ?? window.screen.width / 2
+    const y = event?.screenY ?? window.screen.height / 2
+    await invoke('show_countdown', { seconds: 10, x, y })
+
+    // 启动光标跟随
+    await invoke('start_follow_cursor')
+  } catch (e) {
+    console.error('Copy failed:', e)
     showToast('error', '复制失败')
   }
 }
@@ -169,14 +169,6 @@ const openAddDialog = () => {
 const openEditDialog = (item: PasswordItem) => {
   editingItem.value = item
   showFormDialog.value = true
-}
-
-/**
- * 复制文本到剪贴板（带自动清除）
- * @param text - 要复制的文本
- */
-const copyToClipboard = async (text: string) => {
-  await copyWithAutoClear(text, showToast)
 }
 
 /**

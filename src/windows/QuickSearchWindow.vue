@@ -18,7 +18,6 @@ import { listen } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { useCountdown } from '@/composables/useCountdown'
 import Toast from '@/components/Toast.vue'
 
 /** 密码列表（实时从后端获取，不缓存） */
@@ -62,9 +61,6 @@ const toast = ref({
   type: 'success' as 'success' | 'error' | 'info',
   message: '',
 })
-
-/** 全局倒计时 */
-const { startCountdown } = useCountdown()
 
 /**
  * 搜索结果
@@ -180,8 +176,13 @@ const copyAndClose = async (text: string) => {
     await navigator.clipboard.writeText(text)
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
 
-    // 启动全局倒计时
-    startCountdown(10)
+    // 启动全局倒计时窗口（显示在屏幕中央）
+    const x = window.screen.width / 2
+    const y = window.screen.height / 2
+    await invoke('show_countdown', { seconds: 10, x, y })
+
+    // 启动光标跟随
+    await invoke('start_follow_cursor')
 
     // 延迟关闭窗口
     setTimeout(async () => {
