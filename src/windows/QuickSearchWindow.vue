@@ -20,17 +20,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import Toast from '@/components/Toast.vue'
 
-/** 密码列表（实时从后端获取，不缓存） */
-const passwords = ref<Array<{
-  id: string
-  title: string
-  username: string
-  password: string
-  url?: string
-  category: string
-  is_favorite: boolean
-}>>([])
-
 /** 搜索关键词 */
 const searchQuery = ref('')
 
@@ -38,7 +27,7 @@ const searchQuery = ref('')
 const selectedIndex = ref(0)
 
 /** 加载状态 */
-const loading = ref(true)
+const loading = ref(false)
 
 /** 主题：light 或 dark */
 const theme = ref<'light' | 'dark'>('dark')
@@ -62,51 +51,29 @@ const toast = ref({
   message: '',
 })
 
-/**
- * 搜索结果
- */
-const results = computed(() => {
-  if (!searchQuery.value) return passwords.value.slice(0, 8)
-  const query = searchQuery.value.toLowerCase()
-  return passwords.value
-    .filter(
-      (p) =>
-        p.title.toLowerCase().includes(query) ||
-        p.username.toLowerCase().includes(query) ||
-        p.url?.toLowerCase().includes(query),
-    )
-    .slice(0, 8)
-})
+/** 搜索结果（不缓存，每次实时查询） */
+const results = ref<Array<{
+  id: string
+  title: string
+  username: string
+  password: string
+  url?: string
+  category: string
+  is_favorite: boolean
+}>>([])
 
 /**
- * 检查解锁状态（实时查询后端）
+ * 实时查询后端（不缓存数据）
  */
-const checkUnlockStatus = async () => {
-  try {
-    isUnlocked.value = await invoke<boolean>('is_unlocked')
-
-    // 如果已解锁，实时加载密码数据
-    if (isUnlocked.value) {
-      await loadPasswords()
-    } else {
-      // 未解锁，清除本地数据
-      passwords.value = []
-      searchQuery.value = ''
-    }
-  } catch (e) {
-    console.error('检查解锁状态失败:', e)
-    isUnlocked.value = false
-    passwords.value = []
+const searchPasswords = async (query: string) => {
+  if (!isUnlocked.value) {
+    results.value = []
+    return
   }
-}
 
-/**
- * 从后端实时加载密码数据（不使用缓存）
- */
-const loadPasswords = async () => {
   loading.value = true
   try {
-    // 每次都从后端实时获取，不使用缓存
+    // 每次都直接查后端，不缓存
     const result = await invoke<Array<{
       id: string
       title: string
@@ -116,16 +83,38 @@ const loadPasswords = async () => {
       category: string
       is_favorite: boolean
     }>>('get_passwords', {
-      search: null,
+      search: query || null,
       category: null,
     })
 
-    passwords.value = result
+    results.value = result.slice(0, 8)
   } catch (e) {
-    console.error('加载密码失败:', e)
-    passwords.value = []
+    console.error('查询密码失败:', e)
+    results.value = []
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 检查解锁状态（实时查询后端）
+ */
+const checkUnlockStatus = async () => {
+  try {
+    isUnlocked.value = await invoke<boolean>('is_unlocked')
+
+    // 如果已解锁，初始化查询
+    if (isUnlocked.value) {
+      await searchPasswords('')
+    } else {
+      // 未解锁，清除数据
+      results.value = []
+      searchQuery.value = ''
+    }
+  } catch (e) {
+    console.error('检查解锁状态失败:', e)
+    isUnlocked.value = false
+    results.value = []
   }
 }
 
@@ -148,8 +137,8 @@ const handleUnlock = async () => {
 
     if (isValid) {
       isUnlocked.value = true
-      // 解锁后实时加载密码数据
-      await loadPasswords()
+      // 解锁后实时查询
+      await searchPasswords('')
 
       // 解锁后聚焦搜索框
       setTimeout(() => {
@@ -241,10 +230,12 @@ const scrollToSelected = () => {
 }
 
 /**
- * 监听搜索词变化，重置选中索引
+ * 监听搜索词变化，实时查询后端（不缓存）
  */
-watch(searchQuery, () => {
+watch(searchQuery, (newQuery) => {
   selectedIndex.value = 0
+  // 搜索词变化时实时查询后端
+  searchPasswords(newQuery)
 })
 
 /**
@@ -267,9 +258,18 @@ onMounted(async () => {
   await listen('app-locked', () => {
     // 收到锁定事件，立即清除数据
     isUnlocked.value = false
-    passwords.value = []
+    results.value = []
     searchQuery.value = ''
     masterPassword.value = ''
+  })
+
+  // 窗口获得焦点时，实时查询一次（确保显示最新数据）
+  const currentWindow = getCurrentWindow()
+  currentWindow.onFocusChanged(({ payload: focused }) => {
+    if (focused && isUnlocked.value) {
+      // 窗口获得焦点时，实时查询
+      searchPasswords(searchQuery.value)
+    }
   })
 
   // 添加全局键盘事件监听
