@@ -9,7 +9,16 @@ import { ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 /**
- * 快捷键配置接口
+ * 后端快捷键配置接口（snake_case）
+ */
+interface BackendShortcutConfig {
+  quick_search: string
+  quick_add: string
+  password_generator: string
+}
+
+/**
+ * 前端快捷键配置接口（camelCase）
  */
 export interface ShortcutConfig {
   /** 快速搜索快捷键 */
@@ -30,6 +39,28 @@ const defaultShortcuts: ShortcutConfig = {
 }
 
 /**
+ * 将后端配置转换为前端配置
+ */
+function toFrontendConfig(backend: BackendShortcutConfig): ShortcutConfig {
+  return {
+    quickSearch: backend.quick_search,
+    quickAdd: backend.quick_add,
+    passwordGenerator: backend.password_generator,
+  }
+}
+
+/**
+ * 将前端配置转换为后端配置
+ */
+function toBackendConfig(frontend: ShortcutConfig): BackendShortcutConfig {
+  return {
+    quick_search: frontend.quickSearch,
+    quick_add: frontend.quickAdd,
+    password_generator: frontend.passwordGenerator,
+  }
+}
+
+/**
  * 快捷键配置 Store
  */
 export const useShortcutStore = defineStore('shortcuts', () => {
@@ -43,9 +74,13 @@ export const useShortcutStore = defineStore('shortcuts', () => {
    */
   async function loadShortcuts() {
     try {
-      const saved = await invoke<ShortcutConfig | null>('get_shortcuts')
+      console.log('加载快捷键配置...')
+      const saved = await invoke<BackendShortcutConfig>('get_shortcuts')
+      console.log('后端返回的快捷键配置:', saved)
       if (saved) {
-        shortcuts.value = saved
+        const frontendConfig = toFrontendConfig(saved)
+        console.log('转换后的前端配置:', frontendConfig)
+        shortcuts.value = frontendConfig
       }
     } catch (e) {
       console.error('加载快捷键配置失败:', e)
@@ -57,7 +92,15 @@ export const useShortcutStore = defineStore('shortcuts', () => {
    */
   async function saveShortcuts() {
     try {
-      await invoke('save_shortcuts', { shortcuts: shortcuts.value })
+      const backendConfig = toBackendConfig(shortcuts.value)
+      console.log('保存快捷键配置:', backendConfig)
+      await invoke('save_shortcuts', { shortcuts: backendConfig })
+      console.log('快捷键配置保存成功')
+      
+      // 动态更新全局快捷键
+      console.log('正在更新全局快捷键...')
+      await invoke('update_global_shortcuts')
+      console.log('全局快捷键更新成功')
     } catch (e) {
       console.error('保存快捷键配置失败:', e)
       throw e
@@ -70,7 +113,8 @@ export const useShortcutStore = defineStore('shortcuts', () => {
    * @param value - 快捷键值
    */
   async function updateShortcut(key: keyof ShortcutConfig, value: string) {
-    shortcuts.value[key] = value
+    console.log(`更新快捷键: ${key} = ${value}`)
+    shortcuts.value = { ...shortcuts.value, [key]: value }
     await saveShortcuts()
   }
 

@@ -14,7 +14,7 @@
 -->
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
@@ -34,7 +34,12 @@ const { theme, setTheme } = useTheme()
 
 /** 快捷键配置 */
 const shortcutStore = useShortcutStore()
-const { shortcuts, formatShortcut } = shortcutStore
+
+/** 快捷键配置（计算属性，保持响应性） */
+const shortcuts = computed(() => shortcutStore.shortcuts)
+
+/** 格式化快捷键显示 */
+const formatShortcut = shortcutStore.formatShortcut
 
 /** 快捷键编辑状态 */
 const editingShortcut = ref<string | null>(null)
@@ -51,27 +56,35 @@ onMounted(async () => {
       auto_lock_time: number
       clipboard_clear_time: number
       auto_start: boolean
-      minimize_to_tray: boolean
+      close_to_tray: boolean
       show_password_strength: boolean
+      require_master_password: boolean
     }>('get_settings')
 
-    // 应用设置
+    // 应用通用设置
     settings.value.language = savedSettings.language
     settings.value.autoStart = savedSettings.auto_start
-    settings.value.minimizeToTray = savedSettings.minimize_to_tray
+    settings.value.closeToTray = savedSettings.close_to_tray ?? true
 
+    // 应用安全设置
     security.value.autoLockTime = savedSettings.auto_lock_time
     security.value.clipboardClearTime = savedSettings.clipboard_clear_time
     security.value.showPasswordStrength = savedSettings.show_password_strength
+    security.value.requireMasterPassword = savedSettings.require_master_password ?? true
 
     // 应用主题
     if (savedSettings.theme && savedSettings.theme !== theme.value) {
       setTheme(savedSettings.theme as 'light' | 'dark' | 'system')
     }
 
-    // 获取开机自启状态
-    const autoStartEnabled = await invoke<boolean>('is_auto_start_enabled')
-    settings.value.autoStart = autoStartEnabled
+    // 获取开机自启状态（允许失败）
+    try {
+      const autoStartEnabled = await invoke<boolean>('is_auto_start_enabled')
+      settings.value.autoStart = autoStartEnabled
+    } catch (autoStartError) {
+      console.warn('获取开机自启状态失败:', autoStartError)
+      settings.value.autoStart = false
+    }
 
     // 加载快捷键配置
     await shortcutStore.loadShortcuts()
@@ -104,8 +117,6 @@ const settings = ref({
   language: 'zh-CN',
   /** 是否开机自启 */
   autoStart: false,
-  /** 是否最小化到系统托盘 */
-  minimizeToTray: true,
   /** 是否关闭时最小化到托盘（而不是退出） */
   closeToTray: true,
 })
@@ -143,9 +154,58 @@ const changingPassword = ref(false)
  * 开始编辑快捷键
  * @param key - 快捷键名称
  */
-const startEditShortcut = (key: string) => {
+const startEditShortcut = async (key: string) => {
   editingShortcut.value = key
-  shortcutInput.value = ''
+  // 初始化显示当前快捷键
+  const currentShortcut = shortcuts.value[key as keyof typeof shortcuts.value]
+  shortcutInput.value = currentShortcut || ''
+  
+  // 注销全局快捷键，防止编辑时触发
+  try {
+    await invoke('unregister_all_shortcuts')
+  } catch (e) {
+    console.warn('注销快捷键失败:', e)
+  }
+  
+  // 强制聚焦输入框
+  nextTick(() => {
+    forceFocusInput()
+  })
+}
+
+/**
+ * 强制聚焦输入框（编辑模式下锁定焦点）
+ */
+const forceFocusInput = () => {
+  const input = document.querySelector('[data-shortcut-input]') as HTMLInputElement
+  if (input) {
+    input.focus()
+  }
+}
+
+/**
+ * 输入框失去焦点时，如果还在编辑模式，强制重新聚焦
+ */
+const handleInputBlur = () => {
+  if (editingShortcut.value) {
+    // 延迟一下，避免和其他点击事件冲突
+    setTimeout(() => {
+      if (editingShortcut.value) {
+        forceFocusInput()
+      }
+    }, 10)
+  }
+}
+
+/**
+ * 标准化快捷键格式
+ * 将 Ctrl 转换为 CmdOrCtrl，确保格式一致
+ */
+const normalizeShortcut = (shortcut: string): string => {
+  return shortcut
+    .replace(/^Ctrl\+/, 'CmdOrCtrl+')
+    .replace(/\+Ctrl\+/, '+CmdOrCtrl+')
+    .trim()
 }
 
 /**
@@ -153,51 +213,212 @@ const startEditShortcut = (key: string) => {
  * @param key - 快捷键名称
  */
 const saveShortcut = async (key: 'quickSearch' | 'quickAdd' | 'passwordGenerator') => {
-  if (!shortcutInput.value) {
-    showToast('error', '请按下快捷键')
+  if (!shortcutInput.value || shortcutInput.value.endsWith('...')) {
+    showToast('error', '请按下完整的快捷键组合')
+    return
+  }
+
+  // 标准化快捷键格式
+  const normalizedShortcut = normalizeShortcut(shortcutInput.value)
+
+  // 验证快捷键格式（至少包含一个修饰键+一个普通键）
+  const parts = normalizedShortcut.split('+')
+  const modifiers = ['CmdOrCtrl', 'Shift', 'Alt', 'Super', 'Ctrl', 'Meta']
+  const hasModifier = parts.some(p => modifiers.includes(p))
+  const hasKey = parts.some(p => !modifiers.includes(p) && p.length > 0)
+  
+  if (!hasModifier || !hasKey) {
+    showToast('error', '快捷键必须包含修饰键（Ctrl/Shift/Alt）和一个普通键')
     return
   }
 
   try {
-    await shortcutStore.updateShortcut(key, shortcutInput.value)
+    console.log(`保存快捷键: ${key} = ${normalizedShortcut}`)
+    // 直接调用 store 的 updateShortcut 方法（会自动重新注册全局快捷键）
+    await shortcutStore.updateShortcut(key, normalizedShortcut)
+    // 退出编辑模式
     editingShortcut.value = null
-    showToast('success', '快捷键已保存，重启应用后生效')
+    shortcutInput.value = ''
+    showToast('success', '快捷键已保存并立即生效')
   } catch (e) {
+    console.error('保存快捷键失败:', e)
     showToast('error', '保存失败: ' + String(e))
+    // 保存失败也要重新注册全局快捷键
+    try {
+      await invoke('update_global_shortcuts')
+    } catch (e2) {
+      console.warn('重新注册快捷键失败:', e2)
+    }
   }
 }
 
 /**
  * 取消编辑快捷键
  */
-const cancelEditShortcut = () => {
+const cancelEditShortcut = async () => {
   editingShortcut.value = null
   shortcutInput.value = ''
+  
+  // 重新注册全局快捷键
+  try {
+    await invoke('update_global_shortcuts')
+  } catch (e) {
+    console.warn('重新注册快捷键失败:', e)
+  }
 }
 
 /**
- * 处理快捷键输入
+ * 全局键盘事件拦截器（在编辑模式下阻止系统快捷键）
+ */
+const globalKeydownInterceptor = (e: KeyboardEvent) => {
+  if (editingShortcut.value) {
+    // 检查事件目标是否是快捷键输入框
+    const target = e.target as HTMLElement
+    const isShortcutInput = target.hasAttribute('data-shortcut-input')
+    
+    // 如果是快捷键输入框，不拦截事件，让它正常处理
+    if (isShortcutInput) {
+      return
+    }
+    
+    // 否则拦截事件，防止触发系统/应用快捷键
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.stopImmediatePropagation) {
+      e.stopImmediatePropagation()
+    }
+  }
+}
+
+/**
+ * 监听编辑状态变化，启用/禁用全局拦截
+ */
+watch(editingShortcut, (newValue) => {
+  if (newValue) {
+    // 编辑模式：启用全局拦截
+    document.addEventListener('keydown', globalKeydownInterceptor, { capture: true })
+  } else {
+    // 非编辑模式：禁用全局拦截
+    document.removeEventListener('keydown', globalKeydownInterceptor, { capture: true })
+  }
+})
+
+/**
+ * 组件卸载时确保移除拦截器
+ */
+onUnmounted(() => {
+  document.removeEventListener('keydown', globalKeydownInterceptor, { capture: true })
+})
+
+/**
+ * 预设快捷键列表（避免与系统快捷键冲突）
+ */
+const presetShortcuts = [
+  { label: 'Ctrl + K', value: 'CmdOrCtrl+K' },
+  { label: 'Ctrl + G', value: 'CmdOrCtrl+G' },
+  { label: 'Ctrl + M', value: 'CmdOrCtrl+M' },
+  { label: 'Ctrl + Shift + K', value: 'CmdOrCtrl+Shift+K' },
+  { label: 'Ctrl + Shift + A', value: 'CmdOrCtrl+Shift+A' },
+  { label: 'Ctrl + Shift + D', value: 'CmdOrCtrl+Shift+D' },
+  { label: 'Ctrl + Shift + M', value: 'CmdOrCtrl+Shift+M' },
+  { label: 'Ctrl + Alt + K', value: 'CmdOrCtrl+Alt+K' },
+  { label: 'Ctrl + Alt + G', value: 'CmdOrCtrl+Alt+G' },
+  { label: 'Ctrl + Alt + A', value: 'CmdOrCtrl+Alt+A' },
+]
+
+/**
+ * 选择预设快捷键
+ */
+const selectPresetShortcut = (value: string) => {
+  shortcutInput.value = value
+}
+
+/**
+ * 不可使用的系统快捷键列表
+ */
+const reservedShortcuts = [
+  'Ctrl+C', 'Ctrl+V', 'Ctrl+X', 'Ctrl+Z', 'Ctrl+A',  // 剪贴板和撤销
+  'Ctrl+S', 'Ctrl+P', 'Ctrl+F', 'Ctrl+N', 'Ctrl+O',  // 常用系统快捷键
+  'Alt+Tab', 'Alt+F4', 'Ctrl+Alt+Del',                  // 系统切换
+  'CmdOrCtrl+C', 'CmdOrCtrl+V', 'CmdOrCtrl+X', 'CmdOrCtrl+Z', 'CmdOrCtrl+A',
+  'CmdOrCtrl+S', 'CmdOrCtrl+P', 'CmdOrCtrl+F', 'CmdOrCtrl+N', 'CmdOrCtrl+O',
+]
+
+/**
+ * 检查是否为保留快捷键
+ */
+const isReservedShortcut = (shortcut: string): boolean => {
+  const normalized = normalizeShortcut(shortcut)
+  return reservedShortcuts.some(reserved => 
+    normalizeShortcut(reserved) === normalized
+  )
+}
+
+/**
+ * 处理快捷键输入（在 capture 阶段拦截）
  * @param e - 键盘事件
  */
 const handleShortcutKeydown = (e: KeyboardEvent) => {
+  console.log('键盘事件:', e.key, e.ctrlKey, e.shiftKey, e.altKey, e.metaKey)
+  
+  // 阻止事件冒泡和默认行为，防止触发系统/应用快捷键
   e.preventDefault()
+  e.stopPropagation()
+  if (e.stopImmediatePropagation) {
+    e.stopImmediatePropagation()
+  }
 
   const parts: string[] = []
 
-  if (e.ctrlKey) parts.push('CmdOrCtrl')
+  // 收集修饰键（统一使用 CmdOrCtrl 表示 Ctrl/Cmd）
+  if (e.ctrlKey || e.metaKey) parts.push('CmdOrCtrl')
   if (e.shiftKey) parts.push('Shift')
   if (e.altKey) parts.push('Alt')
-  if (e.metaKey) parts.push('Super')
 
-  // 忽略单独的修饰键
+  // 单独的修饰键时，显示当前已按下的修饰键
   if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) {
+    if (parts.length > 0) {
+      shortcutInput.value = parts.join('+') + '+...'
+    }
     return
   }
 
-  // 添加按键
-  parts.push(e.key.toUpperCase())
+  // 忽略只有修饰键没有普通键的情况
+  if (parts.length === 0) {
+    return
+  }
 
-  shortcutInput.value = parts.join('+')
+  // 添加普通按键
+  // 特殊按键映射
+  const keyMap: Record<string, string> = {
+    ' ': 'Space',
+    'ArrowUp': 'Up',
+    'ArrowDown': 'Down',
+    'ArrowLeft': 'Left',
+    'ArrowRight': 'Right',
+    'Escape': 'Esc',
+    'Delete': 'Del',
+    'Backspace': 'Backspace',
+    'Enter': 'Enter',
+    'Tab': 'Tab',
+    'Home': 'Home',
+    'End': 'End',
+    'PageUp': 'PageUp',
+    'PageDown': 'PageDown',
+    'Insert': 'Ins',
+  }
+  
+  const keyName = keyMap[e.key] || (e.key.length === 1 ? e.key.toUpperCase() : e.key)
+  parts.push(keyName)
+
+  const newShortcut = parts.join('+')
+  console.log('生成的快捷键:', newShortcut)
+  shortcutInput.value = newShortcut
+  
+  // 检查是否为保留快捷键
+  if (isReservedShortcut(newShortcut)) {
+    showToast('error', '此快捷键是系统保留的，请选择其他组合')
+  }
 }
 
 /**
@@ -206,7 +427,7 @@ const handleShortcutKeydown = (e: KeyboardEvent) => {
 const resetShortcuts = async () => {
   try {
     await shortcutStore.resetToDefault()
-    showToast('success', '已重置为默认快捷键，重启应用后生效')
+    showToast('success', '已重置为默认快捷键')
   } catch (e) {
     showToast('error', '重置失败: ' + String(e))
   }
@@ -225,13 +446,19 @@ const handleSaveGeneral = async () => {
         auto_lock_time: security.value.autoLockTime,
         clipboard_clear_time: security.value.clipboardClearTime,
         auto_start: settings.value.autoStart,
-        minimize_to_tray: settings.value.minimizeToTray,
+        close_to_tray: settings.value.closeToTray,
         show_password_strength: security.value.showPasswordStrength,
+        require_master_password: security.value.requireMasterPassword,
       },
     })
 
-    // 设置开机自启
-    await invoke('set_auto_start', { enable: settings.value.autoStart })
+    // 设置开机自启（允许失败，不影响其他设置保存）
+    try {
+      await invoke('set_auto_start', { enable: settings.value.autoStart })
+    } catch (autoStartError) {
+      console.warn('设置开机自启失败（可能不支持）:', autoStartError)
+      // 不显示错误给用户，因为某些系统可能不支持
+    }
 
     showToast('success', '通用设置已保存')
   } catch (e) {
@@ -244,8 +471,19 @@ const handleSaveGeneral = async () => {
  */
 const handleSaveSecurity = async () => {
   try {
-    await invoke('save_setting', { key: 'autoLockTime', value: String(security.value.autoLockTime) })
-    await invoke('save_setting', { key: 'clipboardClearTime', value: String(security.value.clipboardClearTime) })
+    // 使用 save_settings 批量保存安全设置
+    await invoke('save_settings', {
+      settings: {
+        theme: theme.value,
+        language: settings.value.language,
+        auto_lock_time: security.value.autoLockTime,
+        clipboard_clear_time: security.value.clipboardClearTime,
+        auto_start: settings.value.autoStart,
+        close_to_tray: settings.value.closeToTray,
+        show_password_strength: security.value.showPasswordStrength,
+        require_master_password: security.value.requireMasterPassword,
+      },
+    })
     showToast('success', '安全设置已保存')
   } catch (e) {
     showToast('error', '保存失败: ' + String(e))
@@ -447,14 +685,14 @@ const handleImport = async () => {
                 />
               </div>
 
-              <!-- 最小化到托盘 -->
+              <!-- 关闭时最小化到托盘 -->
               <div class="flex items-center justify-between">
                 <div>
-                  <Label>最小化到托盘</Label>
-                  <p class="text-sm text-muted-foreground">关闭窗口时最小化到系统托盘</p>
+                  <Label>关闭时最小化到托盘</Label>
+                  <p class="text-sm text-muted-foreground">点击关闭按钮时最小化到托盘而不是退出</p>
                 </div>
                 <input
-                  v-model="settings.minimizeToTray"
+                  v-model="settings.closeToTray"
                   type="checkbox"
                   class="h-4 w-4"
                 />
@@ -594,95 +832,203 @@ const handleImport = async () => {
             <CardContent class="space-y-4">
               <div class="space-y-4">
                 <!-- 快速搜索 -->
-                <div class="flex items-center justify-between p-4 border rounded-lg">
-                  <div>
-                    <h3 class="font-medium">快速搜索</h3>
-                    <p class="text-sm text-muted-foreground">呼出快速搜索弹窗</p>
+                <div class="p-4 border rounded-lg">
+                  <div class="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 class="font-medium">快速搜索</h3>
+                      <p class="text-sm text-muted-foreground">呼出快速搜索弹窗</p>
+                    </div>
+                    <div
+                      v-if="editingShortcut !== 'quickSearch'"
+                      class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded cursor-pointer hover:bg-muted/80"
+                      @click="startEditShortcut('quickSearch')"
+                    >
+                      <template v-for="(part, i) in formatShortcut(shortcuts.quickSearch).split(' + ')" :key="i">
+                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
+                        <span v-if="i < formatShortcut(shortcuts.quickSearch).split(' + ').length - 1" class="text-muted-foreground">+</span>
+                      </template>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 ml-1 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      </svg>
+                    </div>
                   </div>
-                  <div v-if="editingShortcut === 'quickSearch'" class="flex items-center gap-2">
-                    <Input
-                      v-model="shortcutInput"
-                      class="w-48"
-                      placeholder="按下快捷键..."
-                      autofocus
-                      @keydown="handleShortcutKeydown"
-                    />
-                    <Button size="sm" @click="saveShortcut('quickSearch')">保存</Button>
-                    <Button size="sm" variant="outline" @click="cancelEditShortcut">取消</Button>
-                  </div>
-                  <div
-                    v-else
-                    class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded cursor-pointer hover:bg-muted/80"
-                    @click="startEditShortcut('quickSearch')"
-                  >
-                    <template v-for="(part, i) in formatShortcut(shortcuts.quickSearch).split(' + ')" :key="i">
-                      <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
-                      <span v-if="i < formatShortcut(shortcuts.quickSearch).split(' + ').length - 1" class="text-muted-foreground">+</span>
-                    </template>
+                  
+                  <!-- 编辑模式 -->
+                  <div v-if="editingShortcut === 'quickSearch'" class="space-y-3">
+                    <div class="flex items-center gap-2">
+                      <div class="relative flex-1">
+                        <Input
+                          v-model="shortcutInput"
+                          class="font-mono"
+                          :placeholder="'请按下组合键...'"
+                          readonly
+                          autofocus
+                          data-shortcut-input
+                          @keydown="handleShortcutKeydown"
+                          @blur="handleInputBlur"
+                        />
+                      </div>
+                      <Button size="sm" @click="saveShortcut('quickSearch')">保存</Button>
+                      <Button size="sm" variant="outline" @click="cancelEditShortcut">取消</Button>
+                    </div>
+                    
+                    <!-- 预设快捷键 -->
+                    <div>
+                      <p class="text-xs text-muted-foreground mb-2">或选择预设快捷键：</p>
+                      <div class="flex flex-wrap gap-2">
+                        <Button
+                          v-for="preset in presetShortcuts"
+                          :key="preset.value"
+                          size="sm"
+                          variant="outline"
+                          class="h-7 text-xs"
+                          :class="{ 'border-primary': shortcutInput === preset.value }"
+                          @click="selectPresetShortcut(preset.value)"
+                        >
+                          {{ preset.label }}
+                        </Button>
+                      </div>
+                    </div>
+                    
+                    <p class="text-xs text-muted-foreground">
+                      💡 提示：避免使用 Ctrl+C、Ctrl+V 等系统快捷键
+                    </p>
                   </div>
                 </div>
 
                 <!-- 快速添加 -->
-                <div class="flex items-center justify-between p-4 border rounded-lg">
-                  <div>
-                    <h3 class="font-medium">快速添加</h3>
-                    <p class="text-sm text-muted-foreground">呼出快速添加密码弹窗</p>
+                <div class="p-4 border rounded-lg">
+                  <div class="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 class="font-medium">快速添加</h3>
+                      <p class="text-sm text-muted-foreground">呼出快速添加密码弹窗</p>
+                    </div>
+                    <div
+                      v-if="editingShortcut !== 'quickAdd'"
+                      class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded cursor-pointer hover:bg-muted/80"
+                      @click="startEditShortcut('quickAdd')"
+                    >
+                      <template v-for="(part, i) in formatShortcut(shortcuts.quickAdd).split(' + ')" :key="i">
+                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
+                        <span v-if="i < formatShortcut(shortcuts.quickAdd).split(' + ').length - 1" class="text-muted-foreground">+</span>
+                      </template>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 ml-1 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      </svg>
+                    </div>
                   </div>
-                  <div v-if="editingShortcut === 'quickAdd'" class="flex items-center gap-2">
-                    <Input
-                      v-model="shortcutInput"
-                      class="w-48"
-                      placeholder="按下快捷键..."
-                      autofocus
-                      @keydown="handleShortcutKeydown"
-                    />
-                    <Button size="sm" @click="saveShortcut('quickAdd')">保存</Button>
-                    <Button size="sm" variant="outline" @click="cancelEditShortcut">取消</Button>
-                  </div>
-                  <div
-                    v-else
-                    class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded cursor-pointer hover:bg-muted/80"
-                    @click="startEditShortcut('quickAdd')"
-                  >
-                    <template v-for="(part, i) in formatShortcut(shortcuts.quickAdd).split(' + ')" :key="i">
-                      <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
-                      <span v-if="i < formatShortcut(shortcuts.quickAdd).split(' + ').length - 1" class="text-muted-foreground">+</span>
-                    </template>
+                  
+                  <!-- 编辑模式 -->
+                  <div v-if="editingShortcut === 'quickAdd'" class="space-y-3">
+                    <div class="flex items-center gap-2">
+                      <div class="relative flex-1">
+                        <Input
+                          v-model="shortcutInput"
+                          class="font-mono"
+                          :placeholder="'请按下组合键...'"
+                          readonly
+                          autofocus
+                          data-shortcut-input
+                          @keydown="handleShortcutKeydown"
+                          @blur="handleInputBlur"
+                        />
+                      </div>
+                      <Button size="sm" @click="saveShortcut('quickAdd')">保存</Button>
+                      <Button size="sm" variant="outline" @click="cancelEditShortcut">取消</Button>
+                    </div>
+                    
+                    <!-- 预设快捷键 -->
+                    <div>
+                      <p class="text-xs text-muted-foreground mb-2">或选择预设快捷键：</p>
+                      <div class="flex flex-wrap gap-2">
+                        <Button
+                          v-for="preset in presetShortcuts"
+                          :key="preset.value"
+                          size="sm"
+                          variant="outline"
+                          class="h-7 text-xs"
+                          :class="{ 'border-primary': shortcutInput === preset.value }"
+                          @click="selectPresetShortcut(preset.value)"
+                        >
+                          {{ preset.label }}
+                        </Button>
+                      </div>
+                    </div>
+                    
+                    <p class="text-xs text-muted-foreground">
+                      💡 提示：避免使用 Ctrl+C、Ctrl+V 等系统快捷键
+                    </p>
                   </div>
                 </div>
 
                 <!-- 密码生成器 -->
-                <div class="flex items-center justify-between p-4 border rounded-lg">
-                  <div>
-                    <h3 class="font-medium">密码生成器</h3>
-                    <p class="text-sm text-muted-foreground">呼出密码生成器弹窗</p>
+                <div class="p-4 border rounded-lg">
+                  <div class="flex items-center justify-between mb-3">
+                    <div>
+                      <h3 class="font-medium">密码生成器</h3>
+                      <p class="text-sm text-muted-foreground">呼出密码生成器弹窗</p>
+                    </div>
+                    <div
+                      v-if="editingShortcut !== 'passwordGenerator'"
+                      class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded cursor-pointer hover:bg-muted/80"
+                      @click="startEditShortcut('passwordGenerator')"
+                    >
+                      <template v-for="(part, i) in formatShortcut(shortcuts.passwordGenerator).split(' + ')" :key="i">
+                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
+                        <span v-if="i < formatShortcut(shortcuts.passwordGenerator).split(' + ').length - 1" class="text-muted-foreground">+</span>
+                      </template>
+                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 ml-1 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                      </svg>
+                    </div>
                   </div>
-                  <div v-if="editingShortcut === 'passwordGenerator'" class="flex items-center gap-2">
-                    <Input
-                      v-model="shortcutInput"
-                      class="w-48"
-                      placeholder="按下快捷键..."
-                      autofocus
-                      @keydown="handleShortcutKeydown"
-                    />
-                    <Button size="sm" @click="saveShortcut('passwordGenerator')">保存</Button>
-                    <Button size="sm" variant="outline" @click="cancelEditShortcut">取消</Button>
-                  </div>
-                  <div
-                    v-else
-                    class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded cursor-pointer hover:bg-muted/80"
-                    @click="startEditShortcut('passwordGenerator')"
-                  >
-                    <template v-for="(part, i) in formatShortcut(shortcuts.passwordGenerator).split(' + ')" :key="i">
-                      <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
-                      <span v-if="i < formatShortcut(shortcuts.passwordGenerator).split(' + ').length - 1" class="text-muted-foreground">+</span>
-                    </template>
+                  
+                  <!-- 编辑模式 -->
+                  <div v-if="editingShortcut === 'passwordGenerator'" class="space-y-3">
+                    <div class="flex items-center gap-2">
+                      <div class="relative flex-1">
+                        <Input
+                          v-model="shortcutInput"
+                          class="font-mono"
+                          :placeholder="'请按下组合键...'"
+                          readonly
+                          autofocus
+                          data-shortcut-input
+                          @keydown="handleShortcutKeydown"
+                          @blur="handleInputBlur"
+                        />
+                      </div>
+                      <Button size="sm" @click="saveShortcut('passwordGenerator')">保存</Button>
+                      <Button size="sm" variant="outline" @click="cancelEditShortcut">取消</Button>
+                    </div>
+                    
+                    <!-- 预设快捷键 -->
+                    <div>
+                      <p class="text-xs text-muted-foreground mb-2">或选择预设快捷键：</p>
+                      <div class="flex flex-wrap gap-2">
+                        <Button
+                          v-for="preset in presetShortcuts"
+                          :key="preset.value"
+                          size="sm"
+                          variant="outline"
+                          class="h-7 text-xs"
+                          :class="{ 'border-primary': shortcutInput === preset.value }"
+                          @click="selectPresetShortcut(preset.value)"
+                        >
+                          {{ preset.label }}
+                        </Button>
+                      </div>
+                    </div>
+                    
+                    <p class="text-xs text-muted-foreground">
+                      💡 提示：避免使用 Ctrl+C、Ctrl+V 等系统快捷键
+                    </p>
                   </div>
                 </div>
 
-                <div class="flex items-center justify-between">
+                <div class="flex items-center justify-between pt-2">
                   <p class="text-sm text-muted-foreground">
-                    点击快捷键可修改，修改后需重启应用生效。
+                    修改后立即生效
                   </p>
                   <Button variant="outline" size="sm" @click="resetShortcuts">
                     重置默认

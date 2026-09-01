@@ -11,7 +11,7 @@
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::state::AppState;
@@ -29,10 +29,12 @@ pub struct Settings {
     pub clipboard_clear_time: u64,
     /// 是否开机自启
     pub auto_start: bool,
-    /// 是否最小化到托盘
-    pub minimize_to_tray: bool,
+    /// 是否关闭时最小化到托盘
+    pub close_to_tray: bool,
     /// 是否显示密码强度
     pub show_password_strength: bool,
+    /// 启动时是否需要主密码
+    pub require_master_password: bool,
 }
 
 impl Default for Settings {
@@ -43,8 +45,9 @@ impl Default for Settings {
             auto_lock_time: 5,
             clipboard_clear_time: 30,
             auto_start: false,
-            minimize_to_tray: true,
+            close_to_tray: true,
             show_password_strength: true,
+            require_master_password: true,
         }
     }
 }
@@ -94,8 +97,9 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String
             "auto_lock_time" => settings.auto_lock_time = value.parse().unwrap_or(5),
             "clipboard_clear_time" => settings.clipboard_clear_time = value.parse().unwrap_or(30),
             "auto_start" => settings.auto_start = value == "true",
-            "minimize_to_tray" => settings.minimize_to_tray = value == "true",
+            "close_to_tray" => settings.close_to_tray = value == "true",
             "show_password_strength" => settings.show_password_strength = value == "true",
+            "require_master_password" => settings.require_master_password = value == "true",
             _ => {}
         }
     }
@@ -218,8 +222,9 @@ pub async fn save_settings(
         ("auto_lock_time", settings.auto_lock_time.to_string()),
         ("clipboard_clear_time", settings.clipboard_clear_time.to_string()),
         ("auto_start", settings.auto_start.to_string()),
-        ("minimize_to_tray", settings.minimize_to_tray.to_string()),
+        ("close_to_tray", settings.close_to_tray.to_string()),
         ("show_password_strength", settings.show_password_strength.to_string()),
+        ("require_master_password", settings.require_master_password.to_string()),
     ];
 
     for (key, value) in settings_vec {
@@ -282,4 +287,30 @@ pub async fn set_auto_start(enable: bool, app: tauri::AppHandle) -> Result<(), S
 pub async fn is_auto_start_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     let autostart_manager = app.autolaunch();
     autostart_manager.is_enabled().map_err(|e| e.to_string())
+}
+
+/// 最小化窗口到托盘
+///
+/// 隐藏主窗口，实现最小化到托盘的效果。
+///
+/// # Arguments
+///
+/// * `app` - Tauri 应用句柄
+///
+/// # Returns
+///
+/// 成功返回 Ok(())，失败返回错误信息
+///
+/// # 前端调用
+///
+/// ```typescript
+/// await invoke('minimize_to_tray');
+/// ```
+#[tauri::command]
+pub async fn minimize_to_tray(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide().map_err(|e| e.to_string())?;
+        log::info!("窗口已最小化到托盘");
+    }
+    Ok(())
 }

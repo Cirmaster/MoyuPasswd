@@ -55,7 +55,10 @@ const router = useRouter()
 const { isDark, toggleTheme } = useTheme()
 
 /** 自动锁定 */
-useAutoLock()
+const { setLockTimeout } = useAutoLock()
+
+/** 剪贴板清除时间（秒），从设置中读取 */
+const clipboardClearTime = ref(30)
 
 /**
  * 复制文本到剪贴板（带自动清除）
@@ -70,7 +73,7 @@ const copyToClipboard = async (text: string, event?: MouseEvent) => {
     // 获取鼠标位置并显示全局倒计时窗口
     const x = event?.screenX ?? window.screen.width / 2
     const y = event?.screenY ?? window.screen.height / 2
-    await invoke('show_countdown', { seconds: 10, x, y })
+    await invoke('show_countdown', { seconds: clipboardClearTime.value, x, y })
 
     // 启动光标跟随
     await invoke('start_follow_cursor')
@@ -98,6 +101,19 @@ onMounted(async () => {
     loadCategories(),
   ])
 
+  // 加载设置
+  try {
+    const savedSettings = await invoke<{
+      clipboard_clear_time: number
+      auto_lock_time: number
+    }>('get_settings')
+    clipboardClearTime.value = savedSettings.clipboard_clear_time || 30
+    // 设置自动锁定时间
+    setLockTimeout(savedSettings.auto_lock_time || 5)
+  } catch (e) {
+    console.warn('加载设置失败:', e)
+  }
+
   // 监听全局快捷键事件
   const { listen } = await import('@tauri-apps/api/event')
   await listen('show-quick-search', () => {
@@ -112,6 +128,11 @@ onMounted(async () => {
   // 监听快速添加快捷键事件
   await listen('show-quick-add', () => {
     showQuickAdd.value = true
+  })
+
+  // 监听密码生成器快捷键事件
+  await listen('show-password-generator', () => {
+    showGenerator.value = true
   })
 })
 
@@ -186,6 +207,18 @@ const togglePasswordVisibility = (id: string) => {
  */
 const formatDate = (timestamp: number) => {
   return new Date(timestamp).toLocaleDateString('zh-CN')
+}
+
+/**
+ * 最小化到托盘
+ * 隐藏窗口，显示在系统托盘
+ */
+const handleMinimizeToTray = async () => {
+  try {
+    await invoke('minimize_to_tray')
+  } catch (e) {
+    console.error('最小化到托盘失败:', e)
+  }
 }
 
 /**
@@ -283,6 +316,19 @@ const handleLock = async () => {
             stroke-width="2"
           >
             <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
+          </svg>
+        </Button>
+        <!-- 最小化到托盘按钮 -->
+        <Button variant="ghost" size="icon" @click="handleMinimizeToTray" title="最小化到托盘">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            class="h-5 w-5"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path d="M5 12h14" />
           </svg>
         </Button>
         <Button variant="ghost" size="icon" @click="handleLock">

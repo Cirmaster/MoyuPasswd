@@ -111,9 +111,39 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // 注册全局快捷键 Ctrl+K 呼出快速搜索窗口
-            let _handle = app.handle().clone();
-            app.global_shortcut().on_shortcut("CmdOrCtrl+K", move |app, _shortcut, event| {
+            // 从数据库读取快捷键配置
+            let app_state = app.state::<AppState>();
+            let shortcuts_config = {
+                let conn = app_state.db.conn();
+                let result = conn.query_row(
+                    "SELECT value FROM settings WHERE key = 'shortcuts'",
+                    [],
+                    |row| {
+                        let value: String = row.get(0)?;
+                        Ok(value)
+                    },
+                );
+                match result {
+                    Ok(json) => {
+                        log::info!("从数据库读取到快捷键 JSON: {}", json);
+                        serde_json::from_str::<commands::shortcuts::ShortcutConfig>(&json)
+                            .unwrap_or_default()
+                    }
+                    Err(e) => {
+                        log::warn!("读取快捷键配置失败，使用默认值: {:?}", e);
+                        commands::shortcuts::ShortcutConfig::default()
+                    }
+                }
+            };
+            
+            log::info!("最终快捷键配置: {:?}", shortcuts_config);
+            log::info!("快速搜索: {}", shortcuts_config.quick_search);
+            log::info!("快速添加: {}", shortcuts_config.quick_add);
+            log::info!("密码生成器: {}", shortcuts_config.password_generator);
+
+            // 注册全局快捷键 - 快速搜索
+            let quick_search_shortcut = shortcuts_config.quick_search.clone();
+            app.global_shortcut().on_shortcut(quick_search_shortcut.as_str(), move |app, _shortcut, event| {
                 if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
                     // 检查窗口是否已存在
                     if let Some(window) = app.get_webview_window("quick-search") {
@@ -141,7 +171,7 @@ pub fn run() {
                         let _ = window.set_focus();
                     }
                 }
-            }).expect("注册全局快捷键失败");
+            }).expect("注册快速搜索快捷键失败");
 
             // 注册全局快捷键 Esc 关闭快速搜索窗口
             app.global_shortcut().on_shortcut("Escape", move |app, _shortcut, event| {
@@ -151,6 +181,32 @@ pub fn run() {
                     }
                 }
             }).expect("注册 Esc 快捷键失败");
+
+            // 注册全局快捷键 - 快速添加
+            let quick_add_shortcut = shortcuts_config.quick_add.clone();
+            app.global_shortcut().on_shortcut(quick_add_shortcut.as_str(), move |app, _shortcut, event| {
+                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                    log::info!("Quick add shortcut triggered");
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                        let _ = window.emit("show-quick-add", ());
+                    }
+                }
+            }).expect("注册快速添加快捷键失败");
+
+            // 注册全局快捷键 - 密码生成器
+            let password_generator_shortcut = shortcuts_config.password_generator.clone();
+            app.global_shortcut().on_shortcut(password_generator_shortcut.as_str(), move |app, _shortcut, event| {
+                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                    log::info!("Password generator shortcut triggered");
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                        let _ = window.emit("show-password-generator", ());
+                    }
+                }
+            }).expect("注册密码生成器快捷键失败");
 
             Ok(())
         })
@@ -188,6 +244,8 @@ pub fn run() {
             // 快捷键命令
             commands::get_shortcuts,
             commands::save_shortcuts,
+            commands::update_global_shortcuts,
+            commands::unregister_all_shortcuts,
             // 倒计时命令
             commands::show_countdown,
             commands::hide_countdown,
@@ -195,15 +253,38 @@ pub fn run() {
             commands::stop_follow_cursor,
             commands::get_countdown_seconds,
             commands::clear_clipboard,
+            // 窗口管理命令
+            commands::minimize_to_tray,
         ])
         // 监听窗口事件
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // 主窗口关闭时改为隐藏
+                    // 获取应用状态
+                    let app_handle = window.app_handle();
+                    let state = app_handle.state::<AppState>();
+                    let conn = state.db.conn();
+                    
+                    // 读取 close_to_tray 设置
+                    let close_to_tray: bool = conn.query_row(
+                        "SELECT value FROM settings WHERE key = 'close_to_tray'",
+                        [],
+                        |row| {
+                            let value: String = row.get(0)?;
+                            Ok(value == "true")
+                        },
+                    ).unwrap_or(true); // 默认为 true
+                    
                     if window.label() == "main" {
-                        api.prevent_close();
-                        let _ = window.hide();
+                        if close_to_tray {
+                            // 阻止关闭，隐藏到托盘
+                            api.prevent_close();
+                            let _ = window.hide();
+                            log::info!("窗口关闭，最小化到托盘");
+                        } else {
+                            // 允许关闭，退出应用
+                            log::info!("窗口关闭，退出应用");
+                        }
                     }
                 }
                 tauri::WindowEvent::Focused(focused) => {
