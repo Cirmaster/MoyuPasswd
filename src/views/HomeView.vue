@@ -121,8 +121,23 @@ onMounted(async () => {
   })
 
   // 监听系统托盘锁定事件
-  await listen('lock-app', () => {
-    router.push('/')
+  await listen('lock-app', async () => {
+    try {
+      // 调用后端锁定命令
+      await invoke('lock_app')
+
+      // 通知快速搜索窗口已锁定
+      const { emit } = await import('@tauri-apps/api/event')
+      await emit('app-locked')
+
+      // 清除本地密码数据
+      passwords.value = []
+
+      // 跳转到解锁页面
+      router.push('/')
+    } catch (e) {
+      console.error('锁定失败:', e)
+    }
   })
 
   // 监听快速添加快捷键事件

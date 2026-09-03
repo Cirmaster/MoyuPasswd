@@ -44,6 +44,11 @@ export function useAutoLock() {
   const lockApp = async () => {
     try {
       await invoke('lock_app')
+
+      // 通知快速搜索窗口已锁定
+      const { emit } = await import('@tauri-apps/api/event')
+      await emit('app-locked')
+
       router.push('/')
     } catch (e) {
       console.error('锁定失败:', e)

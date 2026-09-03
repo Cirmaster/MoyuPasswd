@@ -94,11 +94,14 @@ pub fn run() {
                             }
                         }
                         "lock" => {
-                            // 锁定应用
+                            // 直接调用后端锁定
+                            let state = app.state::<AppState>();
+                            state.clear_aes_key();
+
+                            // 通知所有窗口已锁定
                             if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("lock-app", ());
+                                let _ = window.emit("app-locked", ());
                             }
-                            // 通知快速搜索窗口已锁定
                             if let Some(window) = app.get_webview_window("quick-search") {
                                 let _ = window.emit("app-locked", ());
                             }
@@ -150,6 +153,8 @@ pub fn run() {
                         let _ = window.show();
                         let _ = window.set_focus();
                         let _ = window.set_always_on_top(true);
+                        // 通知前端重新检查解锁状态
+                        let _ = window.emit("window-shown", ());
                     } else {
                         // 创建新窗口
                         let window = tauri::WebviewWindowBuilder::new(
@@ -161,6 +166,7 @@ pub fn run() {
                         .inner_size(600.0, 450.0)
                         .resizable(false)
                         .decorations(false)
+                        .transparent(true)
                         .always_on_top(true)
                         .skip_taskbar(true)
                         .focused(true)

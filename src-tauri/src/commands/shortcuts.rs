@@ -213,6 +213,7 @@ pub async fn update_global_shortcuts(app: tauri::AppHandle) -> Result<(), String
                 .inner_size(600.0, 450.0)
                 .resizable(false)
                 .decorations(false)
+                .transparent(true)
                 .always_on_top(true)
                 .skip_taskbar(true)
                 .focused(true)

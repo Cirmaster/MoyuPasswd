@@ -11,14 +11,18 @@
 -->
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { useTheme } from '@/composables/useTheme'
 import Toast from '@/components/Toast.vue'
+
+/** 主题管理 */
+const { isDark, initTheme } = useTheme()
 
 /** 搜索关键词 */
 const searchQuery = ref('')
@@ -28,9 +32,6 @@ const selectedIndex = ref(0)
 
 /** 加载状态 */
 const loading = ref(false)
-
-/** 主题：light 或 dark */
-const theme = ref<'light' | 'dark'>('dark')
 
 /** 是否已解锁 */
 const isUnlocked = ref(false)
@@ -43,6 +44,9 @@ const unlockError = ref('')
 
 /** 解锁加载状态 */
 const unlockLoading = ref(false)
+
+/** 剪贴板清除时间（秒），从设置中读取 */
+const clipboardClearTime = ref(30)
 
 /** Toast 提示状态 */
 const toast = ref({
@@ -63,14 +67,24 @@ const results = ref<Array<{
 }>>([])
 
 /**
+ * 加载设置（剪贴板清除时间等）
+ */
+const loadSettings = async () => {
+  try {
+    const savedSettings = await invoke<{
+      clipboard_clear_time: number
+    }>('get_settings')
+    clipboardClearTime.value = savedSettings.clipboard_clear_time || 30
+  } catch (e) {
+    console.warn('加载设置失败:', e)
+  }
+}
+
+/**
  * 实时查询后端（不缓存数据）
+ * 每次都直接查询后端，由后端判断是否允许返回密码
  */
 const searchPasswords = async (query: string) => {
-  if (!isUnlocked.value) {
-    results.value = []
-    return
-  }
-
   loading.value = true
   try {
     // 每次都直接查后端，不缓存
@@ -88,34 +102,29 @@ const searchPasswords = async (query: string) => {
     })
 
     results.value = result.slice(0, 8)
+    // 后端返回成功，说明已解锁
+    isUnlocked.value = true
   } catch (e) {
     console.error('查询密码失败:', e)
-    results.value = []
+    // 后端返回错误，检查是否是未解锁导致的
+    const errorMsg = String(e)
+    if (errorMsg.includes('未解锁') || errorMsg.includes('not unlocked')) {
+      // 后端未解锁，显示解锁界面
+      isUnlocked.value = false
+      results.value = []
+      searchQuery.value = ''
+    }
   } finally {
     loading.value = false
   }
 }
 
 /**
- * 检查解锁状态（实时查询后端）
+ * 检查解锁状态并查询密码
+ * 直接调用 searchPasswords，由后端判断是否允许
  */
 const checkUnlockStatus = async () => {
-  try {
-    isUnlocked.value = await invoke<boolean>('is_unlocked')
-
-    // 如果已解锁，初始化查询
-    if (isUnlocked.value) {
-      await searchPasswords('')
-    } else {
-      // 未解锁，清除数据
-      results.value = []
-      searchQuery.value = ''
-    }
-  } catch (e) {
-    console.error('检查解锁状态失败:', e)
-    isUnlocked.value = false
-    results.value = []
-  }
+  await searchPasswords(searchQuery.value)
 }
 
 /**
@@ -137,6 +146,7 @@ const handleUnlock = async () => {
 
     if (isValid) {
       isUnlocked.value = true
+      masterPassword.value = ''
       // 解锁后实时查询
       await searchPasswords('')
 
@@ -165,10 +175,10 @@ const copyAndClose = async (text: string) => {
     await navigator.clipboard.writeText(text)
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
 
-    // 启动全局倒计时窗口（显示在屏幕中央）
+    // 启动全局倒计时窗口（显示在屏幕中央），使用设置中的清除时间
     const x = window.screen.width / 2
     const y = window.screen.height / 2
-    await invoke('show_countdown', { seconds: 10, x, y })
+    await invoke('show_countdown', { seconds: clipboardClearTime.value, x, y })
 
     // 启动光标跟随
     await invoke('start_follow_cursor')
@@ -196,8 +206,12 @@ const closeWindow = async () => {
  * 注意：Esc 关闭由后端全局快捷键处理
  */
 const handleKeydown = (e: KeyboardEvent) => {
-  // 如果未解锁，不处理导航键
+  // 如果未解锁，按 Enter 时触发解锁
   if (!isUnlocked.value) {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleUnlock()
+    }
     return
   }
 
@@ -242,14 +256,11 @@ watch(searchQuery, (newQuery) => {
  * 初始化
  */
 onMounted(async () => {
-  // 读取系统主题
-  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-  theme.value = isDark ? 'dark' : 'light'
+  // 初始化主题
+  initTheme()
 
-  // 监听系统主题变化
-  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-    theme.value = e.matches ? 'dark' : 'light'
-  })
+  // 加载设置
+  await loadSettings()
 
   // 实时检查解锁状态
   await checkUnlockStatus()
@@ -263,12 +274,17 @@ onMounted(async () => {
     masterPassword.value = ''
   })
 
-  // 窗口获得焦点时，实时查询一次（确保显示最新数据）
+  // 监听窗口显示事件（每次窗口从隐藏变为显示时触发）
+  await listen('window-shown', () => {
+    checkUnlockStatus()
+  })
+
+  // 窗口获得焦点时，实时检查状态（确保显示最新数据）
   const currentWindow = getCurrentWindow()
   currentWindow.onFocusChanged(({ payload: focused }) => {
-    if (focused && isUnlocked.value) {
-      // 窗口获得焦点时，实时查询
-      searchPasswords(searchQuery.value)
+    if (focused) {
+      // 窗口获得焦点时，重新检查解锁状态
+      checkUnlockStatus()
     }
   })
 
@@ -301,151 +317,122 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div
-    class="min-h-screen p-4 transition-colors duration-200"
-    :class="theme === 'dark' ? 'bg-gray-900/95 text-gray-100' : 'bg-white/95 text-gray-900'"
-  >
-    <!-- 未解锁：显示密码输入 -->
-    <div v-if="!isUnlocked" class="flex flex-col items-center justify-center min-h-[300px]">
-      <svg
-        xmlns="http://www.w3.org/2000/svg"
-        class="h-12 w-12 mb-4"
-        :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-      >
-        <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-      </svg>
-      <h2 class="text-lg font-medium mb-4">密码库已锁定</h2>
-      <div class="w-full max-w-xs space-y-3">
-        <div>
-          <Label for="master-password" class="sr-only">主密码</Label>
-          <Input
-            id="master-password"
-            v-model="masterPassword"
-            type="password"
-            placeholder="输入主密码解锁"
-            :class="theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-gray-100 border-gray-200'"
-            autofocus
-            @keydown.enter="handleUnlock"
-          />
-          <p v-if="unlockError" class="text-sm text-red-500 mt-1">{{ unlockError }}</p>
+  <div class="h-screen bg-transparent text-foreground flex flex-col">
+    <!-- 未解锁 -->
+    <div v-if="!isUnlocked" class="flex-1 flex items-center justify-center bg-card">
+      <div class="w-full max-w-sm bg-card border shadow-lg">
+        <div class="p-6 text-center">
+          <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 mb-4">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </div>
+          <h2 class="text-lg font-semibold mb-1">密码库已锁定</h2>
+          <p class="text-sm text-muted-foreground mb-5">输入主密码解锁</p>
+          
+          <div class="space-y-3">
+            <Input
+              v-model="masterPassword"
+              type="password"
+              placeholder="输入主密码..."
+              class="h-10"
+              autofocus
+              @keydown.enter="handleUnlock"
+            />
+            <p v-if="unlockError" class="text-sm text-destructive">{{ unlockError }}</p>
+            <Button class="w-full h-10" :disabled="unlockLoading" @click="handleUnlock">
+              {{ unlockLoading ? '验证中...' : '解锁' }}
+            </Button>
+          </div>
         </div>
-        <Button
-          class="w-full"
-          :disabled="unlockLoading"
-          @click="handleUnlock"
-        >
-          {{ unlockLoading ? '解锁中...' : '解锁' }}
-        </Button>
+        <div class="px-4 py-2.5 border-t bg-muted/30 text-center">
+          <span class="text-xs text-muted-foreground">按 Esc 关闭窗口</span>
+        </div>
       </div>
-      <p class="text-xs mt-4" :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'">
-        按 Esc 关闭窗口
-      </p>
     </div>
 
-    <!-- 已解锁：显示搜索 -->
-    <template v-else>
+    <!-- 已解锁 - 搜索界面 -->
+    <div v-else class="flex-1 flex flex-col bg-card backdrop-blur-sm border shadow-lg">
       <!-- 搜索框 -->
-      <div class="relative mb-4">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5"
-          :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
+      <div class="flex items-center gap-3 px-4 h-12 border-b">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <circle cx="11" cy="11" r="8" />
           <path d="m21 21-4.3-4.3" />
         </svg>
-        <Input
+        <input
           v-model="searchQuery"
+          type="text"
           placeholder="搜索密码..."
-          class="pl-10 text-lg h-12"
-          :class="theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-gray-100 border-gray-200'"
+          class="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/50"
           autofocus
         />
       </div>
 
-      <!-- 加载状态 -->
-      <div v-if="loading" class="text-center py-8" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
-        加载中...
-      </div>
+      <!-- 结果区域 -->
+      <div class="flex-1 overflow-y-auto">
+        <!-- 加载中 -->
+        <div v-if="loading" class="h-full flex items-center justify-center text-sm text-muted-foreground">
+          搜索中...
+        </div>
 
-      <!-- 搜索结果 -->
-      <div v-else class="space-y-1 max-h-[350px] overflow-y-auto">
-        <div v-if="results.length === 0" class="text-center py-8" :class="theme === 'dark' ? 'text-gray-400' : 'text-gray-500'">
+        <!-- 空状态 -->
+        <div v-else-if="results.length === 0" class="h-full flex items-center justify-center text-sm text-muted-foreground">
           未找到匹配的密码
         </div>
 
-        <div
-          v-for="(item, index) in results"
-          :key="item.id"
-          :data-index="index"
-          class="flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors"
-          :class="[
-            index === selectedIndex ? 'bg-blue-600 text-white' : '',
-            index !== selectedIndex ? (theme === 'dark' ? 'hover:bg-gray-800' : 'hover:bg-gray-100') : '',
-          ]"
-          @click="copyAndClose(item.password)"
-          @mouseenter="selectedIndex = index"
-        >
-          <div class="flex-1 min-w-0">
-            <div class="font-medium truncate">{{ item.title }}</div>
-            <div
-              class="text-sm truncate"
-              :class="index === selectedIndex ? 'text-blue-100' : (theme === 'dark' ? 'text-gray-400' : 'text-gray-500')"
-            >
-              {{ item.username }}
+        <!-- 结果列表 -->
+        <template v-else>
+          <div
+            v-for="(item, index) in results"
+            :key="item.id"
+            :data-index="index"
+            class="flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors border-b last:border-b-0"
+            :class="{
+              'bg-primary text-primary-foreground': index === selectedIndex,
+              'hover:bg-muted': index !== selectedIndex,
+            }"
+            @click="copyAndClose(item.password)"
+            @mouseenter="selectedIndex = index"
+          >
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium truncate">{{ item.title }}</div>
+              <div class="text-xs truncate mt-0.5" :class="index === selectedIndex ? 'text-primary-foreground/70' : 'text-muted-foreground'">
+                {{ item.username }}
+              </div>
+            </div>
+            <div class="flex gap-1">
+              <span
+                class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
+                :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                @click.stop="copyAndClose(item.username)"
+              >
+                复制用户
+              </span>
+              <span
+                class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
+                :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                @click.stop="copyAndClose(item.password)"
+              >
+                复制密码
+              </span>
             </div>
           </div>
-          <div class="flex items-center gap-2 ml-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-xs"
-              :class="index === selectedIndex ? 'hover:bg-blue-500 text-white' : ''"
-              @click.stop="copyAndClose(item.username)"
-            >
-              复制用户
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              class="h-8 px-2 text-xs"
-              :class="index === selectedIndex ? 'hover:bg-blue-500 text-white' : ''"
-              @click.stop="copyAndClose(item.password)"
-            >
-              复制密码
-            </Button>
-          </div>
-        </div>
+        </template>
       </div>
 
-      <!-- 底部提示 -->
-      <div
-        class="fixed bottom-4 left-4 right-4 flex justify-between text-xs"
-        :class="theme === 'dark' ? 'text-gray-500' : 'text-gray-400'"
-      >
-        <div class="flex gap-4">
+      <!-- 底部快捷键 -->
+      <div class="flex items-center justify-between px-4 py-2 border-t bg-muted/30 text-xs text-muted-foreground">
+        <div class="flex gap-3">
           <span>↑↓ 导航</span>
-          <span>↵ 复制密码</span>
+          <span>↵ 复制</span>
           <span>Esc 关闭</span>
         </div>
         <span>摸鱼密码</span>
       </div>
-    </template>
+    </div>
 
-    <!-- Toast 提示 -->
-    <Toast
-      v-model:show="toast.show"
-      :type="toast.type"
-      :message="toast.message"
-    />
+    <!-- Toast -->
+    <Toast v-model:show="toast.show" :type="toast.type" :message="toast.message" />
   </div>
 </template>
