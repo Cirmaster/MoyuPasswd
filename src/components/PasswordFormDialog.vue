@@ -112,11 +112,11 @@ watch(
   () => props.editItem,
   (item) => {
     if (item) {
-      // 编辑模式：用现有数据填充表单
+      // 编辑模式：填充除密码外的所有字段（密码不接触明文）
       form.value = {
         title: item.title,
         username: item.username,
-        password: item.password,
+        password: '', // 编辑时密码留空，提交时为空则保留原密码
         url: item.url || '',
         notes: item.notes || '',
         category: item.category,
@@ -141,15 +141,19 @@ const showGenerator = ref(false)
  * 4. 关闭弹窗并重置表单
  */
 const handleSubmit = async () => {
-  // 验证必填字段
-  if (!form.value.title || !form.value.username || !form.value.password) {
+  // 验证必填字段（编辑模式下密码非必填）
+  if (!form.value.title || !form.value.username) {
+    return
+  }
+  // 添加模式下密码必填
+  if (!isEditMode.value && !form.value.password) {
     return
   }
 
   try {
     // 根据模式执行不同操作
     if (isEditMode.value && props.editItem) {
-      // 编辑模式：更新现有密码
+      // 编辑模式：更新现有密码（密码为空则保留原密码）
       await updatePassword(props.editItem.id, form.value)
     } else {
       // 添加模式：添加新密码
@@ -220,13 +224,13 @@ const onPasswordGenerated = (pwd: string) => {
 
         <!-- 密码字段（必填）+ 生成按钮 -->
         <div class="grid gap-2">
-          <Label for="password">密码 *</Label>
+          <Label for="password">密码 {{ isEditMode ? '' : '*' }}</Label>
           <div class="flex gap-2">
             <Input
               id="password"
               v-model="form.password"
               type="password"
-              placeholder="输入密码"
+              :placeholder="isEditMode ? '留空则不修改密码' : '输入密码'"
               class="flex-1"
             />
             <!-- 打开密码生成器 -->

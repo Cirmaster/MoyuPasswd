@@ -153,9 +153,6 @@ onMounted(async () => {
 
 // ==================== 本地状态 ====================
 
-/** 密码显示状态映射表，key 为密码 ID，value 为是否显示明文 */
-const showPassword = ref<Record<string, boolean>>({})
-
 /** 控制密码表单弹窗是否显示 */
 const showFormDialog = ref(false)
 
@@ -208,11 +205,24 @@ const openEditDialog = (item: PasswordItem) => {
 }
 
 /**
- * 切换密码显示/隐藏状态
+ * 通过后端复制密码到剪贴板
+ * 前端全程不接触明文，Rust 解密后直接写入系统剪贴板
  * @param id - 密码项 ID
+ * @param event - 鼠标事件（用于定位倒计时窗口）
  */
-const togglePasswordVisibility = (id: string) => {
-  showPassword.value[id] = !showPassword.value[id]
+const copyPasswordViaBackend = async (id: string, event?: MouseEvent) => {
+  try {
+    const x = event?.screenX ?? window.screen.width / 2
+    const y = event?.screenY ?? window.screen.height / 2
+    const clearTime = await invoke<number>('copy_password_to_clipboard', { id })
+    showToast('success', '密码已复制')
+    // 启动倒计时和光标跟随
+    await invoke('show_countdown', { seconds: clearTime, x, y })
+    await invoke('start_follow_cursor')
+  } catch (e) {
+    console.error('复制密码失败:', e)
+    showToast('error', String(e))
+  }
 }
 
 /**
@@ -496,41 +506,10 @@ const handleLock = async () => {
                 </TableCell>
                 <TableCell>
                   <div class="flex items-center gap-2">
-                    <span>{{ showPassword[item.id] ? item.password : '••••••••' }}</span>
+                    <span>••••••••</span>
                     <button
                       class="text-muted-foreground hover:text-foreground transition-colors"
-                      @click="togglePasswordVisibility(item.id)"
-                    >
-                      <svg
-                        v-if="showPassword[item.id]"
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                      >
-                        <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
-                        <circle cx="12" cy="12" r="3" />
-                      </svg>
-                      <svg
-                        v-else
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                      >
-                        <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
-                        <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
-                        <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
-                        <line x1="2" x2="22" y1="2" y2="22" />
-                      </svg>
-                    </button>
-                    <button
-                      class="text-muted-foreground hover:text-foreground transition-colors"
-                      @click="(e) => copyToClipboard(item.password, e)"
+                      @click="(e) => copyPasswordViaBackend(item.id, e)"
                     >
                       <svg
                         xmlns="http://www.w3.org/2000/svg"

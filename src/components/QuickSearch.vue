@@ -20,6 +20,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
+import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -105,6 +106,20 @@ const copyToClipboard = async (text: string) => {
 }
 
 /**
+ * 通过后端复制密码（前端不接触明文）
+ * @param id - 密码 ID
+ */
+const copyPasswordById = async (id: string) => {
+  try {
+    await invoke('copy_password_to_clipboard', { id })
+    toast.value = { show: true, type: 'success', message: '密码已复制到剪贴板' }
+    emit('update:open', false)
+  } catch {
+    toast.value = { show: true, type: 'error', message: '复制密码失败' }
+  }
+}
+
+/**
  * 处理键盘事件
  * 支持的按键：
  * - ArrowDown: 选择下一条结果
@@ -128,7 +143,7 @@ const handleKeydown = (e: KeyboardEvent) => {
     e.preventDefault()
     const selectedItem = results.value[selectedIndex.value]
     if (selectedItem) {
-      copyToClipboard(selectedItem.password)
+      copyPasswordById(selectedItem.id)
     }
   } else if (e.key === 'Escape') {
     // Esc 关闭弹窗
@@ -212,7 +227,7 @@ onMounted(() => {
             'bg-muted': index === selectedIndex,        // 选中状态
             'hover:bg-muted/50': index !== selectedIndex, // 悬停状态
           }"
-          @click="copyToClipboard(item.password)"
+          @click="copyPasswordById(item.id)"
           @mouseenter="selectedIndex = index"
         >
           <!-- 左侧：密码信息 -->
@@ -236,7 +251,7 @@ onMounted(() => {
               variant="ghost"
               size="sm"
               class="h-8 px-2 text-xs"
-              @click.stop="copyToClipboard(item.password)"
+              @click.stop="copyPasswordById(item.id)"
             >
               复制密码
             </Button>

@@ -15,6 +15,7 @@
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 
 use crate::crypto;
 use crate::state::AppState;
@@ -214,24 +215,24 @@ pub async fn get_passwords(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    // 解密并转换结果
-    let mut result = Vec::new();
-    for (id, title, username, password_encrypted, url, notes, category_id, is_favorite, created_at, updated_at) in passwords {
-        let password = decrypt_password(&aes_key, &password_encrypted)?;
-
-        result.push(PasswordItem {
-            id,
-            title,
-            username,
-            password,
-            url,
-            notes,
-            category: category_id,
-            is_favorite: is_favorite != 0,
-            created_at,
-            updated_at,
-        });
-    }
+    // 转换结果（列表不返回明文密码，按需解密）
+    let result = passwords
+        .into_iter()
+        .map(|(id, title, username, _password_encrypted, url, notes, category_id, is_favorite, created_at, updated_at)| {
+            PasswordItem {
+                id,
+                title,
+                username,
+                password: String::new(), // 列表不返回明文
+                url,
+                notes,
+                category: category_id,
+                is_favorite: is_favorite != 0,
+                created_at,
+                updated_at,
+            }
+        })
+        .collect();
 
     Ok(result)
 }
@@ -292,14 +293,12 @@ pub async fn get_password_by_id(
     );
 
     match result {
-        Ok((id, title, username, password_encrypted, url, notes, category_id, is_favorite, created_at, updated_at)) => {
-            let password = decrypt_password(&aes_key, &password_encrypted)?;
-
+        Ok((id, title, username, _password_encrypted, url, notes, category_id, is_favorite, created_at, updated_at)) => {
             Ok(PasswordItem {
                 id,
                 title,
                 username,
-                password,
+                password: String::new(), // 不返回明文
                 url,
                 notes,
                 category: category_id,
@@ -443,14 +442,24 @@ pub async fn update_password(
     // 构建更新字段
     let title = data.title.unwrap_or(current.title);
     let username = data.username.unwrap_or(current.username);
-    let password = data.password.unwrap_or(current.password);
+    let password = data.password.unwrap_or_default();
     let url = data.url.or(current.url);
     let notes = data.notes.or(current.notes);
     let category = data.category.unwrap_or(current.category);
     let is_favorite = data.is_favorite.unwrap_or(current.is_favorite);
 
-    // 加密新密码
-    let encrypted_password = encrypt_password(&aes_key, &password)?;
+    // 密码为空时保留原密码，否则重新加密
+    let encrypted_password = if password.is_empty() {
+        // 从数据库读取原密码的加密数据
+        let conn = state.db.conn();
+        conn.query_row(
+            "SELECT password_encrypted FROM passwords WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, String>(0),
+        ).map_err(|e| e.to_string())?
+    } else {
+        encrypt_password(&aes_key, &password)?
+    };
 
     let now = chrono::Utc::now().timestamp();
 
@@ -564,4 +573,125 @@ pub async fn toggle_favorite(
     ).map_err(|e| e.to_string())?;
 
     Ok(is_favorite != 0)
+}
+
+/// 按需解密单条密码
+///
+/// 仅在用户需要查看或复制密码时调用，避免列表批量解密。
+///
+/// # Arguments
+///
+/// * `id` - 密码 ID
+/// * `state` - 应用状态
+///
+/// # Returns
+///
+/// 解密后的明文密码字符串
+///
+/// # 前端调用
+///
+/// ```typescript
+/// const plaintext = await invoke('decrypt_password_by_id', { id: '123' });
+/// ```
+#[tauri::command]
+pub async fn decrypt_password_by_id(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // 检查是否已解锁
+    if !state.is_unlocked() {
+        return Err("应用未解锁".to_string());
+    }
+
+    // 获取 AES 密钥
+    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+
+    let conn = state.db.conn();
+
+    // 仅查询密码加密字段
+    let encrypted: String = conn
+        .query_row(
+            "SELECT password_encrypted FROM passwords WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "未找到密码".to_string(),
+            _ => e.to_string(),
+        })?;
+
+    decrypt_password(&aes_key, &encrypted)
+}
+
+/// 解密密码并直接写入系统剪贴板
+///
+/// 前端全程不接触明文。Rust 解密后直接写入剪贴板，
+/// 前端负责显示倒计时并在到期后清除剪贴板。
+///
+/// # Arguments
+///
+/// * `id` - 密码 ID
+/// * `state` - 应用状态
+/// * `app` - Tauri 应用句柄（用于访问剪贴板）
+///
+/// # Returns
+///
+/// 剪贴板清除时间（秒）
+///
+/// # 前端调用
+///
+/// ```typescript
+/// const clearTime = await invoke('copy_password_to_clipboard', { id: '123' });
+/// ```
+#[tauri::command]
+pub async fn copy_password_to_clipboard(
+    id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<u32, String> {
+    // 检查是否已解锁
+    if !state.is_unlocked() {
+        return Err("应用未解锁".to_string());
+    }
+
+    // 获取 AES 密钥
+    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+
+    let conn = state.db.conn();
+
+    // 查询加密的密码
+    let encrypted: String = conn
+        .query_row(
+            "SELECT password_encrypted FROM passwords WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "未找到密码".to_string(),
+            _ => e.to_string(),
+        })?;
+
+    // 解密密码
+    let plaintext = decrypt_password(&aes_key, &encrypted)?;
+
+    // 直接写入系统剪贴板
+    app.clipboard()
+        .write_text(plaintext)
+        .map_err(|e| e.to_string())?;
+
+    // 读取剪贴板清除时间设置
+    let clear_time: u32 = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'clipboard_clear_time'",
+            [],
+            |row| {
+                let v: String = row.get(0)?;
+                Ok(v.parse().unwrap_or(30))
+            },
+        )
+        .unwrap_or(30);
+
+    log::info!("密码已写入剪贴板，将在 {} 秒后清除", clear_time);
+
+    Ok(clear_time)
 }

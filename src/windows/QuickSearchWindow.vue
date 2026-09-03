@@ -194,6 +194,31 @@ const copyAndClose = async (text: string) => {
 }
 
 /**
+ * 按需解密并复制密码后关闭窗口（前端不接触明文）
+ * @param id - 密码 ID
+ */
+const copyPasswordByIdAndClose = async (id: string) => {
+  try {
+    const clearTime = await invoke<number>('copy_password_to_clipboard', { id })
+    toast.value = { show: true, type: 'success', message: '密码已复制到剪贴板' }
+
+    // 启动全局倒计时窗口
+    const x = window.screen.width / 2
+    const y = window.screen.height / 2
+    await invoke('show_countdown', { seconds: clearTime, x, y })
+    await invoke('start_follow_cursor')
+
+    // 延迟关闭窗口
+    setTimeout(async () => {
+      const window = getCurrentWindow()
+      await window.hide()
+    }, 300)
+  } catch {
+    toast.value = { show: true, type: 'error', message: '复制密码失败' }
+  }
+}
+
+/**
  * 关闭窗口
  */
 const closeWindow = async () => {
@@ -228,7 +253,7 @@ const handleKeydown = (e: KeyboardEvent) => {
     e.preventDefault()
     const selectedItem = results.value[selectedIndex.value]
     if (selectedItem) {
-      copyAndClose(selectedItem.password)
+      copyPasswordByIdAndClose(selectedItem.id)
     }
   }
 }
@@ -392,7 +417,7 @@ onMounted(async () => {
               'bg-primary text-primary-foreground': index === selectedIndex,
               'hover:bg-muted': index !== selectedIndex,
             }"
-            @click="copyAndClose(item.password)"
+            @click="copyPasswordByIdAndClose(item.id)"
             @mouseenter="selectedIndex = index"
           >
             <div class="flex-1 min-w-0">
@@ -412,7 +437,7 @@ onMounted(async () => {
               <span
                 class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
                 :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
-                @click.stop="copyAndClose(item.password)"
+                @click.stop="copyPasswordByIdAndClose(item.id)"
               >
                 复制密码
               </span>

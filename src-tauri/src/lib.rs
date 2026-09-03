@@ -232,6 +232,8 @@ pub fn run() {
             commands::update_password,
             commands::delete_password,
             commands::toggle_favorite,
+            commands::decrypt_password_by_id,
+            commands::copy_password_to_clipboard,
             // 分类命令
             commands::get_categories,
             commands::add_category,
