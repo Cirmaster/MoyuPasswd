@@ -12,7 +12,7 @@
 //! - `has_master_password`: 检查是否已设置主密码
 
 use rusqlite::params;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::crypto;
 use crate::state::AppState;
@@ -192,11 +192,13 @@ pub async fn change_master_password(
 
 /// 锁定应用
 ///
-/// 清除内存中的 AES 密钥，应用回到锁定状态。
+/// 清除内存中的 AES 密钥，并通知所有窗口已锁定。
+/// 前端只需调用此命令，不需要额外处理锁定逻辑。
 ///
 /// # Arguments
 ///
 /// * `state` - 应用状态
+/// * `app` - Tauri 应用句柄
 ///
 /// # 前端调用
 ///
@@ -204,8 +206,15 @@ pub async fn change_master_password(
 /// await invoke('lock_app');
 /// ```
 #[tauri::command]
-pub async fn lock_app(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn lock_app(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    // 清除 AES 密钥
     state.clear_aes_key();
+
+    // 通知所有窗口已锁定
+    let _ = app.emit("app-locked", ());
+
+    log::info!("应用已锁定，已通知所有窗口");
+
     Ok(())
 }
 

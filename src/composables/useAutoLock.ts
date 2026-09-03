@@ -19,7 +19,6 @@
  */
 
 import { ref, onMounted, onUnmounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 
 /** 自动锁定时间（分钟） */
@@ -35,21 +34,14 @@ let isTracking = false
  * 自动锁定 Hook
  */
 export function useAutoLock() {
-  const router = useRouter()
 
   /**
    * 锁定应用
-   * 清除 AES 密钥并跳转到解锁页面
+   * 只需调用后端命令，后端负责清除密钥并通知所有窗口
    */
   const lockApp = async () => {
     try {
       await invoke('lock_app')
-
-      // 通知快速搜索窗口已锁定
-      const { emit } = await import('@tauri-apps/api/event')
-      await emit('app-locked')
-
-      router.push('/')
     } catch (e) {
       console.error('锁定失败:', e)
     }

@@ -94,17 +94,10 @@ pub fn run() {
                             }
                         }
                         "lock" => {
-                            // 直接调用后端锁定
+                            // 清除密钥并广播锁定事件
                             let state = app.state::<AppState>();
                             state.clear_aes_key();
-
-                            // 通知所有窗口已锁定
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.emit("app-locked", ());
-                            }
-                            if let Some(window) = app.get_webview_window("quick-search") {
-                                let _ = window.emit("app-locked", ());
-                            }
+                            let _ = app.emit("app-locked", ());
                         }
                         "quit" => {
                             app.exit(0);

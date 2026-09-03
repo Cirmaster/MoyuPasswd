@@ -450,13 +450,15 @@ pub async fn update_password(
 
     // 密码为空时保留原密码，否则重新加密
     let encrypted_password = if password.is_empty() {
-        // 从数据库读取原密码的加密数据
-        let conn = state.db.conn();
-        conn.query_row(
-            "SELECT password_encrypted FROM passwords WHERE id = ?1",
-            params![id],
-            |row| row.get::<_, String>(0),
-        ).map_err(|e| e.to_string())?
+        // 独立作用域：查询完立即释放数据库锁，避免与后续 UPDATE 死锁
+        {
+            let conn = state.db.conn();
+            conn.query_row(
+                "SELECT password_encrypted FROM passwords WHERE id = ?1",
+                params![id],
+                |row| row.get::<_, String>(0),
+            ).map_err(|e| e.to_string())?
+        }
     } else {
         encrypt_password(&aes_key, &password)?
     };
