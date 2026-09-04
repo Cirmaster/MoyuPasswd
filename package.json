@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "test:unit": "vitest",
     "build-only": "vite build",
-    "type-check": "vue-tsc --build"
+    "type-check": "vue-tsc --build",
+    "release": "tauri build"
   },
   "dependencies": {
     "@lucide/vue": "^1.37.0",
