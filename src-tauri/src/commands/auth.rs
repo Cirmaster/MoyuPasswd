@@ -29,7 +29,7 @@
 //! - `is_unlocked`: 检查是否已解锁
 //! - `has_master_password`: 检查是否已设置主密码
 
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, State};
 
 use crate::crypto;
 use crate::db;
@@ -65,11 +65,13 @@ pub enum AuthError {
 /// 用户第一次使用应用时调用，设置主密码。
 /// 主密码使用 Argon2id 哈希后存储到元数据文件，
 /// 同时生成 AES 密钥盐和数据库加密密钥盐。
+/// 如果系统认证可用，自动启用系统快速解锁。
 ///
 /// # Arguments
 ///
 /// * `password` - 明文主密码
 /// * `state` - 应用状态
+/// * `app` - Tauri 应用句柄
 ///
 /// # Returns
 ///
@@ -78,6 +80,7 @@ pub enum AuthError {
 pub async fn set_master_password(
     password: String,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     // 检查是否已设置主密码
     if db_meta::meta_exists(&state.app_dir) {
@@ -116,6 +119,24 @@ pub async fn set_master_password(
     let aes_key = crypto::derive_aes_key(&password, &aes_salt)
         .map_err(|e| AuthError::Crypto(e.to_string()).to_string())?;
     state.set_aes_key(aes_key);
+
+    // 如果系统认证可用，自动启用系统快速解锁
+    if crate::system_auth::is_available(&app) {
+        // 将两个密钥合并存储（64 字节）
+        let mut combined_key = [0u8; 64];
+        combined_key[..32].copy_from_slice(&aes_key);
+        combined_key[32..].copy_from_slice(&db_key);
+
+        // 存入系统安全存储（会触发系统认证）
+        if let Err(e) = crate::system_auth::store_key(&combined_key, &state.app_dir, &app) {
+            // 启用失败不影响主流程，只记录日志
+            log::warn!("自动启用系统快速解锁失败: {}", e);
+        }
+
+        // 清零临时变量
+        use zeroize::Zeroize;
+        combined_key.zeroize();
+    }
 
     Ok(())
 }
@@ -311,3 +332,119 @@ pub async fn is_unlocked(state: State<'_, AppState>) -> Result<bool, String> {
 pub async fn has_master_password(state: State<'_, AppState>) -> Result<bool, String> {
     Ok(db_meta::meta_exists(&state.app_dir))
 }
+
+// ==================== 系统认证命令 ====================
+
+/// 启用系统快速解锁
+///
+/// 将密钥存入安全存储（插件会自动触发认证）。
+#[tauri::command]
+pub async fn enable_system_auth(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    // 检查系统认证是否可用
+    if !crate::system_auth::is_available(&app) {
+        return Err("当前系统不支持系统认证".to_string());
+    }
+
+    // 检查是否已解锁（需要密钥）
+    let aes_key = state.get_aes_key()
+        .ok_or("请先解锁应用，再启用系统快速解锁")?;
+    let db_key = state.get_db_key()
+        .ok_or("数据库密钥不存在，请重新登录")?;
+
+    // 将两个密钥合并存储（64 字节）
+    // 插件的 set_data 会自动触发 Windows Hello 认证
+    let mut combined_key = [0u8; 64];
+    combined_key[..32].copy_from_slice(&aes_key);
+    combined_key[32..].copy_from_slice(&db_key);
+
+    // 存入系统安全存储
+    crate::system_auth::store_key(&combined_key, &state.app_dir, &app)?;
+
+    // 清零临时变量
+    use zeroize::Zeroize;
+    combined_key.zeroize();
+
+    log::info!("系统快速解锁已启用");
+    Ok(())
+}
+
+/// 禁用系统快速解锁
+///
+/// 从系统安全存储中删除密钥。
+#[tauri::command]
+pub async fn disable_system_auth(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
+    crate::system_auth::delete_key(&state.app_dir, &app)?;
+    log::info!("系统快速解锁已禁用");
+    Ok(())
+}
+
+/// 检查系统快速解锁是否已启用
+#[tauri::command]
+pub async fn is_system_auth_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(crate::system_auth::is_enabled(&state.app_dir))
+}
+
+/// 检查系统认证是否可用
+#[tauri::command]
+pub async fn is_system_auth_available(app: tauri::AppHandle) -> Result<bool, String> {
+    Ok(crate::system_auth::is_available(&app))
+}
+
+/// 获取系统认证方式名称（用于前端显示）
+#[tauri::command]
+pub async fn get_system_auth_method() -> Result<String, String> {
+    Ok(crate::system_auth::auth_method_name().to_string())
+}
+
+/// 使用系统认证解锁
+///
+/// 直接从安全存储读取密钥（插件会自动触发认证），读取成功即解锁。
+#[tauri::command]
+pub async fn unlock_with_system_auth(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<bool, String> {
+    // 检查系统认证是否已启用
+    if !crate::system_auth::is_enabled(&state.app_dir) {
+        return Err("系统快速解锁未启用".to_string());
+    }
+
+    // 从安全存储读取密钥（插件会自动触发 Windows Hello 认证）
+    let auth_method = crate::system_auth::auth_method_name();
+    let reason = format!("使用 {} 解锁摸鱼密码", auth_method);
+
+    let combined_key = match crate::system_auth::retrieve_key(&app, &reason) {
+        Ok(key) => key,
+        Err(e) => {
+            // 用户取消或认证失败
+            let err_str = e.to_string();
+            if err_str.contains("userCancel") || err_str.contains("UserCancel") {
+                return Ok(false);
+            }
+            return Err(e);
+        }
+    };
+
+    // 拆分为两个密钥
+    let mut aes_key = [0u8; 32];
+    let mut db_key = [0u8; 32];
+    aes_key.copy_from_slice(&combined_key[..32]);
+    db_key.copy_from_slice(&combined_key[32..]);
+
+    // 使用数据库密钥打开数据库
+    let database = db::Database::new(&state.app_dir, &db_key)
+        .map_err(|e| format!("打开数据库失败: {e}"))?;
+
+    // 将数据库和密钥存入状态
+    state.set_database(database);
+    state.set_db_key(db_key);
+    state.set_aes_key(aes_key);
+
+    // 清零临时变量
+    use zeroize::Zeroize;
+    aes_key.zeroize();
+    db_key.zeroize();
+    let mut combined_key = combined_key;
+    combined_key.zeroize();
+
+    log::info!("系统认证解锁成功");
+    Ok(true)
+}
+

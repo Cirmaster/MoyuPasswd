@@ -86,6 +86,18 @@ onMounted(async () => {
       settings.value.autoStart = false
     }
 
+    // 获取系统认证状态
+    try {
+      const [available, enabled] = await Promise.all([
+        invoke<boolean>('is_system_auth_available'),
+        invoke<boolean>('is_system_auth_enabled'),
+      ])
+      systemAuth.value.available = available
+      systemAuth.value.enabled = enabled
+    } catch (e) {
+      console.warn('获取系统认证状态失败:', e)
+    }
+
     // 加载快捷键配置
     await shortcutStore.loadShortcuts()
   } catch (e) {
@@ -133,6 +145,18 @@ const security = ref({
   clipboardClearTime: 30,
   /** 是否在密码列表中显示密码强度指示器 */
   showPasswordStrength: true,
+})
+
+/**
+ * 系统认证设置
+ */
+const systemAuth = ref({
+  /** 系统认证是否可用 */
+  available: false,
+  /** 系统认证是否已启用 */
+  enabled: false,
+  /** 操作加载状态 */
+  loading: false,
 })
 
 /**
@@ -481,6 +505,28 @@ const handleSaveGeneral = async () => {
 }
 
 /**
+ * 切换系统认证状态
+ */
+const toggleSystemAuth = async () => {
+  systemAuth.value.loading = true
+  try {
+    if (systemAuth.value.enabled) {
+      await invoke('disable_system_auth')
+      systemAuth.value.enabled = false
+      showToast('success', '系统快速解锁已禁用')
+    } else {
+      await invoke('enable_system_auth')
+      systemAuth.value.enabled = true
+      showToast('success', '系统快速解锁已启用')
+    }
+  } catch (e) {
+    showToast('error', String(e))
+  } finally {
+    systemAuth.value.loading = false
+  }
+}
+
+/**
  * 保存安全设置
  */
 const handleSaveSecurity = async () => {
@@ -780,6 +826,24 @@ const handleImport = async () => {
                   type="checkbox"
                   class="h-4 w-4"
                 />
+              </div>
+
+              <!-- 系统快速解锁 -->
+              <div v-if="systemAuth.available" class="flex items-center justify-between">
+                <div>
+                  <Label>系统快速解锁</Label>
+                  <p class="text-sm text-muted-foreground">
+                    使用系统认证（PIN、指纹、面部识别等）解锁密码库，无需输入主密码
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  :variant="systemAuth.enabled ? 'default' : 'outline'"
+                  :disabled="systemAuth.loading"
+                  @click="toggleSystemAuth"
+                >
+                  {{ systemAuth.loading ? '处理中...' : (systemAuth.enabled ? '已启用' : '启用') }}
+                </Button>
               </div>
 
               <Button @click="handleSaveSecurity">保存设置</Button>

@@ -16,6 +16,23 @@
     "core:window:allow-show",
     "core:window:allow-set-position",
     "core:window:allow-set-focus",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "biometry:default",
+    {
+      "identifier": "biometry:allow-has-data",
+      "allow": [{ "domain": "com.moyu.passwd" }]
+    },
+    {
+      "identifier": "biometry:allow-get-data",
+      "allow": [{ "domain": "com.moyu.passwd" }]
+    },
+    {
+      "identifier": "biometry:allow-set-data",
+      "allow": [{ "domain": "com.moyu.passwd" }]
+    },
+    {
+      "identifier": "biometry:allow-remove-data",
+      "allow": [{ "domain": "com.moyu.passwd" }]
+    }
   ]
 }

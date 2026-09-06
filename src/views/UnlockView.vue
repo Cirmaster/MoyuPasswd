@@ -5,8 +5,8 @@
   主要功能：
   1. 检查是否已设置主密码
   2. 如果未设置，进入"设置主密码"模式
-  3. 如果已设置，进入"验证主密码"模式
-  4. 验证成功跳转到主页
+  3. 如果已设置且系统认证可用，优先使用系统认证
+  4. 系统认证失败时，显示主密码输入框作为备用
   5. 亮色/暗色主题切换
 
   路由路径：/
@@ -46,30 +46,17 @@ const hasMasterPassword = ref(false)
 /** 是否为设置模式（首次使用） */
 const isSetupMode = ref(false)
 
-/**
- * 页面加载时检查是否已设置主密码
- */
-onMounted(async () => {
-  try {
-    hasMasterPassword.value = await invoke<boolean>('has_master_password')
-    // 如果未设置主密码，进入设置模式
-    if (!hasMasterPassword.value) {
-      isSetupMode.value = true
-    }
-  } catch (e) {
-    console.error('检查主密码失败:', e)
-  }
-})
+/** 系统认证是否可用 */
+const systemAuthAvailable = ref(false)
 
-/**
- * 组件卸载时清理倒计时定时器
- */
-onUnmounted(() => {
-  if (lockoutTimer) {
-    clearInterval(lockoutTimer)
-    lockoutTimer = null
-  }
-})
+/** 系统认证是否已启用 */
+const systemAuthEnabled = ref(false)
+
+/** 是否正在尝试系统认证 */
+const attemptingSystemAuth = ref(false)
+
+/** 是否显示主密码输入（系统认证失败后的备用） */
+const showPasswordInput = ref(false)
 
 /** 锁定倒计时秒数（暴力破解防护） */
 const lockoutRemaining = ref(0)
@@ -101,12 +88,85 @@ const startLockoutCountdown = (seconds: number) => {
  */
 const parseLockoutSeconds = (msg: string): number => {
   const match = msg.match(/(\d+)\s*秒/)
-  return match ? parseInt(match[1], 10) : 0
+  return match && match[1] ? parseInt(match[1], 10) : 0
 }
 
 /**
- * 处理解锁操作
- * 验证主密码，成功后跳转到主页
+ * 尝试系统认证解锁
+ * 如果成功则直接跳转到主页，失败则显示主密码输入框
+ */
+const trySystemAuth = async () => {
+  attemptingSystemAuth.value = true
+  error.value = ''
+
+  try {
+    const success = await invoke<boolean>('unlock_with_system_auth')
+    if (success) {
+      // 系统认证成功，直接跳转
+      router.push('/home')
+      return
+    }
+    // 用户取消了认证，显示主密码输入
+    showPasswordInput.value = true
+  } catch (e) {
+    console.warn('系统认证失败:', e)
+    // 系统认证失败，显示主密码输入
+    showPasswordInput.value = true
+    error.value = String(e)
+  } finally {
+    attemptingSystemAuth.value = false
+  }
+}
+
+/**
+ * 页面加载时检查状态
+ */
+onMounted(async () => {
+  try {
+    // 检查是否已设置主密码
+    hasMasterPassword.value = await invoke<boolean>('has_master_password')
+
+    if (!hasMasterPassword.value) {
+      // 未设置主密码，进入设置模式
+      isSetupMode.value = true
+      showPasswordInput.value = true
+      return
+    }
+
+    // 已设置主密码，检查系统认证
+    const [available, enabled] = await Promise.all([
+      invoke<boolean>('is_system_auth_available'),
+      invoke<boolean>('is_system_auth_enabled'),
+    ])
+
+    systemAuthAvailable.value = available
+    systemAuthEnabled.value = enabled
+
+    if (available && enabled) {
+      // 系统认证已启用：不显示密码输入框，只显示系统认证按钮
+      showPasswordInput.value = false
+    } else {
+      // 系统认证未启用：显示密码输入框
+      showPasswordInput.value = true
+    }
+  } catch (e) {
+    console.error('初始化失败:', e)
+    showPasswordInput.value = true
+  }
+})
+
+/**
+ * 组件卸载时清理倒计时定时器
+ */
+onUnmounted(() => {
+  if (lockoutTimer) {
+    clearInterval(lockoutTimer)
+    lockoutTimer = null
+  }
+})
+
+/**
+ * 处理解锁操作（主密码）
  */
 const handleUnlock = async () => {
   // 锁定中不允许操作
@@ -128,6 +188,9 @@ const handleUnlock = async () => {
       password: password.value,
     })
 
+    // 清空密码输入（无论成功失败）
+    password.value = ''
+
     if (isValid) {
       // 验证成功，跳转到密码列表页
       router.push('/home')
@@ -136,6 +199,9 @@ const handleUnlock = async () => {
       error.value = '密码错误，请重试'
     }
   } catch (e) {
+    // 清空密码输入
+    password.value = ''
+
     // 捕获异常，检查是否是锁定错误
     const msg = String(e)
     const seconds = parseLockoutSeconds(msg)
@@ -258,12 +324,47 @@ const handleSetup = async () => {
         </div>
         <CardTitle class="text-2xl">摸鱼密码</CardTitle>
         <CardDescription>
-          {{ isSetupMode ? '首次使用，请设置主密码' : '输入主密码解锁您的密码库' }}
+          <template v-if="isSetupMode">首次使用，请设置主密码</template>
+          <template v-else-if="attemptingSystemAuth">请在弹出的窗口中完成认证</template>
+          <template v-else-if="showPasswordInput">输入主密码解锁您的密码库</template>
+          <template v-else>点击下方按钮解锁密码库</template>
         </CardDescription>
       </CardHeader>
 
-      <!-- 卡片内容：密码输入表单 -->
-      <CardContent>
+      <!-- 系统认证进行中 -->
+      <CardContent v-if="attemptingSystemAuth" class="text-center py-8">
+        <div class="flex flex-col items-center gap-4">
+          <!-- 加载动画 -->
+          <svg
+            class="h-12 w-12 animate-spin text-primary"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+          >
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+          </svg>
+          <p class="text-sm text-muted-foreground">请在弹出的窗口中选择解锁方式</p>
+          <Button variant="outline" size="sm" @click="showPasswordInput = true; attemptingSystemAuth = false">
+            使用主密码解锁
+          </Button>
+        </div>
+      </CardContent>
+
+      <!-- 系统认证已启用：只显示认证按钮 -->
+      <CardContent v-else-if="!showPasswordInput && !isSetupMode" class="text-center py-6">
+        <Button class="w-full h-12 text-base" @click="trySystemAuth">
+          解锁
+        </Button>
+        <div class="mt-4">
+          <Button variant="link" size="sm" @click="showPasswordInput = true">
+            使用主密码解锁
+          </Button>
+        </div>
+      </CardContent>
+
+      <!-- 密码输入表单（系统认证未启用，或用户选择使用主密码） -->
+      <CardContent v-else>
         <form @submit.prevent="isSetupMode ? handleSetup() : handleUnlock()" class="space-y-4">
           <div class="space-y-2">
             <Label for="password">主密码</Label>
@@ -289,13 +390,20 @@ const handleSetup = async () => {
             />
           </div>
 
+          <!-- 系统认证可用但用户选择了主密码，显示切换按钮 -->
+          <div v-if="!isSetupMode && systemAuthAvailable && systemAuthEnabled" class="flex justify-center">
+            <Button variant="link" size="sm" @click="showPasswordInput = false">
+              使用系统认证解锁
+            </Button>
+          </div>
+
           <!-- 错误提示：仅在 error 有值时显示 -->
           <p v-if="error" class="text-sm text-destructive">{{ error }}</p>
         </form>
       </CardContent>
 
-      <!-- 卡片底部：解锁/设置按钮 -->
-      <CardFooter>
+      <!-- 卡片底部：解锁/设置按钮（仅在显示密码输入时） -->
+      <CardFooter v-if="showPasswordInput">
         <Button
           class="w-full"
           :disabled="loading || lockoutRemaining > 0"

@@ -29,6 +29,9 @@ pub mod acl;
 /// 空闲检测模块
 pub mod idle;
 
+/// 系统认证模块
+pub mod system_auth;
+
 /// 应用状态模块
 pub mod state;
 
@@ -67,6 +70,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         // 注册 Shell 插件
         .plugin(tauri_plugin_shell::init())
+        // 注册生物识别插件（Windows Hello / Touch ID）
+        .plugin(tauri_plugin_biometry::init())
         .setup(|app| {
             // 开发模式下启用日志
             if cfg!(debug_assertions) {
@@ -222,6 +227,13 @@ pub fn run() {
             commands::lock_app,
             commands::is_unlocked,
             commands::has_master_password,
+            // 系统认证命令
+            commands::enable_system_auth,
+            commands::disable_system_auth,
+            commands::is_system_auth_enabled,
+            commands::is_system_auth_available,
+            commands::get_system_auth_method,
+            commands::unlock_with_system_auth,
             // 密码命令
             commands::get_passwords,
             commands::add_password,
@@ -296,8 +308,11 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Focused(focused) => {
+                    // 快速搜索窗口失去焦点时隐藏（但认证进行中不隐藏）
                     if window.label() == "quick-search" && !focused {
-                        let _ = window.hide();
+                        if !crate::system_auth::is_auth_in_progress() {
+                            let _ = window.hide();
+                        }
                     }
                 }
                 _ => {}
