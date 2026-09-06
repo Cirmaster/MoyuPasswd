@@ -252,7 +252,7 @@ const handleLock = async () => {
           <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
           <path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </svg>
-        <h1 class="text-lg font-semibold">默语密匣</h1>
+        <h1 class="text-lg font-semibold">MoyuPasswd</h1>
       </div>
 
       <div class="flex items-center gap-2">

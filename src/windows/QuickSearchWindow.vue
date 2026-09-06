@@ -555,7 +555,7 @@ onMounted(async () => {
           <span>↵ 复制</span>
           <span>Esc 关闭</span>
         </div>
-        <span>默语密匣</span>
+        <span>MoyuPasswd</span>
       </div>
     </div>
 

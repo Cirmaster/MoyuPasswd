@@ -1164,7 +1164,7 @@ const handleImport = async () => {
 
               <!-- 关于 -->
               <div class="p-4 border rounded-lg">
-                <h3 class="font-medium mb-2">关于默语密匣</h3>
+                <h3 class="font-medium mb-2">关于 MoyuPasswd</h3>
                 <p class="text-sm text-muted-foreground">版本: 0.1.0</p>
                 <p class="text-sm text-muted-foreground">一个简单安全的密码管理工具</p>
               </div>
