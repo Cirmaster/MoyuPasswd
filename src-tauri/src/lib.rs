@@ -6,12 +6,16 @@
 //! # 模块结构
 //!
 //! - `db`: 数据库初始化和迁移
+//! - `db_meta`: 凭证元数据文件管理
 //! - `crypto`: 密码哈希和数据加密
 //! - `state`: 应用状态管理
 //! - `commands`: Tauri 命令（前端调用）
 
 /// 数据库模块
 pub mod db;
+
+/// 凭证元数据模块
+pub mod db_meta;
 
 /// 加密模块
 pub mod crypto;
@@ -21,6 +25,9 @@ pub mod clipboard;
 
 /// 文件 ACL 加固模块
 pub mod acl;
+
+/// 空闲检测模块
+pub mod idle;
 
 /// 应用状态模块
 pub mod state;
@@ -36,7 +43,14 @@ use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
 /// 运行 Tauri 应用
 ///
-/// 初始化所有插件、注册命令、设置状态管理
+/// 初始化所有插件、注册命令、设置状态管理。
+///
+/// # 启动流程
+///
+/// 1. 检查元数据文件是否存在，判断是否首次运行
+/// 2. 首次运行：使用默认密钥创建数据库
+/// 3. 后续运行：数据库待认证后创建
+/// 4. 注册全局快捷键和系统托盘
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -63,39 +77,42 @@ pub fn run() {
                 )?;
             }
 
+            // 初始化空闲检测模块
+            idle::init();
+
             // 获取应用数据目录
             let app_dir = app.path().app_data_dir()
                 .expect("无法获取应用数据目录");
 
-            // 初始化数据库
-            let database = db::Database::new(&app_dir)
-                .expect("无法初始化数据库");
+            // 根据元数据文件判断是否首次运行
+            let is_first_run = !db_meta::meta_exists(&app_dir);
 
-            // 设置应用状态
-            app.manage(AppState::new(database));
+            if is_first_run {
+                // ========== 首次运行 ==========
+                // 使用默认密钥创建数据库（后续设置主密码时会 rekey）
+                log::info!("首次运行，使用默认密钥创建数据库");
+                let database = db::Database::new(&app_dir, db::DEFAULT_DB_KEY)
+                    .expect("无法初始化数据库");
+                app.manage(AppState::new(app_dir.clone(), database));
+            } else {
+                // ========== 后续运行 ==========
+                // 数据库待用户输入主密码后创建
+                log::info!("检测到已有配置，等待用户解锁");
+                app.manage(AppState::new_without_db(app_dir.clone()));
+            }
 
-            // 根据设置决定启动时是否显示主窗口
+            // 启动空闲检测后台线程
             {
-                let app_state = app.state::<AppState>();
-                let show_on_startup: bool = app_state
-                    .db
-                    .conn()
-                    .query_row(
-                        "SELECT value FROM settings WHERE key = 'show_on_startup'",
-                        [],
-                        |row| {
-                            let value: String = row.get(0)?;
-                            Ok(value == "true")
-                        },
-                    )
-                    .unwrap_or(true); // 默认显示
-
-                if show_on_startup {
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                let app_handle = app.handle().clone();
+                idle::start_idle_watcher(move || {
+                    let state = app_handle.state::<AppState>();
+                    state.clear_aes_key();
+                    if let Err(e) = crate::clipboard::clear_now(&app_handle) {
+                        log::warn!("自动锁定时清空剪贴板失败: {e}");
                     }
-                }
+                    let _ = app_handle.emit("app-locked", ());
+                    log::info!("空闲超时，应用已自动锁定");
+                });
             }
 
             // 创建系统托盘菜单
@@ -124,13 +141,11 @@ pub fn run() {
                             }
                         }
                         "lock" => {
-                            // 清除密钥并广播锁定事件
                             let state = app.state::<AppState>();
                             state.clear_aes_key();
                             let _ = app.emit("app-locked", ());
                         }
                         "quit" => {
-                            // 退出前清空剪贴板，避免敏感内容残留
                             if let Err(e) = crate::clipboard::clear_now(app) {
                                 log::warn!("退出时清空剪贴板失败: {e}");
                             }
@@ -141,105 +156,60 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // 从数据库读取快捷键配置
-            let app_state = app.state::<AppState>();
-            let shortcuts_config = {
-                let conn = app_state.db.conn();
-                let result = conn.query_row(
-                    "SELECT value FROM settings WHERE key = 'shortcuts'",
-                    [],
-                    |row| {
-                        let value: String = row.get(0)?;
-                        Ok(value)
-                    },
-                );
-                match result {
-                    Ok(json) => {
-                        log::info!("从数据库读取到快捷键 JSON: {}", json);
-                        serde_json::from_str::<commands::shortcuts::ShortcutConfig>(&json)
-                            .unwrap_or_default()
-                    }
-                    Err(e) => {
-                        log::warn!("读取快捷键配置失败，使用默认值: {:?}", e);
-                        commands::shortcuts::ShortcutConfig::default()
-                    }
-                }
-            };
-            
-            log::info!("最终快捷键配置: {:?}", shortcuts_config);
-            log::info!("快速搜索: {}", shortcuts_config.quick_search);
-            log::info!("快速添加: {}", shortcuts_config.quick_add);
-            log::info!("密码生成器: {}", shortcuts_config.password_generator);
+            // 根据设置决定启动时是否显示主窗口
+            {
+                let app_state = app.state::<AppState>();
+                if app_state.has_database() {
+                    if let Ok(db) = app_state.get_db() {
+                        let show_on_startup: bool = db.conn()
+                            .query_row(
+                                "SELECT value FROM settings WHERE key = 'show_on_startup'",
+                                [],
+                                |row| {
+                                    let value: String = row.get(0)?;
+                                    Ok(value == "true")
+                                },
+                            )
+                            .unwrap_or(true);
 
-            // 注册全局快捷键 - 快速搜索
-            let quick_search_shortcut = shortcuts_config.quick_search.clone();
-            app.global_shortcut().on_shortcut(quick_search_shortcut.as_str(), move |app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    // 检查窗口是否已存在
-                    if let Some(window) = app.get_webview_window("quick-search") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        let _ = window.set_always_on_top(true);
-                        // 通知前端重新检查解锁状态
-                        let _ = window.emit("window-shown", ());
-                    } else {
-                        // 创建新窗口
-                        let window = tauri::WebviewWindowBuilder::new(
-                            app,
-                            "quick-search",
-                            tauri::WebviewUrl::App("quick-search.html".into())
-                        )
-                        .title("快速搜索")
-                        .inner_size(600.0, 450.0)
-                        .resizable(false)
-                        .decorations(false)
-                        .transparent(true)
-                        .always_on_top(true)
-                        .skip_taskbar(true)
-                        .focused(true)
-                        .center()
-                        .build()
-                        .expect("创建快速搜索窗口失败");
+                        if show_on_startup {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                        }
 
-                        let _ = window.set_focus();
+                        // 从数据库读取快捷键配置
+                        let shortcuts_config = {
+                            let conn = db.conn();
+                            let result = conn.query_row(
+                                "SELECT value FROM settings WHERE key = 'shortcuts'",
+                                [],
+                                |row| {
+                                    let value: String = row.get(0)?;
+                                    Ok(value)
+                                },
+                            );
+                            match result {
+                                Ok(json) => {
+                                    serde_json::from_str::<commands::shortcuts::ShortcutConfig>(&json)
+                                        .unwrap_or_default()
+                                }
+                                Err(_) => commands::shortcuts::ShortcutConfig::default(),
+                            }
+                        };
+                        register_shortcuts(app, &shortcuts_config);
                     }
-                }
-            }).expect("注册快速搜索快捷键失败");
-
-            // 注册全局快捷键 Esc 关闭快速搜索窗口
-            app.global_shortcut().on_shortcut("Escape", move |app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    if let Some(window) = app.get_webview_window("quick-search") {
-                        let _ = window.hide();
-                    }
-                }
-            }).expect("注册 Esc 快捷键失败");
-
-            // 注册全局快捷键 - 快速添加
-            let quick_add_shortcut = shortcuts_config.quick_add.clone();
-            app.global_shortcut().on_shortcut(quick_add_shortcut.as_str(), move |app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    log::info!("Quick add shortcut triggered");
+                } else {
+                    // 数据库未初始化，显示主窗口让用户输入密码
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
                         let _ = window.set_focus();
-                        let _ = window.emit("show-quick-add", ());
                     }
+                    let default_shortcuts = commands::shortcuts::ShortcutConfig::default();
+                    register_shortcuts(app, &default_shortcuts);
                 }
-            }).expect("注册快速添加快捷键失败");
-
-            // 注册全局快捷键 - 密码生成器
-            let password_generator_shortcut = shortcuts_config.password_generator.clone();
-            app.global_shortcut().on_shortcut(password_generator_shortcut.as_str(), move |app, _shortcut, event| {
-                if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                    log::info!("Password generator shortcut triggered");
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        let _ = window.emit("show-password-generator", ());
-                    }
-                }
-            }).expect("注册密码生成器快捷键失败");
+            }
 
             Ok(())
         })
@@ -289,34 +259,35 @@ pub fn run() {
             clipboard::copy_text_to_clipboard,
             // 窗口管理命令
             commands::minimize_to_tray,
+            // 空闲检测命令
+            idle::report_activity,
         ])
         // 监听窗口事件
         .on_window_event(|window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // 获取应用状态
                     let app_handle = window.app_handle();
                     let state = app_handle.state::<AppState>();
-                    let conn = state.db.conn();
-                    
-                    // 读取 close_to_tray 设置
-                    let close_to_tray: bool = conn.query_row(
-                        "SELECT value FROM settings WHERE key = 'close_to_tray'",
-                        [],
-                        |row| {
-                            let value: String = row.get(0)?;
-                            Ok(value == "true")
-                        },
-                    ).unwrap_or(true); // 默认为 true
-                    
+
+                    let close_to_tray = if let Ok(db) = state.get_db() {
+                        db.conn().query_row(
+                            "SELECT value FROM settings WHERE key = 'close_to_tray'",
+                            [],
+                            |row| {
+                                let value: String = row.get(0)?;
+                                Ok(value == "true")
+                            },
+                        ).unwrap_or(true)
+                    } else {
+                        true
+                    };
+
                     if window.label() == "main" {
                         if close_to_tray {
-                            // 阻止关闭，隐藏到托盘
                             api.prevent_close();
                             let _ = window.hide();
                             log::info!("窗口关闭，最小化到托盘");
                         } else {
-                            // 允许关闭，退出应用；先清空剪贴板
                             if let Err(e) = crate::clipboard::clear_now(app_handle) {
                                 log::warn!("退出时清空剪贴板失败: {e}");
                             }
@@ -325,7 +296,6 @@ pub fn run() {
                     }
                 }
                 tauri::WindowEvent::Focused(focused) => {
-                    // 快速搜索窗口失去焦点时隐藏
                     if window.label() == "quick-search" && !focused {
                         let _ = window.hide();
                     }
@@ -335,4 +305,69 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// 注册全局快捷键
+fn register_shortcuts(app: &tauri::App, shortcuts_config: &commands::shortcuts::ShortcutConfig) {
+    log::info!("注册快捷键: {:?}", shortcuts_config);
+
+    let quick_search_shortcut = shortcuts_config.quick_search.clone();
+    app.global_shortcut().on_shortcut(quick_search_shortcut.as_str(), move |app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("quick-search") {
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = window.set_always_on_top(true);
+                let _ = window.emit("window-shown", ());
+            } else {
+                let window = tauri::WebviewWindowBuilder::new(
+                    app,
+                    "quick-search",
+                    tauri::WebviewUrl::App("quick-search.html".into())
+                )
+                .title("快速搜索")
+                .inner_size(600.0, 450.0)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .always_on_top(true)
+                .skip_taskbar(true)
+                .focused(true)
+                .center()
+                .build()
+                .expect("创建快速搜索窗口失败");
+                let _ = window.set_focus();
+            }
+        }
+    }).expect("注册快速搜索快捷键失败");
+
+    app.global_shortcut().on_shortcut("Escape", move |app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("quick-search") {
+                let _ = window.hide();
+            }
+        }
+    }).expect("注册 Esc 快捷键失败");
+
+    let quick_add_shortcut = shortcuts_config.quick_add.clone();
+    app.global_shortcut().on_shortcut(quick_add_shortcut.as_str(), move |app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = window.emit("show-quick-add", ());
+            }
+        }
+    }).expect("注册快速添加快捷键失败");
+
+    let password_generator_shortcut = shortcuts_config.password_generator.clone();
+    app.global_shortcut().on_shortcut(password_generator_shortcut.as_str(), move |app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+                let _ = window.emit("show-password-generator", ());
+            }
+        }
+    }).expect("注册密码生成器快捷键失败");
 }

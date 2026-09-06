@@ -15,8 +15,29 @@ use aes_gcm::{
 };
 use argon2::{
     password_hash::{rand_core::RngCore, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
+    Argon2, Algorithm, Version, Params,
 };
+
+// ==================== Argon2 安全参数 ====================
+// OWASP 推荐参数：64 MiB 内存、3 次迭代、1 并行度
+const ARGON2_MEMORY_COST: u32 = 65536;  // 64 MiB
+const ARGON2_ITERATIONS: u32 = 3;
+const ARGON2_PARALLELISM: u32 = 1;
+
+/// 创建配置了 OWASP 推荐参数的 Argon2 实例
+///
+/// 用于哈希主密码和派生 AES 密钥。
+/// 验证旧哈希时不需要此函数，因为 Argon2 PHC 字符串自带参数。
+fn argon2_instance<'a>() -> Argon2<'a> {
+    let params = Params::new(
+        ARGON2_MEMORY_COST,
+        ARGON2_ITERATIONS,
+        ARGON2_PARALLELISM,
+        Some(32), // 输出长度 32 字节
+    ).expect("Argon2 参数配置失败");
+
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+}
 
 /// 加密错误类型
 #[derive(Debug, thiserror::Error)]
@@ -71,8 +92,8 @@ pub fn hash_master_password(password: &str) -> Result<PasswordHashResult, Crypto
     // 生成随机盐值
     let salt = SaltString::generate(&mut OsRng);
 
-    // 配置 Argon2 参数
-    let argon2 = Argon2::default();
+    // 使用 OWASP 推荐参数的 Argon2id 实例
+    let argon2 = argon2_instance();
 
     // 对密码进行哈希
     let hash = argon2
@@ -127,6 +148,40 @@ pub fn generate_aes_salt() -> String {
     hex::encode(salt)
 }
 
+/// 生成数据库加密密钥盐（16 字节随机数，hex 编码）
+///
+/// 与 AES 密钥盐独立，用于派生 SQLCipher 数据库加密密钥。
+pub fn generate_db_salt() -> String {
+    let mut salt = [0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    hex::encode(salt)
+}
+
+/// 从主密码派生数据库加密密钥
+///
+/// 使用 Argon2id 从主密码和独立的数据库盐派生一个 32 字节密钥，
+/// 用于 SQLCipher 的 PRAGMA key。
+///
+/// # Arguments
+///
+/// * `password` - 明文主密码
+/// * `db_salt` - 数据库密钥盐（hex 字符串）
+///
+/// # Returns
+///
+/// 32 字节的数据库加密密钥
+pub fn derive_db_key(password: &str, db_salt: &str) -> Result<[u8; 32], CryptoError> {
+    let salt = hex::decode(db_salt)
+        .map_err(|e| CryptoError::HashError(e.to_string()))?;
+
+    let mut key = [0u8; 32];
+    argon2_instance()
+        .hash_password_into(password.as_bytes(), &salt, &mut key)
+        .map_err(|e| CryptoError::HashError(e.to_string()))?;
+
+    Ok(key)
+}
+
 /// 从主密码派生 AES-256 密钥
 ///
 /// 使用 Argon2id 从主密码和独立的 AES 盐派生一个 32 字节的 AES-256 密钥。
@@ -152,9 +207,9 @@ pub fn derive_aes_key(password: &str, aes_salt: &str) -> Result<[u8; 32], Crypto
     let salt = hex::decode(aes_salt)
         .map_err(|e| CryptoError::HashError(e.to_string()))?;
 
-    // 使用 Argon2id 直接输出 32 字节密钥
+    // 使用 OWASP 推荐参数的 Argon2id 派生 32 字节密钥
     let mut key = [0u8; 32];
-    Argon2::default()
+    argon2_instance()
         .hash_password_into(password.as_bytes(), &salt, &mut key)
         .map_err(|e| CryptoError::HashError(e.to_string()))?;
 

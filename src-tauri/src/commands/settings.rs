@@ -71,7 +71,8 @@ impl Default for Settings {
 /// ```
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 查询所有设置
     let mut stmt = conn
@@ -130,7 +131,8 @@ pub async fn get_setting(
     key: String,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 查询单个设置
     let result = conn.query_row(
@@ -174,13 +176,20 @@ pub async fn save_setting(
     value: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 使用 INSERT OR REPLACE 保存设置
     conn.execute(
         "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
         params![key, value],
     ).map_err(|e| e.to_string())?;
+
+    // 如果是自动锁定时间设置，同步更新空闲检测模块
+    if key == "auto_lock_time" {
+        let minutes: u64 = value.parse().unwrap_or(5);
+        crate::idle::set_auto_lock_minutes(minutes);
+    }
 
     Ok(())
 }
@@ -213,7 +222,8 @@ pub async fn save_settings(
     settings: Settings,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 批量保存设置
     let settings_vec = vec![
@@ -233,6 +243,9 @@ pub async fn save_settings(
             params![key, value],
         ).map_err(|e| e.to_string())?;
     }
+
+    // 同步更新空闲检测模块的自动锁定时间
+    crate::idle::set_auto_lock_minutes(settings.auto_lock_time);
 
     Ok(())
 }

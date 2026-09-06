@@ -13,7 +13,7 @@
 -->
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
@@ -62,10 +62,56 @@ onMounted(async () => {
 })
 
 /**
+ * 组件卸载时清理倒计时定时器
+ */
+onUnmounted(() => {
+  if (lockoutTimer) {
+    clearInterval(lockoutTimer)
+    lockoutTimer = null
+  }
+})
+
+/** 锁定倒计时秒数（暴力破解防护） */
+const lockoutRemaining = ref(0)
+
+/** 锁定倒计时定时器 */
+let lockoutTimer: ReturnType<typeof setInterval> | null = null
+
+/**
+ * 启动锁定倒计时
+ * @param seconds - 倒计时秒数
+ */
+const startLockoutCountdown = (seconds: number) => {
+  lockoutRemaining.value = seconds
+  if (lockoutTimer) clearInterval(lockoutTimer)
+  lockoutTimer = setInterval(() => {
+    lockoutRemaining.value--
+    if (lockoutRemaining.value <= 0) {
+      if (lockoutTimer) clearInterval(lockoutTimer)
+      lockoutTimer = null
+      error.value = ''
+    }
+  }, 1000)
+}
+
+/**
+ * 解析错误信息中的等待秒数
+ * @param msg - 错误信息
+ * @returns 秒数，如果解析失败返回 0
+ */
+const parseLockoutSeconds = (msg: string): number => {
+  const match = msg.match(/(\d+)\s*秒/)
+  return match ? parseInt(match[1], 10) : 0
+}
+
+/**
  * 处理解锁操作
  * 验证主密码，成功后跳转到主页
  */
 const handleUnlock = async () => {
+  // 锁定中不允许操作
+  if (lockoutRemaining.value > 0) return
+
   // 密码为空时显示提示
   if (!password.value) {
     error.value = '请输入主密码'
@@ -90,8 +136,15 @@ const handleUnlock = async () => {
       error.value = '密码错误，请重试'
     }
   } catch (e) {
-    // 捕获异常，显示错误提示
-    error.value = String(e)
+    // 捕获异常，检查是否是锁定错误
+    const msg = String(e)
+    const seconds = parseLockoutSeconds(msg)
+    if (seconds > 0) {
+      startLockoutCountdown(seconds)
+      error.value = msg
+    } else {
+      error.value = msg
+    }
   } finally {
     // 无论成功失败，都取消加载状态
     loading.value = false
@@ -245,7 +298,7 @@ const handleSetup = async () => {
       <CardFooter>
         <Button
           class="w-full"
-          :disabled="loading"
+          :disabled="loading || lockoutRemaining > 0"
           @click="isSetupMode ? handleSetup() : handleUnlock()"
         >
           <!-- 加载动画：仅在 loading 时显示 -->
@@ -260,8 +313,13 @@ const handleSetup = async () => {
           >
             <path d="M21 12a9 9 0 1 1-6.219-8.56" />
           </svg>
-          <!-- 按钮文字：根据模式和加载状态切换 -->
-          {{ loading ? '处理中...' : (isSetupMode ? '设置密码' : '解锁') }}
+          <!-- 按钮文字：根据模式、加载状态和锁定状态切换 -->
+          <template v-if="lockoutRemaining > 0">
+            请等待 {{ lockoutRemaining }} 秒
+          </template>
+          <template v-else>
+            {{ loading ? '处理中...' : (isSetupMode ? '设置密码' : '解锁') }}
+          </template>
         </Button>
       </CardFooter>
     </Card>

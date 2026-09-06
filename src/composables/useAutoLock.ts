@@ -64,9 +64,14 @@ export function useAutoLock() {
 
   /**
    * 用户活动事件处理函数
+   * 同时通知后端更新活动时间
    */
   const handleActivity = () => {
     resetTimer()
+    // 通知后端更新活动时间（用于后端空闲检测）
+    invoke('report_activity').catch(() => {
+      // 忽略错误，不影响前端功能
+    })
   }
 
   /**

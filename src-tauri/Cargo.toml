@@ -31,8 +31,8 @@ tauri-plugin-autostart = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-shell = "2"
 
-# 数据库
-rusqlite = { version = "0.31", features = ["bundled"] }
+# 数据库（SQLCipher 加密）
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # 加密相关
 argon2 = "0.5"
@@ -45,7 +45,9 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "1"
 hex = "0.4"
+zeroize = { version = "1", features = ["derive"] }
+parking_lot = "0.12"
 
-# Windows API（用于获取全局鼠标位置）
+# Windows API（用于获取全局鼠标位置和系统空闲时间）
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }

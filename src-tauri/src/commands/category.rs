@@ -49,7 +49,8 @@ pub struct Category {
 /// ```
 #[tauri::command]
 pub async fn get_categories(state: State<'_, AppState>) -> Result<Vec<Category>, String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 查询分类列表
     let mut stmt = conn
@@ -102,7 +103,8 @@ pub async fn add_category(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<Category, String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 生成唯一 ID
     let id = uuid::Uuid::new_v4().to_string();
@@ -156,7 +158,8 @@ pub async fn update_category(
     icon: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Category, String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 获取当前分类
     let current = conn.query_row(
@@ -240,7 +243,8 @@ pub async fn delete_category(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 将该分类下的密码移到"其他"分类
     conn.execute(

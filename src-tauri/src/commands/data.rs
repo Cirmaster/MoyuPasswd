@@ -153,7 +153,8 @@ pub async fn export_data(
     // 获取 AES 密钥
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 查询所有密码（含加密备注）
     let passwords = {
@@ -268,7 +269,7 @@ pub async fn import_data(
     // 获取 AES 密钥
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    // 识别格式：加密导出 or 历史明文
+    // 识别格式：仅接受加密导出格式，拒绝明文导入
     let import_data: ImportData = {
         let value: serde_json::Value =
             serde_json::from_str(&json).map_err(|e| format!("解析数据失败: {e}"))?;
@@ -281,11 +282,12 @@ pub async fn import_data(
             let plaintext = decrypt_export(&wrapper, &import_password)?;
             serde_json::from_str(&plaintext).map_err(|e| format!("解析数据失败: {e}"))?
         } else {
-            serde_json::from_str(&json).map_err(|e| format!("解析数据失败: {e}"))?
+            return Err("不支持明文导入，请使用加密导出文件".to_string());
         }
     };
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
     let now = chrono::Utc::now().timestamp_millis();
     let mut imported_count = 0;
 

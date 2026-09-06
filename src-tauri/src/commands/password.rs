@@ -238,7 +238,8 @@ pub async fn get_passwords(
     // 获取 AES 密钥（用于解密备注）
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 是否显示密码强度（开启时解密密码计算强度，仍不返回明文）
     let show_strength = is_show_strength_enabled(&conn);
@@ -343,7 +344,8 @@ fn get_password_internal(state: &AppState, id: &str) -> Result<PasswordItem, Str
     // 获取 AES 密钥
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 查询数据库
     let result = conn.query_row(
@@ -448,7 +450,8 @@ pub async fn add_password(
         _ => None,
     };
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 是否显示密码强度
     let show_strength = is_show_strength_enabled(&conn);
@@ -546,7 +549,8 @@ pub async fn update_password(
     let encrypted_password = if password.is_empty() {
         // 独立作用域：查询完立即释放数据库锁，避免与后续 UPDATE 死锁
         {
-            let conn = state.db.conn();
+            let db = state.get_db()?;
+    let conn = db.conn();
             conn.query_row(
                 "SELECT password_encrypted FROM passwords WHERE id = ?1",
                 params![id],
@@ -565,7 +569,8 @@ pub async fn update_password(
 
     let now = chrono::Utc::now().timestamp_millis();
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 是否显示密码强度
     let show_strength = is_show_strength_enabled(&conn);
@@ -642,7 +647,8 @@ pub async fn delete_password(
         return Err("应用未解锁".to_string());
     }
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
     let now = chrono::Utc::now().timestamp_millis();
 
     // 更新 deleted_at 字段（软删除）
@@ -682,7 +688,8 @@ pub async fn toggle_favorite(
         return Err("应用未解锁".to_string());
     }
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
     let now = chrono::Utc::now().timestamp_millis();
 
     // 切换 is_favorite 字段
@@ -735,7 +742,8 @@ pub async fn copy_password_to_clipboard(
     // 获取 AES 密钥
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 查询加密的密码
     let encrypted: String = conn

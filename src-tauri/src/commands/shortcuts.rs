@@ -55,7 +55,8 @@ impl Default for ShortcutConfig {
 /// ```
 #[tauri::command]
 pub async fn get_shortcuts(state: State<'_, AppState>) -> Result<ShortcutConfig, String> {
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 查询快捷键配置
     let result = conn.query_row(
@@ -115,7 +116,8 @@ pub async fn save_shortcuts(
 ) -> Result<(), String> {
     log::info!("收到快捷键保存请求: {:?}", shortcuts);
     
-    let conn = state.db.conn();
+    let db = state.get_db()?;
+    let conn = db.conn();
 
     // 序列化为 JSON
     let json = serde_json::to_string(&shortcuts).map_err(|e| {
@@ -164,7 +166,8 @@ pub async fn update_global_shortcuts(app: tauri::AppHandle) -> Result<(), String
     
     // 从数据库读取快捷键配置
     let shortcuts_config = {
-        let conn = state.db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
         let result = conn.query_row(
             "SELECT value FROM settings WHERE key = 'shortcuts'",
             [],
