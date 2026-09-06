@@ -39,7 +39,7 @@ const router = useRouter()
 /** 密码 Store */
 const passwordStore = usePasswordStore()
 const { categories, passwords } = storeToRefs(passwordStore)
-const { addCategory, deleteCategory, loadPasswords, loadCategories } = passwordStore
+const { addCategory, updateCategory, deleteCategory, loadPasswords, loadCategories } = passwordStore
 
 /** Toast 提示状态 */
 const toast = ref({
@@ -61,6 +61,9 @@ onMounted(async () => {
 /** 控制添加分类弹窗是否显示 */
 const showAddDialog = ref(false)
 
+/** 当前正在编辑的分类（null 表示添加模式） */
+const editingCategory = ref<Category | null>(null)
+
 /** 新分类名称输入 */
 const newCategoryName = ref('')
 
@@ -81,26 +84,49 @@ const getCategoryCount = (id: string) => {
 }
 
 /**
- * 添加新分类
+ * 打开添加分类弹窗
+ */
+const openAdd = () => {
+  editingCategory.value = null
+  newCategoryName.value = ''
+  showAddDialog.value = true
+}
+
+/**
+ * 打开编辑分类弹窗
+ * @param category - 要编辑的分类
+ */
+const openEdit = (category: Category) => {
+  editingCategory.value = category
+  newCategoryName.value = category.name
+  showAddDialog.value = true
+}
+
+/**
+ * 保存分类（添加或编辑）
  * 1. 验证分类名称不为空
- * 2. 调用 Store 添加分类
+ * 2. 根据 editingCategory 决定调用添加或更新
  * 3. 清空输入框并关闭弹窗
  */
-const handleAdd = async () => {
-  // 验证分类名称不为空
-  if (!newCategoryName.value.trim()) return
+const handleSave = async () => {
+  const name = newCategoryName.value.trim()
+  if (!name) return
 
+  const isEditing = !!editingCategory.value
   try {
-    // 添加分类
-    await addCategory(newCategoryName.value.trim())
-    // 清空输入框
+    if (isEditing && editingCategory.value) {
+      await updateCategory(editingCategory.value.id, name)
+      toast.value = { show: true, type: 'success', message: '分类更新成功' }
+    } else {
+      await addCategory(name)
+      toast.value = { show: true, type: 'success', message: '分类添加成功' }
+    }
+    // 清空输入框并关闭弹窗
     newCategoryName.value = ''
-    // 关闭弹窗
+    editingCategory.value = null
     showAddDialog.value = false
-    // 显示成功提示
-    toast.value = { show: true, type: 'success', message: '分类添加成功' }
   } catch (e) {
-    toast.value = { show: true, type: 'error', message: '添加失败: ' + String(e) }
+    toast.value = { show: true, type: 'error', message: (isEditing ? '更新' : '添加') + '失败: ' + String(e) }
   }
 }
 
@@ -150,7 +176,7 @@ const handleDelete = async (id: string) => {
     <div class="max-w-2xl mx-auto p-6">
       <div class="flex justify-between items-center mb-6">
         <p class="text-muted-foreground">管理您的密码分类</p>
-        <Button @click="showAddDialog = true">
+        <Button @click="openAdd">
           <svg
             xmlns="http://www.w3.org/2000/svg"
             class="h-4 w-4 mr-2"
@@ -177,24 +203,45 @@ const handleDelete = async (id: string) => {
                 {{ getCategoryCount(category.id) }} 个密码
               </p>
             </div>
-            <Button
+            <div
               v-if="category.id !== 'all' && category.id !== 'favorite'"
-              variant="ghost"
-              size="icon"
-              class="text-destructive hover:text-destructive"
-              @click="handleDelete(category.id)"
+              class="flex items-center gap-1"
             >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                class="h-4 w-4"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
+              <Button
+                variant="ghost"
+                size="icon"
+                @click="openEdit(category)"
               >
-                <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-              </svg>
-            </Button>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-4 w-4"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+                  <path d="m15 5 4 4" />
+                </svg>
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="text-destructive hover:text-destructive"
+                @click="handleDelete(category.id)"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  class="h-4 w-4"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                </svg>
+              </Button>
+            </div>
           </CardContent>
         </Card>
       </div>
@@ -204,8 +251,8 @@ const handleDelete = async (id: string) => {
     <Dialog v-model:open="showAddDialog">
       <DialogContent class="sm:max-w-[300px]">
         <DialogHeader>
-          <DialogTitle>添加分类</DialogTitle>
-          <DialogDescription>创建一个新的密码分类</DialogDescription>
+          <DialogTitle>{{ editingCategory ? '编辑分类' : '添加分类' }}</DialogTitle>
+          <DialogDescription>{{ editingCategory ? '修改分类名称' : '创建一个新的密码分类' }}</DialogDescription>
         </DialogHeader>
         <div class="py-4">
           <Label for="category-name">分类名称</Label>
@@ -218,7 +265,7 @@ const handleDelete = async (id: string) => {
         </div>
         <DialogFooter>
           <Button variant="outline" @click="showAddDialog = false">取消</Button>
-          <Button @click="handleAdd">添加</Button>
+          <Button @click="handleSave">{{ editingCategory ? '保存' : '添加' }}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

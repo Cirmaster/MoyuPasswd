@@ -33,7 +33,8 @@ const startCountdown = (seconds: number = 10) => {
 
     if (remaining.value <= 0) {
       stopCountdown()
-      clearClipboard()
+      // 剪贴板由后端兜底清除，前端只需关闭窗口
+      closeWindow()
     }
   }, 1000)
 }
@@ -53,19 +54,12 @@ const stopCountdown = () => {
  */
 const clearClipboard = async () => {
   try {
-    // 使用 Tauri 剪贴板插件清除
-    const { writeText } = await import('@tauri-apps/plugin-clipboard-manager')
-    await writeText('')
+    // 调用后端原生清空剪贴板（不向历史追加空记录）
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('clear_clipboard')
     console.log('Clipboard cleared')
   } catch (e) {
-    console.error('Failed to clear clipboard with plugin, trying fallback:', e)
-    try {
-      // 备用方案：通过 invoke 调用后端
-      const { invoke } = await import('@tauri-apps/api/core')
-      await invoke('clear_clipboard')
-    } catch (e2) {
-      console.error('Fallback also failed:', e2)
-    }
+    console.error('清除剪贴板失败:', e)
   }
   closeWindow()
 }
@@ -107,9 +101,9 @@ const closeWindow = async () => {
  * 点击数字取消倒计时并关闭
  */
 const handleClick = async () => {
-  console.log('Countdown clicked, closing window...')
+  console.log('Countdown clicked, clearing clipboard and closing...')
   stopCountdown()
-  await closeWindow()
+  await clearClipboard()
 }
 
 /**
@@ -135,6 +129,13 @@ onMounted(async () => {
     // 监听取消倒计时事件
     await listen('cancel-countdown', () => {
       console.log('Received cancel-countdown event')
+      stopCountdown()
+      closeWindow()
+    })
+
+    // 后端已完成清除（兜底），前端只需关闭窗口
+    await listen('clipboard-cleared', () => {
+      console.log('Received clipboard-cleared event')
       stopCountdown()
       closeWindow()
     })

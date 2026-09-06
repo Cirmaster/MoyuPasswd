@@ -22,6 +22,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { calcPasswordStrength } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -112,22 +114,19 @@ const charSets = {
  * - 6-7 分: 非常强（深绿色）
  */
 const strength = computed(() => {
-  const len = password.value.length
-  if (len === 0) return { level: 0, text: '', color: '' }
-
-  let score = 0
-  if (len >= 8) score++
-  if (len >= 12) score++
-  if (len >= 16) score++
-  if (/[A-Z]/.test(password.value)) score++
-  if (/[a-z]/.test(password.value)) score++
-  if (/[0-9]/.test(password.value)) score++
-  if (/[^A-Za-z0-9]/.test(password.value)) score++
-
-  if (score <= 2) return { level: 1, text: '弱', color: 'text-destructive' }
-  if (score <= 4) return { level: 2, text: '中', color: 'text-yellow-500' }
-  if (score <= 5) return { level: 3, text: '强', color: 'text-green-500' }
-  return { level: 4, text: '非常强', color: 'text-emerald-500' }
+  const level = calcPasswordStrength(password.value)
+  switch (level) {
+    case 1:
+      return { level: 1, text: '弱', color: 'text-destructive' }
+    case 2:
+      return { level: 2, text: '中', color: 'text-yellow-500' }
+    case 3:
+      return { level: 3, text: '强', color: 'text-green-500' }
+    case 4:
+      return { level: 4, text: '非常强', color: 'text-emerald-500' }
+    default:
+      return { level: 0, text: '', color: '' }
+  }
 })
 
 /**
@@ -166,7 +165,12 @@ const generate = () => {
  */
 const copyToClipboard = async () => {
   try {
-    await navigator.clipboard.writeText(password.value)
+    // 生成密码属于敏感内容，复制后由后端兜底定时清除
+    const settings = await invoke<{ clipboard_clear_time: number }>('get_settings')
+    await invoke('copy_text_to_clipboard', {
+      text: password.value,
+      clearAfter: settings.clipboard_clear_time || 30,
+    })
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
   } catch {
     toast.value = { show: true, type: 'error', message: '复制失败' }

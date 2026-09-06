@@ -54,6 +54,11 @@ impl Database {
         // 执行迁移
         db.migrate()?;
 
+        // 收紧数据库文件 ACL（Windows；失败不致命，仅记录日志）
+        if let Err(e) = crate::acl::harden_file_acl(&db_path) {
+            log::warn!("数据库文件 ACL 加固失败: {e}");
+        }
+
         Ok(db)
     }
 
@@ -66,7 +71,7 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS _migrations (
                 version INTEGER PRIMARY KEY,
                 description TEXT NOT NULL,
-                applied_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+                applied_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
             );"
         ).map_err(|e| e.to_string())?;
 
@@ -122,8 +127,8 @@ fn get_migrations() -> Vec<Migration> {
                     id INTEGER PRIMARY KEY DEFAULT 1,
                     hash TEXT NOT NULL,
                     salt TEXT NOT NULL,
-                    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-                    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+                    created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+                    updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
                 );
 
                 -- 密码表：存储加密的密码数据
@@ -136,8 +141,8 @@ fn get_migrations() -> Vec<Migration> {
                     notes TEXT,
                     category_id TEXT DEFAULT 'other',
                     is_favorite INTEGER DEFAULT 0,
-                    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-                    updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+                    created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
+                    updated_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000),
                     deleted_at INTEGER
                 );
 
@@ -147,7 +152,7 @@ fn get_migrations() -> Vec<Migration> {
                     name TEXT NOT NULL,
                     icon TEXT,
                     sort_order INTEGER DEFAULT 0,
-                    created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
+                    created_at INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER) * 1000)
                 );
 
                 -- 设置表：存储应用设置
@@ -177,6 +182,22 @@ fn get_migrations() -> Vec<Migration> {
                 INSERT OR IGNORE INTO settings (key, value) VALUES ('clipboard_clear_time', '30');
                 INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'system');
                 INSERT OR IGNORE INTO settings (key, value) VALUES ('language', 'zh-CN');
+            ",
+        },
+        Migration {
+            version: 3,
+            description: "add_aes_salt_to_master_password",
+            sql: "
+                -- 新增 AES 密钥盐列（独立于验证哈希盐，用于 Argon2id 密钥派生）
+                ALTER TABLE master_password ADD COLUMN aes_salt TEXT;
+            ",
+        },
+        Migration {
+            version: 4,
+            description: "add_notes_encrypted_to_passwords",
+            sql: "
+                -- 新增加密备注列（备注与密码同样使用 AES-256-GCM 加密）
+                ALTER TABLE passwords ADD COLUMN notes_encrypted TEXT;
             ",
         },
     ]

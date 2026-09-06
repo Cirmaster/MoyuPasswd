@@ -96,7 +96,7 @@ const results = computed(() => {
  */
 const copyToClipboard = async (text: string) => {
   try {
-    await navigator.clipboard.writeText(text)
+    await invoke('copy_text_to_clipboard', { text, clearAfter: null })
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
     // 复制成功后关闭弹窗
     emit('update:open', false)

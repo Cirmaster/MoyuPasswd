@@ -58,19 +58,19 @@ onMounted(async () => {
       auto_start: boolean
       close_to_tray: boolean
       show_password_strength: boolean
-      require_master_password: boolean
+      show_on_startup: boolean
     }>('get_settings')
 
     // 应用通用设置
     settings.value.language = savedSettings.language
     settings.value.autoStart = savedSettings.auto_start
     settings.value.closeToTray = savedSettings.close_to_tray ?? true
+    settings.value.showOnStartup = savedSettings.show_on_startup ?? true
 
     // 应用安全设置
     security.value.autoLockTime = savedSettings.auto_lock_time
     security.value.clipboardClearTime = savedSettings.clipboard_clear_time
     security.value.showPasswordStrength = savedSettings.show_password_strength
-    security.value.requireMasterPassword = savedSettings.require_master_password ?? true
 
     // 应用主题
     if (savedSettings.theme && savedSettings.theme !== theme.value) {
@@ -119,6 +119,8 @@ const settings = ref({
   autoStart: false,
   /** 是否关闭时最小化到托盘（而不是退出） */
   closeToTray: true,
+  /** 启动时是否显示主窗口 */
+  showOnStartup: true,
 })
 
 /**
@@ -131,8 +133,6 @@ const security = ref({
   clipboardClearTime: 30,
   /** 是否在密码列表中显示密码强度指示器 */
   showPasswordStrength: true,
-  /** 启动时是否需要输入主密码 */
-  requireMasterPassword: true,
 })
 
 /**
@@ -253,18 +253,30 @@ const saveShortcut = async (key: 'quickSearch' | 'quickAdd' | 'passwordGenerator
 }
 
 /**
- * 取消编辑快捷键
+ * 退出快捷键编辑模式并恢复全局快捷键
+ *
+ * 所有退出编辑态的路径（保存、取消、离开页面、组件卸载）统一走这里，
+ * 避免「进入编辑后直接离开页面导致全局快捷键未被恢复」的问题。
  */
-const cancelEditShortcut = async () => {
+const exitEditMode = async () => {
+  if (!editingShortcut.value) return
+
   editingShortcut.value = null
   shortcutInput.value = ''
-  
-  // 重新注册全局快捷键
+
+  // 重新注册全局快捷键（update_global_shortcuts 内部先注销再注册，幂等）
   try {
     await invoke('update_global_shortcuts')
   } catch (e) {
     console.warn('重新注册快捷键失败:', e)
   }
+}
+
+/**
+ * 取消编辑快捷键
+ */
+const cancelEditShortcut = () => {
+  exitEditMode()
 }
 
 /**
@@ -308,6 +320,8 @@ watch(editingShortcut, (newValue) => {
  */
 onUnmounted(() => {
   document.removeEventListener('keydown', globalKeydownInterceptor, { capture: true })
+  // 离开页面时若仍处于编辑态，恢复全局快捷键（兜底）
+  exitEditMode()
 })
 
 /**
@@ -448,7 +462,7 @@ const handleSaveGeneral = async () => {
         auto_start: settings.value.autoStart,
         close_to_tray: settings.value.closeToTray,
         show_password_strength: security.value.showPasswordStrength,
-        require_master_password: security.value.requireMasterPassword,
+        show_on_startup: settings.value.showOnStartup,
       },
     })
 
@@ -481,7 +495,7 @@ const handleSaveSecurity = async () => {
         auto_start: settings.value.autoStart,
         close_to_tray: settings.value.closeToTray,
         show_password_strength: security.value.showPasswordStrength,
-        require_master_password: security.value.requireMasterPassword,
+        show_on_startup: settings.value.showOnStartup,
       },
     })
     showToast('success', '安全设置已保存')
@@ -539,12 +553,19 @@ const handleChangePassword = async () => {
   }
 }
 
+/** 备份密码（用于加密导出/解密导入） */
+const backupPassword = ref('')
+
 /**
  * 导出数据
  */
 const handleExport = async () => {
+  if (!backupPassword.value) {
+    showToast('error', '请先设置备份密码')
+    return
+  }
   try {
-    const data = await invoke<string>('export_data')
+    const data = await invoke<string>('export_data', { exportPassword: backupPassword.value })
 
     // 创建下载链接
     const blob = new Blob([data], { type: 'application/json' })
@@ -581,7 +602,7 @@ const handleImport = async () => {
       reader.onload = async (event) => {
         try {
           const json = event.target?.result as string
-          const count = await invoke<number>('import_data', { json })
+          const count = await invoke<number>('import_data', { json, importPassword: backupPassword.value })
           showToast('success', `成功导入 ${count} 条密码`)
         } catch (err) {
           showToast('error', '导入失败: ' + String(err))
@@ -698,6 +719,19 @@ const handleImport = async () => {
                 />
               </div>
 
+              <!-- 启动时显示主窗口 -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>启动时显示主窗口</Label>
+                  <p class="text-sm text-muted-foreground">应用启动时直接显示主窗口，关闭后仅驻留系统托盘</p>
+                </div>
+                <input
+                  v-model="settings.showOnStartup"
+                  type="checkbox"
+                  class="h-4 w-4"
+                />
+              </div>
+
               <Button @click="handleSaveGeneral">保存设置</Button>
             </CardContent>
           </Card>
@@ -743,19 +777,6 @@ const handleImport = async () => {
                 </div>
                 <input
                   v-model="security.showPasswordStrength"
-                  type="checkbox"
-                  class="h-4 w-4"
-                />
-              </div>
-
-              <!-- 需要主密码 -->
-              <div class="flex items-center justify-between">
-                <div>
-                  <Label>启动时需要主密码</Label>
-                  <p class="text-sm text-muted-foreground">每次启动应用都需要输入主密码</p>
-                </div>
-                <input
-                  v-model="security.requireMasterPassword"
                   type="checkbox"
                   class="h-4 w-4"
                 />
@@ -1047,6 +1068,18 @@ const handleImport = async () => {
               <CardDescription>导入导出您的密码数据</CardDescription>
             </CardHeader>
             <CardContent class="space-y-6">
+              <!-- 备份密码 -->
+              <div class="space-y-2">
+                <Label for="backup-password">备份密码</Label>
+                <Input
+                  id="backup-password"
+                  v-model="backupPassword"
+                  type="password"
+                  placeholder="导出/导入时使用的密码"
+                />
+                <p class="text-sm text-muted-foreground">导出文件将用此密码加密，导入加密文件时需输入相同密码。</p>
+              </div>
+
               <!-- 导出 -->
               <div class="flex items-center justify-between p-4 border rounded-lg">
                 <div>

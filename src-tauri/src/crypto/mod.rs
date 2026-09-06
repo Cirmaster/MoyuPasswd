@@ -17,7 +17,6 @@ use argon2::{
     password_hash::{rand_core::RngCore, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use sha2::{Sha256, Digest};
 
 /// 加密错误类型
 #[derive(Debug, thiserror::Error)]
@@ -118,15 +117,28 @@ pub fn verify_master_password(password: &str, stored_hash: &str) -> Result<bool,
     }
 }
 
+/// 生成 AES 密钥盐（16 字节随机数，hex 编码）
+///
+/// 与主密码验证哈希的盐相互独立，用于派生 AES-256 密钥。
+/// 保证即使验证哈希被破解，加密密钥也无法从数据库直接还原。
+pub fn generate_aes_salt() -> String {
+    let mut salt = [0u8; 16];
+    OsRng.fill_bytes(&mut salt);
+    hex::encode(salt)
+}
+
 /// 从主密码派生 AES-256 密钥
 ///
-/// 使用 Argon2 从主密码和盐值派生一个 32 字节的 AES-256 密钥。
+/// 使用 Argon2id 从主密码和独立的 AES 盐派生一个 32 字节的 AES-256 密钥。
 /// 相同的密码和盐值总是产生相同的密钥。
+///
+/// 注意：这里必须使用独立的 `aes_salt`，不能复用 `hash_master_password` 返回的盐，
+/// 否则密钥会与验证哈希同源，导致密钥以可还原形式残留在数据库中。
 ///
 /// # Arguments
 ///
 /// * `password` - 明文主密码
-/// * `salt` - 盐值（来自 hash_master_password 返回的 salt）
+/// * `aes_salt` - AES 密钥盐（由 `generate_aes_salt` 生成的 hex 字符串）
 ///
 /// # Returns
 ///
@@ -135,17 +147,16 @@ pub fn verify_master_password(password: &str, stored_hash: &str) -> Result<bool,
 /// # Errors
 ///
 /// 如果密钥派生失败，返回 `CryptoError`
-pub fn derive_aes_key(password: &str, salt: &str) -> Result<[u8; 32], CryptoError> {
-    // 使用 SHA-256 从密码和盐值派生密钥
-    // 这是确定性的，相同的密码+盐值总是产生相同的密钥
-    let mut hasher = Sha256::new();
-    hasher.update(password.as_bytes());
-    hasher.update(salt.as_bytes());
-    hasher.update(b"moyu-passwd-aes-key"); // 固定后缀，防止与其他用途冲突
-    let result = hasher.finalize();
+pub fn derive_aes_key(password: &str, aes_salt: &str) -> Result<[u8; 32], CryptoError> {
+    // 解析 hex 盐
+    let salt = hex::decode(aes_salt)
+        .map_err(|e| CryptoError::HashError(e.to_string()))?;
 
+    // 使用 Argon2id 直接输出 32 字节密钥
     let mut key = [0u8; 32];
-    key.copy_from_slice(&result);
+    Argon2::default()
+        .hash_password_into(password.as_bytes(), &salt, &mut key)
+        .map_err(|e| CryptoError::HashError(e.to_string()))?;
 
     Ok(key)
 }
@@ -222,6 +233,53 @@ pub fn decrypt_aes256gcm(key: &[u8; 32], encrypted_data: &EncryptedData) -> Resu
     Ok(plaintext)
 }
 
+/// 计算密码强度等级
+///
+/// 评分规则：长度 ≥8/≥12/≥16 各 +1，含小写/大写/数字/特殊字符各 +1，
+/// 总分 0–7 映射到 1–4 档。
+///
+/// # Returns
+///
+/// 0(空/未知) | 1(弱) | 2(中) | 3(强) | 4(非常强)
+pub fn password_strength_level(password: &str) -> i32 {
+    if password.is_empty() {
+        return 0;
+    }
+
+    let mut score = 0;
+    if password.len() >= 8 {
+        score += 1;
+    }
+    if password.len() >= 12 {
+        score += 1;
+    }
+    if password.len() >= 16 {
+        score += 1;
+    }
+    if password.chars().any(|c| c.is_ascii_lowercase()) {
+        score += 1;
+    }
+    if password.chars().any(|c| c.is_ascii_uppercase()) {
+        score += 1;
+    }
+    if password.chars().any(|c| c.is_ascii_digit()) {
+        score += 1;
+    }
+    if password.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        score += 1;
+    }
+
+    if score <= 2 {
+        1
+    } else if score <= 4 {
+        2
+    } else if score <= 5 {
+        3
+    } else {
+        4
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,8 +295,8 @@ mod tests {
 
     #[test]
     fn test_encrypt_and_decrypt() {
-        let hash_result = hash_master_password("test_password").unwrap();
-        let key = derive_aes_key("test_password", &hash_result.salt).unwrap();
+        let aes_salt = generate_aes_salt();
+        let key = derive_aes_key("test_password", &aes_salt).unwrap();
         let plaintext = b"Hello, World!";
 
         let encrypted = encrypt_aes256gcm(&key, plaintext).unwrap();
@@ -249,9 +307,18 @@ mod tests {
 
     #[test]
     fn test_derive_key_deterministic() {
-        let hash_result = hash_master_password("test_password").unwrap();
-        let key1 = derive_aes_key("test_password", &hash_result.salt).unwrap();
-        let key2 = derive_aes_key("test_password", &hash_result.salt).unwrap();
+        let aes_salt = generate_aes_salt();
+        let key1 = derive_aes_key("test_password", &aes_salt).unwrap();
+        let key2 = derive_aes_key("test_password", &aes_salt).unwrap();
         assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_derive_key_different_salts_differ() {
+        let salt1 = generate_aes_salt();
+        let salt2 = generate_aes_salt();
+        let key1 = derive_aes_key("test_password", &salt1).unwrap();
+        let key2 = derive_aes_key("test_password", &salt2).unwrap();
+        assert_ne!(key1, key2);
     }
 }

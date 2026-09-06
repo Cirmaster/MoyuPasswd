@@ -33,8 +33,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     /// 是否显示密码强度
     pub show_password_strength: bool,
-    /// 启动时是否需要主密码
-    pub require_master_password: bool,
+    /// 启动时是否显示主窗口
+    pub show_on_startup: bool,
 }
 
 impl Default for Settings {
@@ -47,7 +47,7 @@ impl Default for Settings {
             auto_start: false,
             close_to_tray: true,
             show_password_strength: true,
-            require_master_password: true,
+            show_on_startup: true,
         }
     }
 }
@@ -99,7 +99,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String
             "auto_start" => settings.auto_start = value == "true",
             "close_to_tray" => settings.close_to_tray = value == "true",
             "show_password_strength" => settings.show_password_strength = value == "true",
-            "require_master_password" => settings.require_master_password = value == "true",
+            "show_on_startup" => settings.show_on_startup = value == "true",
             _ => {}
         }
     }
@@ -224,7 +224,7 @@ pub async fn save_settings(
         ("auto_start", settings.auto_start.to_string()),
         ("close_to_tray", settings.close_to_tray.to_string()),
         ("show_password_strength", settings.show_password_strength.to_string()),
-        ("require_master_password", settings.require_master_password.to_string()),
+        ("show_on_startup", settings.show_on_startup.to_string()),
     ];
 
     for (key, value) in settings_vec {

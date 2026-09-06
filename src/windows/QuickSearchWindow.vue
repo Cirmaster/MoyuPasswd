@@ -172,7 +172,7 @@ const handleUnlock = async () => {
  */
 const copyAndClose = async (text: string) => {
   try {
-    await navigator.clipboard.writeText(text)
+    await invoke('copy_text_to_clipboard', { text, clearAfter: null })
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
 
     // 启动全局倒计时窗口（显示在屏幕中央），使用设置中的清除时间

@@ -11,11 +11,15 @@
 //! - `get_countdown_seconds`: 获取倒计时秒数
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 use tauri::{Emitter, Manager};
 
 /// 全局标志，用于停止光标跟随线程
 static FOLLOW_CURSOR_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// 光标跟随线程句柄（受管，用于停止时回收线程）
+static FOLLOW_CURSOR_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 
 /// 全局倒计时秒数
 static COUNTDOWN_SECONDS: AtomicU32 = AtomicU32::new(10);
@@ -57,17 +61,12 @@ fn get_cursor_position() -> Option<(i32, i32)> {
 /// ```
 #[tauri::command]
 pub async fn start_follow_cursor(app: tauri::AppHandle) -> Result<(), String> {
-    // 如果已经在运行，先停止
-    if FOLLOW_CURSOR_RUNNING.load(Ordering::SeqCst) {
-        FOLLOW_CURSOR_RUNNING.store(false, Ordering::SeqCst);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
+    // 停止并回收旧线程，避免重复启动导致多线程竞态
+    stop_follow_cursor_internal();
 
     FOLLOW_CURSOR_RUNNING.store(true, Ordering::SeqCst);
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
 
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         log::info!("Cursor follow thread started");
 
         while FOLLOW_CURSOR_RUNNING.load(Ordering::SeqCst) {
@@ -87,7 +86,22 @@ pub async fn start_follow_cursor(app: tauri::AppHandle) -> Result<(), String> {
         log::info!("Cursor follow thread stopped");
     });
 
+    if let Ok(mut guard) = FOLLOW_CURSOR_HANDLE.lock() {
+        *guard = Some(handle);
+    }
+
     Ok(())
+}
+
+/// 停止跟随光标（内部实现：置标志 + join 回收线程）
+fn stop_follow_cursor_internal() {
+    FOLLOW_CURSOR_RUNNING.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = FOLLOW_CURSOR_HANDLE.lock() {
+        if let Some(handle) = guard.take() {
+            // 线程最多再运行一个循环（约 16ms）即退出
+            let _ = handle.join();
+        }
+    }
 }
 
 /// 停止跟随光标
@@ -99,7 +113,7 @@ pub async fn start_follow_cursor(app: tauri::AppHandle) -> Result<(), String> {
 /// ```
 #[tauri::command]
 pub async fn stop_follow_cursor() -> Result<(), String> {
-    FOLLOW_CURSOR_RUNNING.store(false, Ordering::SeqCst);
+    stop_follow_cursor_internal();
     log::info!("Cursor follow stopped");
     Ok(())
 }
@@ -219,8 +233,7 @@ pub async fn hide_countdown(app: tauri::AppHandle) -> Result<(), String> {
 /// ```
 #[tauri::command]
 pub async fn clear_clipboard(app: tauri::AppHandle) -> Result<(), String> {
-    use tauri_plugin_clipboard_manager::ClipboardExt;
-    app.clipboard().write_text(String::new()).map_err(|e| e.to_string())?;
+    crate::clipboard::clear_now(&app)?;
     log::info!("Clipboard cleared");
     Ok(())
 }

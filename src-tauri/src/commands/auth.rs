@@ -79,11 +79,14 @@ pub async fn set_master_password(
     let hash_result = crypto::hash_master_password(&password)
         .map_err(|e| AuthError::Crypto(e.to_string()).to_string())?;
 
+    // 生成独立的 AES 密钥盐
+    let aes_salt = crypto::generate_aes_salt();
+
     // 保存到数据库
-    save_master_password(&state, &hash_result.hash, &hash_result.salt)?;
+    save_master_password(&state, &hash_result.hash, &hash_result.salt, &aes_salt)?;
 
     // 派生 AES 密钥并存储到状态
-    let aes_key = crypto::derive_aes_key(&password, &hash_result.salt)
+    let aes_key = crypto::derive_aes_key(&password, &aes_salt)
         .map_err(|e| AuthError::Crypto(e.to_string()).to_string())?;
     state.set_aes_key(aes_key);
 
@@ -114,7 +117,7 @@ pub async fn verify_master_password(
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     // 获取存储的哈希值和盐值
-    let (stored_hash, salt) = get_stored_credentials(&state)?;
+    let (stored_hash, _salt, aes_salt) = get_stored_credentials(&state)?;
 
     // 如果没有设置主密码，返回错误
     if stored_hash.is_empty() {
@@ -127,7 +130,9 @@ pub async fn verify_master_password(
 
     if is_valid {
         // 验证成功，派生 AES 密钥并存储
-        let aes_key = crypto::derive_aes_key(&password, &salt)
+        let aes_salt = aes_salt
+            .ok_or_else(|| "数据库缺少密钥盐，无法解密（旧版本数据需重新初始化）".to_string())?;
+        let aes_key = crypto::derive_aes_key(&password, &aes_salt)
             .map_err(|e| AuthError::Crypto(e.to_string()).to_string())?;
         state.set_aes_key(aes_key);
         Ok(true)
@@ -165,7 +170,7 @@ pub async fn change_master_password(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     // 获取存储的哈希值和盐值
-    let (stored_hash, _salt) = get_stored_credentials(&state)?;
+    let (stored_hash, _salt, old_aes_salt) = get_stored_credentials(&state)?;
 
     // 验证旧密码
     let is_valid = crypto::verify_master_password(&old_password, &stored_hash)
@@ -175,17 +180,32 @@ pub async fn change_master_password(
         return Err(AuthError::WrongOldPassword.to_string());
     }
 
+    // 用旧盐派生旧密钥
+    let old_aes_salt = old_aes_salt
+        .ok_or_else(|| "数据库缺少密钥盐，无法解密（旧版本数据需重新初始化）".to_string())?;
+    let old_key = crypto::derive_aes_key(&old_password, &old_aes_salt)
+        .map_err(|e| AuthError::Crypto(e.to_string()).to_string())?;
+
     // 对新密码进行哈希
     let hash_result = crypto::hash_master_password(&new_password)
         .map_err(|e| AuthError::Crypto(e.to_string()).to_string())?;
 
-    // 更新数据库
-    update_master_password(&state, &hash_result.hash, &hash_result.salt)?;
-
-    // 更新 AES 密钥
-    let aes_key = crypto::derive_aes_key(&new_password, &hash_result.salt)
+    // 生成新的独立 AES 密钥盐，并派生新密钥
+    let new_aes_salt = crypto::generate_aes_salt();
+    let new_key = crypto::derive_aes_key(&new_password, &new_aes_salt)
         .map_err(|e| AuthError::Crypto(e.to_string()).to_string())?;
-    state.set_aes_key(aes_key);
+
+    // 在同一个事务中：重加密全部已有密码 + 更新 master_password，保证原子提交
+    {
+        let conn = state.db.conn();
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        crate::commands::password::reencrypt_all_passwords(&tx, &old_key, &new_key)?;
+        update_master_password(&tx, &hash_result.hash, &hash_result.salt, &new_aes_salt)?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+
+    // 更新内存中的 AES 密钥
+    state.set_aes_key(new_key);
 
     Ok(())
 }
@@ -209,6 +229,11 @@ pub async fn change_master_password(
 pub async fn lock_app(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<(), String> {
     // 清除 AES 密钥
     state.clear_aes_key();
+
+    // 清空剪贴板（避免刚复制的密码残留），失败不阻断锁定
+    if let Err(e) = crate::clipboard::clear_now(&app) {
+        log::warn!("锁定时清空剪贴板失败: {e}");
+    }
 
     // 通知所有窗口已锁定
     let _ = app.emit("app-locked", ());
@@ -281,53 +306,57 @@ fn save_master_password(
     state: &State<'_, AppState>,
     hash: &str,
     salt: &str,
+    aes_salt: &str,
 ) -> Result<(), String> {
     let conn = state.db.conn();
+    let now = chrono::Utc::now().timestamp_millis();
 
     // 插入 master_password 表
     conn.execute(
-        "INSERT INTO master_password (id, hash, salt) VALUES (1, ?1, ?2)",
-        params![hash, salt],
+        "INSERT INTO master_password (id, hash, salt, aes_salt, created_at, updated_at) VALUES (1, ?1, ?2, ?3, ?4, ?4)",
+        params![hash, salt, aes_salt, now],
     ).map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
-/// 更新主密码哈希
+/// 更新主密码哈希（在调用方的事务中执行）
 fn update_master_password(
-    state: &State<'_, AppState>,
+    conn: &rusqlite::Connection,
     hash: &str,
     salt: &str,
+    aes_salt: &str,
 ) -> Result<(), String> {
-    let conn = state.db.conn();
+    let now = chrono::Utc::now().timestamp_millis();
 
     // 更新 master_password 表
     conn.execute(
-        "UPDATE master_password SET hash = ?1, salt = ?2, updated_at = strftime('%s', 'now') WHERE id = 1",
-        params![hash, salt],
+        "UPDATE master_password SET hash = ?1, salt = ?2, aes_salt = ?3, updated_at = ?4 WHERE id = 1",
+        params![hash, salt, aes_salt, now],
     ).map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
-/// 获取存储的凭证（哈希值和盐值）
-fn get_stored_credentials(state: &State<'_, AppState>) -> Result<(String, String), String> {
+/// 获取存储的凭证（哈希值、盐值、AES 密钥盐）
+fn get_stored_credentials(state: &State<'_, AppState>) -> Result<(String, String, Option<String>), String> {
     let conn = state.db.conn();
 
     // 查询 master_password 表
     let result = conn.query_row(
-        "SELECT hash, salt FROM master_password WHERE id = 1",
+        "SELECT hash, salt, aes_salt FROM master_password WHERE id = 1",
         [],
         |row| {
             let hash: String = row.get(0)?;
             let salt: String = row.get(1)?;
-            Ok((hash, salt))
+            let aes_salt: Option<String> = row.get(2)?;
+            Ok((hash, salt, aes_salt))
         },
     );
 
     match result {
-        Ok((hash, salt)) => Ok((hash, salt)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok((String::new(), String::new())),
+        Ok((hash, salt, aes_salt)) => Ok((hash, salt, aes_salt)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok((String::new(), String::new(), None)),
         Err(e) => Err(e.to_string()),
     }
 }

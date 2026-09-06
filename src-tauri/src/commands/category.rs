@@ -107,8 +107,8 @@ pub async fn add_category(
     // 生成唯一 ID
     let id = uuid::Uuid::new_v4().to_string();
 
-    // 获取当前时间戳
-    let now = chrono::Utc::now().timestamp();
+    // 获取当前时间戳（毫秒）
+    let now = chrono::Utc::now().timestamp_millis();
 
     // 插入数据库
     conn.execute(
@@ -175,8 +175,27 @@ pub async fn update_category(
     match current {
         Ok((current_id, current_name, current_icon, sort_order, created_at)) => {
             // 使用新值或当前值
-            let new_name = name.unwrap_or(current_name);
             let new_icon = icon.or(current_icon);
+            let new_name = name.unwrap_or(current_name);
+
+            // 名称去空白，为空则报错
+            let trimmed = new_name.trim();
+            if trimmed.is_empty() {
+                return Err("分类名称不能为空".to_string());
+            }
+            let new_name = trimmed.to_string();
+
+            // 同名校验（排除自身）
+            let dup: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM categories WHERE name = ?1 AND id != ?2",
+                    params![new_name, current_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            if dup > 0 {
+                return Err("已存在同名分类".to_string());
+            }
 
             // 更新数据库
             conn.execute(

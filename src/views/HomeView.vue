@@ -39,9 +39,10 @@ import {
 } from '@/components/ui/table'
 import { usePasswordStore, type PasswordItem } from '@/stores/password'
 import { useTheme } from '@/composables/useTheme'
-import { useAutoLock } from '@/composables/useAutoLock'
+import { formatTimestamp } from '@/lib/utils'
 import PasswordFormDialog from '@/components/PasswordFormDialog.vue'
 import PasswordGenerator from '@/components/PasswordGenerator.vue'
+import PasswordStrength from '@/components/PasswordStrength.vue'
 import QuickSearch from '@/components/QuickSearch.vue'
 import QuickAdd from '@/components/QuickAdd.vue'
 import Toast from '@/components/Toast.vue'
@@ -54,9 +55,6 @@ const router = useRouter()
 /** 主题管理 */
 const { isDark, toggleTheme } = useTheme()
 
-/** 自动锁定 */
-const { setLockTimeout } = useAutoLock()
-
 /** 剪贴板清除时间（秒），从设置中读取 */
 const clipboardClearTime = ref(30)
 
@@ -67,7 +65,7 @@ const clipboardClearTime = ref(30)
  */
 const copyToClipboard = async (text: string, event?: MouseEvent) => {
   try {
-    await navigator.clipboard.writeText(text)
+    await invoke('copy_text_to_clipboard', { text, clearAfter: null })
     showToast('success', '已复制')
 
     // 获取鼠标位置并显示全局倒计时窗口
@@ -108,8 +106,6 @@ onMounted(async () => {
       auto_lock_time: number
     }>('get_settings')
     clipboardClearTime.value = savedSettings.clipboard_clear_time || 30
-    // 设置自动锁定时间
-    setLockTimeout(savedSettings.auto_lock_time || 5)
   } catch (e) {
     console.warn('加载设置失败:', e)
   }
@@ -211,15 +207,6 @@ const copyPasswordViaBackend = async (id: string, event?: MouseEvent) => {
     console.error('复制密码失败:', e)
     showToast('error', String(e))
   }
-}
-
-/**
- * 格式化时间戳为本地日期字符串
- * @param timestamp - Unix 时间戳（毫秒）
- * @returns 格式化后的日期字符串，如 "2024/1/15"
- */
-const formatDate = (timestamp: number) => {
-  return new Date(timestamp).toLocaleDateString('zh-CN')
 }
 
 /**
@@ -484,6 +471,11 @@ const handleLock = async () => {
                 <TableCell>
                   <div class="flex items-center gap-2">
                     <span>••••••••</span>
+                    <PasswordStrength
+                      v-if="item.password_strength"
+                      :level="item.password_strength"
+                      class="w-20"
+                    />
                     <button
                       class="text-muted-foreground hover:text-foreground transition-colors"
                       @click="(e) => copyPasswordViaBackend(item.id, e)"
@@ -508,7 +500,7 @@ const handleLock = async () => {
                   </Badge>
                 </TableCell>
                 <TableCell class="text-muted-foreground text-sm">
-                  {{ formatDate(item.updated_at) }}
+                  {{ formatTimestamp(item.updated_at) }}
                 </TableCell>
                 <TableCell class="text-right">
                   <div class="flex items-center justify-end gap-1">

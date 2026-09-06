@@ -193,7 +193,6 @@ pub async fn update_global_shortcuts(app: tauri::AppHandle) -> Result<(), String
     log::info!("已注销所有快捷键");
     
     // 重新注册快速搜索快捷键
-    let app_clone = app.clone();
     let quick_search = shortcuts_config.quick_search.clone();
     let quick_search_for_closure = quick_search.clone();
     global_shortcut.on_shortcut(quick_search.as_str(), move |app, _shortcut, event| {

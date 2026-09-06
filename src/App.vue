@@ -15,16 +15,27 @@
 <script setup lang="ts">
 import { onMounted } from 'vue'
 import { RouterView } from 'vue-router'
+import { invoke } from '@tauri-apps/api/core'
 import { useTheme } from '@/composables/useTheme'
+import { useAutoLock } from '@/composables/useAutoLock'
 
 /** 主题管理 */
 const { initTheme } = useTheme()
 
+/** 全局自动锁定（不依赖具体页面，切换页面后依然生效） */
+const { setLockTimeout } = useAutoLock()
+
 /**
- * 组件挂载时初始化主题
+ * 组件挂载时初始化主题，并加载自动锁定时间设置
  */
-onMounted(() => {
+onMounted(async () => {
   initTheme()
+  try {
+    const settings = await invoke<{ auto_lock_time: number }>('get_settings')
+    setLockTimeout(settings.auto_lock_time || 5)
+  } catch (e) {
+    console.warn('加载自动锁定设置失败:', e)
+  }
 })
 </script>
 

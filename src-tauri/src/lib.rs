@@ -16,6 +16,12 @@ pub mod db;
 /// 加密模块
 pub mod crypto;
 
+/// 剪贴板模块
+pub mod clipboard;
+
+/// 文件 ACL 加固模块
+pub mod acl;
+
 /// 应用状态模块
 pub mod state;
 
@@ -68,6 +74,30 @@ pub fn run() {
             // 设置应用状态
             app.manage(AppState::new(database));
 
+            // 根据设置决定启动时是否显示主窗口
+            {
+                let app_state = app.state::<AppState>();
+                let show_on_startup: bool = app_state
+                    .db
+                    .conn()
+                    .query_row(
+                        "SELECT value FROM settings WHERE key = 'show_on_startup'",
+                        [],
+                        |row| {
+                            let value: String = row.get(0)?;
+                            Ok(value == "true")
+                        },
+                    )
+                    .unwrap_or(true); // 默认显示
+
+                if show_on_startup {
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            }
+
             // 创建系统托盘菜单
             let show_item = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
             let lock_item = MenuItemBuilder::with_id("lock", "锁定").build(app)?;
@@ -100,6 +130,10 @@ pub fn run() {
                             let _ = app.emit("app-locked", ());
                         }
                         "quit" => {
+                            // 退出前清空剪贴板，避免敏感内容残留
+                            if let Err(e) = crate::clipboard::clear_now(app) {
+                                log::warn!("退出时清空剪贴板失败: {e}");
+                            }
                             app.exit(0);
                         }
                         _ => {}
@@ -220,12 +254,10 @@ pub fn run() {
             commands::has_master_password,
             // 密码命令
             commands::get_passwords,
-            commands::get_password_by_id,
             commands::add_password,
             commands::update_password,
             commands::delete_password,
             commands::toggle_favorite,
-            commands::decrypt_password_by_id,
             commands::copy_password_to_clipboard,
             // 分类命令
             commands::get_categories,
@@ -254,6 +286,7 @@ pub fn run() {
             commands::stop_follow_cursor,
             commands::get_countdown_seconds,
             commands::clear_clipboard,
+            clipboard::copy_text_to_clipboard,
             // 窗口管理命令
             commands::minimize_to_tray,
         ])
@@ -283,7 +316,10 @@ pub fn run() {
                             let _ = window.hide();
                             log::info!("窗口关闭，最小化到托盘");
                         } else {
-                            // 允许关闭，退出应用
+                            // 允许关闭，退出应用；先清空剪贴板
+                            if let Err(e) = crate::clipboard::clear_now(app_handle) {
+                                log::warn!("退出时清空剪贴板失败: {e}");
+                            }
                             log::info!("窗口关闭，退出应用");
                         }
                     }

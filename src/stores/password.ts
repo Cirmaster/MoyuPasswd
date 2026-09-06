@@ -47,9 +47,11 @@ export interface PasswordItem {
   category: string
   /** 是否收藏 */
   is_favorite: boolean
-  /** 创建时间（时间戳） */
+  /** 密码强度等级（后端计算，0-4；未开启强度显示时为空） */
+  password_strength?: number
+  /** 创建时间（毫秒时间戳） */
   created_at: number
-  /** 更新时间（时间戳） */
+  /** 更新时间（毫秒时间戳） */
   updated_at: number
 }
 
@@ -321,6 +323,25 @@ export const usePasswordStore = defineStore('password', () => {
   }
 
   /**
+   * 更新分类名称
+   * @param id - 分类 ID
+   * @param name - 新分类名称
+   */
+  async function updateCategory(id: string, name: string) {
+    try {
+      const result = await invoke<Category>('update_category', { id, name })
+      const index = categories.value.findIndex((c) => c.id === id)
+      if (index !== -1) {
+        categories.value[index] = result
+      }
+      return result
+    } catch (e) {
+      console.error('更新分类失败:', e)
+      throw e
+    }
+  }
+
+  /**
    * 删除分类
    * @param id - 要删除的分类 ID
    */
@@ -355,6 +376,7 @@ export const usePasswordStore = defineStore('password', () => {
     deletePassword,
     toggleFavorite,
     addCategory,
+    updateCategory,
     deleteCategory,
   }
 })
