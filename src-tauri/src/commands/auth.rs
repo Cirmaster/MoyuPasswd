@@ -408,7 +408,7 @@ pub async fn unlock_with_system_auth(state: State<'_, AppState>, app: tauri::App
 
     // 从安全存储读取密钥（插件会自动触发 Windows Hello 认证）
     let auth_method = crate::system_auth::auth_method_name();
-    let reason = format!("使用 {} 解锁摸鱼密码", auth_method);
+    let reason = format!("使用 {} 解锁默语密匣", auth_method);
 
     let combined_key = match crate::system_auth::retrieve_key(&app, &reason) {
         Ok(key) => key,

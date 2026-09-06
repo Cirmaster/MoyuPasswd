@@ -1,6 +1,6 @@
-//! 摸鱼密码 - Tauri 后端
+//! 默语密匣 - Tauri 后端
 //!
-//! 这是摸鱼密码应用的 Tauri 后端模块。
+//! 这是默语密匣应用的 Tauri 后端模块。
 //! 负责处理数据库、加密、认证和业务逻辑。
 //!
 //! # 模块结构
@@ -136,7 +136,7 @@ pub fn run() {
             let _tray = TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
-                .tooltip("摸鱼密码")
+                .tooltip("默语密匣")
                 .on_menu_event(move |app, event| {
                     match event.id().as_ref() {
                         "show" => {

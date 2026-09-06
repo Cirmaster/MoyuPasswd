@@ -322,7 +322,7 @@ const handleSetup = async () => {
             <path d="M7 11V7a5 5 0 0 1 10 0v4" />
           </svg>
         </div>
-        <CardTitle class="text-2xl">摸鱼密码</CardTitle>
+        <CardTitle class="text-2xl">默语密匣</CardTitle>
         <CardDescription>
           <template v-if="isSetupMode">首次使用，请设置主密码</template>
           <template v-else-if="attemptingSystemAuth">请在弹出的窗口中完成认证</template>
