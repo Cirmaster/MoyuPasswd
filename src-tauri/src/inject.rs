@@ -6,9 +6,15 @@ use std::time::SystemTime;
 
 #[cfg(windows)]
 mod win_impl {
+    use std::path::Path;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::core::PWSTR;
 
     /// 目标进程信息
     pub struct TargetProcess {
@@ -19,6 +25,9 @@ mod win_impl {
     }
 
     /// 获取前台窗口对应的进程
+    ///
+    /// 归因链：前台窗口 → PID → 进程路径/进程名（QueryFullProcessImageNameW）。
+    /// 进程名/路径解析失败时返回空字符串，由 `trigger_inject` 拒绝注入（fail closed）。
     pub fn get_target_process() -> Option<TargetProcess> {
         unsafe {
             let hwnd = GetForegroundWindow();
@@ -35,12 +44,39 @@ mod win_impl {
                 return None;
             }
 
-            log::info!("[INJECT] 前台窗口句柄={:?}, PID={}", hwnd, pid);
+            // PID → 进程路径/进程名
+            let mut name = String::new();
+            let mut path = String::new();
+            match OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+                Ok(handle) => {
+                    let mut buf = [0u16; 1024];
+                    let mut size = buf.len() as u32;
+                    let ok = QueryFullProcessImageNameW(
+                        handle,
+                        PROCESS_NAME_WIN32,
+                        PWSTR(buf.as_mut_ptr()),
+                        &mut size,
+                    );
+                    if ok.is_ok() {
+                        path = String::from_utf16_lossy(&buf[..size as usize]);
+                        name = Path::new(&path)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                    } else {
+                        log::warn!("[INJECT] QueryFullProcessImageNameW 失败: pid={}", pid);
+                    }
+                    let _ = CloseHandle(handle);
+                }
+                Err(e) => log::warn!("[INJECT] OpenProcess 失败: pid={}, {}", pid, e),
+            }
+
+            log::info!("[INJECT] 前台窗口句柄={:?}, PID={}, name={}", hwnd, pid, name);
 
             Some(TargetProcess {
                 pid,
-                name: format!("PID_{}", pid),
-                path: String::new(),
+                name,
+                path,
                 hwnd,
             })
         }
@@ -209,37 +245,69 @@ pub fn trigger_inject() {
         }
     };
 
-    // 2. 归因：获取目标进程
+    // 并发互斥：快速连按 Ctrl+V 时多线程同时 SendInput 会交织乱码；
+    // 拿不到锁直接拒绝并记审计（不排队，避免密码被连续注入多次）
+    let _guard = match INJECT_LOCK.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            log::warn!("[INJECT] 已有注入进行中，忽略本次请求");
+            crate::pending::record_audit(crate::pending::InjectAuditEvent {
+                ts: SystemTime::now(),
+                seq,
+                entry_id,
+                action: crate::pending::AuditAction::Denied("busy".to_string()),
+                target_pid: None,
+                target_name: None,
+                target_path: None,
+            });
+            return;
+        }
+    };
+
+    // 2. 归因：获取目标进程（窗口 → PID → 进程名/路径）
     log::info!("[INJECT] 步骤 2：归因");
     let target = get_target_process();
     let (target_pid, target_name, target_path, target_hwnd) = match target {
         Some(t) => {
-            log::info!("[INJECT] 目标进程: pid={}, name={}, hwnd={:?}", t.pid, t.name, t.hwnd);
-            (Some(t.pid), Some(t.name), Some(t.path), t.hwnd)
+            log::info!("[INJECT] 目标进程: pid={}, name={}, path={}, hwnd={:?}", t.pid, t.name, t.path, t.hwnd);
+            (Some(t.pid), t.name, Some(t.path), t.hwnd)
         }
         None => {
             log::warn!("[INJECT] 归因失败：无法获取目标进程");
             return;
         }
     };
-    let _ = target_path;
+
+    // 归因必须解析出真实进程名：解析失败时拒绝注入（fail closed），
+    // 防止用空名/伪名绕过黑名单
+    if target_name.is_empty() {
+        log::warn!("[INJECT] 归因失败：无法解析进程名，拒绝注入");
+        crate::pending::record_audit(crate::pending::InjectAuditEvent {
+            ts: SystemTime::now(),
+            seq,
+            entry_id,
+            action: crate::pending::AuditAction::Denied("attribution_failed".to_string()),
+            target_pid,
+            target_name: None,
+            target_path,
+        });
+        return;
+    }
 
     // 3. 策略检查（黑名单等）
     log::info!("[INJECT] 步骤 3：策略检查");
-    if let Some(ref name) = target_name {
-        if is_blacklisted(name) {
-            log::warn!("[INJECT] 目标进程在黑名单中，拒绝注入: {}", name);
-            crate::pending::record_audit(crate::pending::InjectAuditEvent {
-                ts: SystemTime::now(),
-                seq,
-                entry_id,
-                action: crate::pending::AuditAction::Denied("blacklisted".to_string()),
-                target_pid,
-                target_name,
-                target_path,
-            });
-            return;
-        }
+    if is_blacklisted(&target_name) {
+        log::warn!("[INJECT] 目标进程在黑名单中，拒绝注入: {}", target_name);
+        crate::pending::record_audit(crate::pending::InjectAuditEvent {
+            ts: SystemTime::now(),
+            seq,
+            entry_id,
+            action: crate::pending::AuditAction::Denied("blacklisted".to_string()),
+            target_pid,
+            target_name: Some(target_name),
+            target_path,
+        });
+        return;
     }
 
     // 4. 调用解密闭包解密密码
@@ -257,7 +325,7 @@ pub fn trigger_inject() {
                 entry_id,
                 action: crate::pending::AuditAction::Denied(format!("decrypt_failed: {}", e)),
                 target_pid,
-                target_name,
+                target_name: Some(target_name),
                 target_path,
             });
             return;
@@ -287,7 +355,7 @@ pub fn trigger_inject() {
         entry_id,
         action,
         target_pid,
-        target_name,
+        target_name: Some(target_name),
         target_path,
     });
 
@@ -298,20 +366,70 @@ pub fn trigger_inject() {
     }
 }
 
-/// 检查进程名是否在黑名单
-fn is_blacklisted(process_name: &str) -> bool {
-    // TODO: 从配置读取黑名单
-    let blacklist = vec!["cmd.exe", "powershell.exe", "pwsh.exe"];
-    blacklist.iter().any(|&x| x.eq_ignore_ascii_case(process_name))
+/// 默认注入黑名单
+fn default_blacklist() -> Vec<String> {
+    ["cmd.exe", "powershell.exe", "pwsh.exe"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
-/// 从数据库解密密码（已废弃）
+/// 加载注入黑名单
 ///
-/// # Deprecated
-/// 此函数已废弃，现在使用闭包解密
-#[deprecated(note = "使用闭包解密")]
-fn decrypt_password_from_db(_entry_id: &str) -> Result<String, String> {
-    Err("已废弃：使用闭包解密".to_string())
+/// 从 settings 表读 `inject_blacklist`（逗号分隔的进程名）；
+/// 读不到（未配置/未解锁）时回退默认黑名单。
+fn load_blacklist() -> Vec<String> {
+    let from_db = get_app_handle().and_then(|app| {
+        use tauri::Manager;
+        let state = app.state::<crate::state::AppState>();
+        let db = state.get_db().ok()?;
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT value FROM settings WHERE key = 'inject_blacklist'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    });
+
+    match from_db {
+        Some(raw) => {
+            let list: Vec<String> = raw
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if list.is_empty() {
+                default_blacklist()
+            } else {
+                list
+            }
+        }
+        None => default_blacklist(),
+    }
+}
+
+/// 检查进程名是否在黑名单（大小写不敏感）
+fn is_blacklisted(process_name: &str) -> bool {
+    load_blacklist()
+        .iter()
+        .any(|x| x.eq_ignore_ascii_case(process_name))
+}
+
+/// 应用句柄（读取设置中的黑名单用；由 lib.rs 启动时注入）
+static APP_HANDLE: std::sync::Mutex<Option<tauri::AppHandle>> = std::sync::Mutex::new(None);
+
+/// 注入互斥锁：同一时刻只允许一次注入在进行（防快速连按并发 SendInput 乱码）
+static INJECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 注入应用句柄（启动时调用一次）
+pub fn set_app_handle(app: tauri::AppHandle) {
+    *APP_HANDLE.lock().unwrap() = Some(app);
+}
+
+/// 获取应用句柄
+fn get_app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE.lock().unwrap().clone()
 }
 
 /// zeroize 明文（安全清零）

@@ -149,12 +149,20 @@ const generate = () => {
     config.value.lowercase = true
   }
 
-  // 使用 Web Crypto API 生成随机数
+  // 使用 Web Crypto API 生成随机数（拒绝采样消除取模偏差）
+  const n = chars.length
+  // 只接受 [0, limit) 内的随机数，保证 % n 均匀分布
+  const limit = Math.floor(0x100000000 / n) * n
   let result = ''
-  const array = new Uint32Array(config.value.length)
-  crypto.getRandomValues(array)
-  for (let i = 0; i < config.value.length; i++) {
-    result += chars[array[i]! % chars.length]
+  const array = new Uint32Array(64)
+  while (result.length < config.value.length) {
+    crypto.getRandomValues(array)
+    for (const v of array) {
+      if (result.length >= config.value.length) break
+      if (v < limit) {
+        result += chars[v % n]!
+      }
+    }
   }
   password.value = result
 }

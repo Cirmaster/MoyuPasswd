@@ -49,6 +49,9 @@ pub struct Category {
 /// ```
 #[tauri::command]
 pub async fn get_categories(state: State<'_, AppState>) -> Result<Vec<Category>, String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -103,8 +106,30 @@ pub async fn add_category(
     name: String,
     state: State<'_, AppState>,
 ) -> Result<Category, String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
+
+    // 名称去空白，为空则报错（与 update_category 校验一致）
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("分类名称不能为空".to_string());
+    }
+    let name = trimmed.to_string();
+
+    // 同名校验（大小写不敏感）
+    let dup: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1)",
+            params![name],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if dup > 0 {
+        return Err("已存在同名分类".to_string());
+    }
 
     // 生成唯一 ID
     let id = uuid::Uuid::new_v4().to_string();
@@ -158,6 +183,9 @@ pub async fn update_category(
     icon: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Category, String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -188,10 +216,10 @@ pub async fn update_category(
             }
             let new_name = trimmed.to_string();
 
-            // 同名校验（排除自身）
+            // 同名校验（大小写不敏感，排除自身）
             let dup: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM categories WHERE name = ?1 AND id != ?2",
+                    "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1) AND id != ?2",
                     params![new_name, current_id],
                     |row| row.get(0),
                 )
@@ -243,8 +271,23 @@ pub async fn delete_category(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
+
+    // 内置兜底分类不可删除：所有被删分类下的密码都重归属到 'other'
+    if id == "other" {
+        return Err("内置分类不可删除".to_string());
+    }
+
+    // 确保兜底分类存在（历史数据中 'other' 可能已被删除，防止产生悬空引用）
+    let now = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "INSERT OR IGNORE INTO categories (id, name, sort_order, created_at) VALUES ('other', '其他', 4, ?1)",
+        params![now],
+    ).map_err(|e| e.to_string())?;
 
     // 将该分类下的密码移到"其他"分类
     conn.execute(

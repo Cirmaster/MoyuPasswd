@@ -17,6 +17,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -259,17 +260,24 @@ const saveShortcut = async (key: 'quickSearch' | 'quickAdd' | 'passwordGenerator
   try {
     console.log(`保存快捷键: ${key} = ${normalizedShortcut}`)
     // 直接调用 store 的 updateShortcut 方法（会自动重新注册全局快捷键）
-    await shortcutStore.updateShortcut(key, normalizedShortcut)
+    const failed = await shortcutStore.updateShortcut(key, normalizedShortcut)
     // 退出编辑模式
     editingShortcut.value = null
     shortcutInput.value = ''
-    showToast('success', '快捷键已保存并立即生效')
+    if (failed.length > 0) {
+      showToast('error', `快捷键已保存，但注册失败（可能被其他程序占用）：${failed.join('、')}`)
+    } else {
+      showToast('success', '快捷键已保存并立即生效')
+    }
   } catch (e) {
     console.error('保存快捷键失败:', e)
     showToast('error', '保存失败: ' + String(e))
     // 保存失败也要重新注册全局快捷键
     try {
-      await invoke('update_global_shortcuts')
+      const failed = await invoke<string[]>('update_global_shortcuts')
+      if (failed.length > 0) {
+        console.warn('部分快捷键注册失败:', failed)
+      }
     } catch (e2) {
       console.warn('重新注册快捷键失败:', e2)
     }
@@ -290,7 +298,10 @@ const exitEditMode = async () => {
 
   // 重新注册全局快捷键（update_global_shortcuts 内部先注销再注册，幂等）
   try {
-    await invoke('update_global_shortcuts')
+    const failed = await invoke<string[]>('update_global_shortcuts')
+    if (failed.length > 0) {
+      console.warn('部分快捷键注册失败:', failed)
+    }
   } catch (e) {
     console.warn('重新注册快捷键失败:', e)
   }
@@ -339,6 +350,16 @@ watch(editingShortcut, (newValue) => {
   }
 })
 
+/** app-locked 事件监听清理函数 */
+let appLockedUnlisten: UnlistenFn | null = null
+
+// 锁定后跳转解锁页（防止停留在设置页无响应）
+onMounted(async () => {
+  appLockedUnlisten = await listen('app-locked', () => {
+    router.push('/')
+  })
+})
+
 /**
  * 组件卸载时确保移除拦截器
  */
@@ -346,6 +367,9 @@ onUnmounted(() => {
   document.removeEventListener('keydown', globalKeydownInterceptor, { capture: true })
   // 离开页面时若仍处于编辑态，恢复全局快捷键（兜底）
   exitEditMode()
+  // 清理事件监听
+  appLockedUnlisten?.()
+  appLockedUnlisten = null
 })
 
 /**
@@ -631,6 +655,11 @@ const handleExport = async () => {
 }
 
 /**
+ * 导入 id 冲突策略：skip=保留现有条目（默认），replace=用导入数据覆盖
+ */
+const importConflictPolicy = ref<'skip' | 'replace'>('skip')
+
+/**
  * 导入数据
  */
 const handleImport = async () => {
@@ -648,8 +677,15 @@ const handleImport = async () => {
       reader.onload = async (event) => {
         try {
           const json = event.target?.result as string
-          const count = await invoke<number>('import_data', { json, importPassword: backupPassword.value })
-          showToast('success', `成功导入 ${count} 条密码`)
+          const result = await invoke<{ imported: number; skipped: number; replaced: number }>('import_data', {
+            json,
+            importPassword: backupPassword.value,
+            onConflict: importConflictPolicy.value,
+          })
+          const parts = [`新增 ${result.imported} 条`]
+          if (result.skipped > 0) parts.push(`跳过 ${result.skipped} 条`)
+          if (result.replaced > 0) parts.push(`覆盖 ${result.replaced} 条`)
+          showToast('success', `导入完成：${parts.join('，')}`)
         } catch (err) {
           showToast('error', '导入失败: ' + String(err))
         }
@@ -1159,7 +1195,18 @@ const handleImport = async () => {
                   <h3 class="font-medium">导入数据</h3>
                   <p class="text-sm text-muted-foreground">从文件导入密码</p>
                 </div>
-                <Button variant="outline" @click="handleImport">导入</Button>
+                <div class="flex items-center gap-2">
+                  <!-- id 冲突策略：默认跳过已存在条目，绝不静默覆盖 -->
+                  <select
+                    v-model="importConflictPolicy"
+                    class="text-sm border rounded-md px-2 py-1.5 bg-background"
+                    title="与现有条目 id 冲突时的处理方式"
+                  >
+                    <option value="skip">跳过已存在</option>
+                    <option value="replace">覆盖已存在</option>
+                  </select>
+                  <Button variant="outline" @click="handleImport">导入</Button>
+                </div>
               </div>
 
               <!-- 关于 -->

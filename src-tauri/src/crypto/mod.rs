@@ -291,7 +291,7 @@ pub fn decrypt_aes256gcm(key: &[u8; 32], encrypted_data: &EncryptedData) -> Resu
 /// 计算密码强度等级
 ///
 /// 评分规则：长度 ≥8/≥12/≥16 各 +1，含小写/大写/数字/特殊字符各 +1，
-/// 总分 0–7 映射到 1–4 档。
+/// 总分 0–7 映射到 1–4 档。长度按**字符数**计（不是字节数，中文等多字节字符不误判）。
 ///
 /// # Returns
 ///
@@ -301,14 +301,17 @@ pub fn password_strength_level(password: &str) -> i32 {
         return 0;
     }
 
+    // 按字符计长（chars().count()），避免多字节密码按字节虚高/虚低
+    let len = password.chars().count();
+
     let mut score = 0;
-    if password.len() >= 8 {
+    if len >= 8 {
         score += 1;
     }
-    if password.len() >= 12 {
+    if len >= 12 {
         score += 1;
     }
-    if password.len() >= 16 {
+    if len >= 16 {
         score += 1;
     }
     if password.chars().any(|c| c.is_ascii_lowercase()) {

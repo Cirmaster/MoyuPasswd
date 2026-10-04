@@ -10,10 +10,49 @@
 //! - 暴力破解防护：连续失败后渐进锁定
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::Mutex;
 use zeroize::Zeroize;
 use crate::db::Database;
+
+/// 锁定计数持久化文件名（存 app_dir，不能存加密库——被锁定时库打不开）
+const LOCKOUT_FILENAME: &str = "lockout.json";
+
+/// 锁定计数持久化文件格式
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LockoutFile {
+    /// 连续验证失败次数（跨重启保留，保证指数退避持续累积）
+    failed_attempts: u32,
+    /// 锁定截止时间（Unix 毫秒；过期的截止不恢复为「锁定中」）
+    #[serde(default)]
+    locked_until_ms: Option<u64>,
+}
+
+/// 当前时间（Unix 毫秒）
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// 从磁盘载入锁定计数（文件缺失/损坏时从零开始，失败计数不恢复）
+fn load_lockout(app_dir: &std::path::Path) -> (u32, Option<u64>) {
+    let path = app_dir.join(LOCKOUT_FILENAME);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => match serde_json::from_str::<LockoutFile>(&content) {
+            Ok(data) => {
+                let until = data.locked_until_ms.filter(|&u| u > now_ms());
+                (data.failed_attempts, until)
+            }
+            Err(e) => {
+                log::warn!("lockout 文件损坏，忽略: {e}");
+                (0, None)
+            }
+        },
+        Err(_) => (0, None),
+    }
+}
 
 /// 暴力破解防护：连续失败 5 次后锁定
 const MAX_FAILED_ATTEMPTS: u32 = 5;
@@ -42,37 +81,39 @@ pub struct AppState {
     /// 是否已解锁
     pub is_unlocked: Mutex<bool>,
 
-    /// 连续密码验证失败次数（用于暴力破解防护）
+    /// 连续密码验证失败次数（用于暴力破解防护；持久化，跨重启累积）
     failed_attempts: Mutex<u32>,
 
-    /// 锁定截止时间（达到失败阈值后设置，到期前拒绝验证）
-    locked_until: Mutex<Option<Instant>>,
+    /// 锁定截止时间（Unix 毫秒；达到失败阈值后设置，到期前拒绝验证）
+    locked_until_ms: Mutex<Option<u64>>,
 }
 
 impl AppState {
     /// 创建应用状态（首次运行，数据库已用默认密钥创建）
     pub fn new(app_dir: PathBuf, db: Database) -> Self {
+        let (failed_attempts, locked_until_ms) = load_lockout(&app_dir);
         Self {
             app_dir,
             db: Mutex::new(Some(db)),
             aes_key: Mutex::new(None),
             db_key: Mutex::new(None),
             is_unlocked: Mutex::new(false),
-            failed_attempts: Mutex::new(0),
-            locked_until: Mutex::new(None),
+            failed_attempts: Mutex::new(failed_attempts),
+            locked_until_ms: Mutex::new(locked_until_ms),
         }
     }
 
     /// 创建应用状态（后续运行，数据库待认证后创建）
     pub fn new_without_db(app_dir: PathBuf) -> Self {
+        let (failed_attempts, locked_until_ms) = load_lockout(&app_dir);
         Self {
             app_dir,
             db: Mutex::new(None),
             aes_key: Mutex::new(None),
             db_key: Mutex::new(None),
             is_unlocked: Mutex::new(false),
-            failed_attempts: Mutex::new(0),
-            locked_until: Mutex::new(None),
+            failed_attempts: Mutex::new(failed_attempts),
+            locked_until_ms: Mutex::new(locked_until_ms),
         }
     }
 
@@ -165,11 +206,11 @@ impl AppState {
 
     /// 检查当前是否处于锁定状态
     pub fn check_lockout(&self) -> Result<(), u64> {
-        let locked_until = self.locked_until.lock();
+        let locked_until = self.locked_until_ms.lock();
         if let Some(until) = *locked_until {
-            let now = Instant::now();
+            let now = now_ms();
             if now < until {
-                let remaining = (until - now).as_secs();
+                let remaining = (until - now) / 1000;
                 return Err(remaining.max(1));
             }
         }
@@ -177,43 +218,81 @@ impl AppState {
     }
 
     /// 记录一次验证失败，必要时触发锁定
+    ///
+    /// 指数退避：第 5 次失败锁 30s，之后每多失败一次翻倍（60s、120s……），上限 15 分钟。
+    /// 失败计数只在验证成功时清零；锁定到期**不清零**，否则退避无法累积。
     pub fn record_failure(&self) -> Option<String> {
-        let mut attempts = self.failed_attempts.lock();
-        *attempts += 1;
+        let result = {
+            let mut attempts = self.failed_attempts.lock();
+            *attempts += 1;
 
-        if *attempts >= MAX_FAILED_ATTEMPTS {
-            let lock_exponent = (*attempts - MAX_FAILED_ATTEMPTS) as u64;
-            let lock_seconds = (LOCK_BASE_SECONDS * 2u64.pow(lock_exponent as u32))
-                .min(LOCK_MAX_SECONDS);
+            if *attempts >= MAX_FAILED_ATTEMPTS {
+                let lock_exponent = (*attempts - MAX_FAILED_ATTEMPTS) as u64;
+                let lock_seconds = (LOCK_BASE_SECONDS * 2u64.pow(lock_exponent as u32))
+                    .min(LOCK_MAX_SECONDS);
 
-            let until = Instant::now() + std::time::Duration::from_secs(lock_seconds);
-            let mut locked_until = self.locked_until.lock();
-            *locked_until = Some(until);
+                let until = now_ms() + lock_seconds * 1000;
+                let mut locked_until = self.locked_until_ms.lock();
+                *locked_until = Some(until);
 
-            Some(format!("密码错误次数过多，请等待 {} 秒后重试", lock_seconds))
-        } else {
-            None
-        }
+                Some(format!("密码错误次数过多，请等待 {} 秒后重试", lock_seconds))
+            } else {
+                None
+            }
+        };
+        self.persist_lockout();
+        result
     }
 
     /// 清除锁定状态（验证成功时调用）
     pub fn reset_lockout(&self) {
-        let mut attempts = self.failed_attempts.lock();
-        *attempts = 0;
+        {
+            let mut attempts = self.failed_attempts.lock();
+            *attempts = 0;
 
-        let mut locked_until = self.locked_until.lock();
-        *locked_until = None;
+            let mut locked_until = self.locked_until_ms.lock();
+            *locked_until = None;
+        }
+        self.persist_lockout();
     }
 
     /// 清除过期的锁定状态
+    ///
+    /// 只解除「锁定中」，**保留失败计数**——指数退避依赖计数跨锁定周期累积。
     pub fn clear_expired_lockout(&self) {
-        let mut locked_until = self.locked_until.lock();
-        if let Some(until) = *locked_until {
-            if Instant::now() >= until {
-                *locked_until = None;
-                let mut attempts = self.failed_attempts.lock();
-                *attempts = 0;
+        let mut dirty = false;
+        {
+            let mut locked_until = self.locked_until_ms.lock();
+            if let Some(until) = *locked_until {
+                if now_ms() >= until {
+                    *locked_until = None;
+                    dirty = true;
+                }
             }
+        }
+        if dirty {
+            self.persist_lockout();
+        }
+    }
+
+    /// 把锁定计数写回磁盘（防重启清零；写失败仅记日志，不影响主流程）
+    fn persist_lockout(&self) {
+        let data = LockoutFile {
+            failed_attempts: *self.failed_attempts.lock(),
+            locked_until_ms: *self.locked_until_ms.lock(),
+        };
+        let path = self.app_dir.join(LOCKOUT_FILENAME);
+        match serde_json::to_string(&data) {
+            Ok(content) => {
+                if let Err(e) = std::fs::write(&path, content) {
+                    log::warn!("保存锁定计数失败: {e}");
+                    return;
+                }
+                if let Err(e) = crate::acl::harden_file_acl(&path) {
+                    log::warn!("lockout 文件 ACL 加固失败: {e}");
+                }
+            }
+            Err(e) => log::warn!("序列化锁定计数失败: {e}"),
         }
     }
 }

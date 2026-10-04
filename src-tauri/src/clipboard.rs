@@ -85,18 +85,45 @@ pub fn invalidate_scheduled_clear() {
 
 /// 复制文本到剪贴板（前端调用；排除历史与云端同步）
 ///
-/// `clear_after` 为 Some 时，后端会在指定秒数后自动清空剪贴板（用于敏感内容）。
+/// `clear_after` 语义：
+/// - `None`：回退读取设置中的 `clipboard_clear_time`（后端兜底，防前端漏排清除）
+/// - `Some(0)`：明确不自动清除
+/// - `Some(n)`：n 秒后自动清空剪贴板（后端调度，不依赖前端倒计时窗口存活）
 #[tauri::command]
 pub async fn copy_text_to_clipboard(
     text: String,
     clear_after: Option<u32>,
     app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<(), String> {
     write_text_excluded(&app, &text)?;
-    if let Some(seconds) = clear_after {
+    let seconds = match clear_after {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(read_clipboard_clear_time(&state)),
+    };
+    if let Some(seconds) = seconds {
         schedule_clear(&app, seconds);
     }
     Ok(())
+}
+
+/// 读取剪贴板清除时间设置（秒），默认 30
+fn read_clipboard_clear_time(state: &crate::state::AppState) -> u32 {
+    state
+        .get_db()
+        .ok()
+        .and_then(|db| {
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'clipboard_clear_time'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30)
 }
 
 #[cfg(windows)]

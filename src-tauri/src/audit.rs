@@ -19,6 +19,15 @@ static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 /// * `app_dir` - 应用数据目录
 pub fn init(app_dir: &PathBuf) {
     let log_path = app_dir.join("audit.log");
+
+    // 确保日志文件存在并收紧 ACL（审计不含明文，但仍只允许当前用户读写）
+    if let Err(e) = OpenOptions::new().create(true).append(true).open(&log_path) {
+        log::warn!("创建审计日志失败: {e}");
+    }
+    if let Err(e) = crate::acl::harden_file_acl(&log_path) {
+        log::warn!("审计日志 ACL 加固失败: {e}");
+    }
+
     let _ = LOG_FILE.set(log_path.clone());
     log::info!("审计日志: {:?}", log_path);
 }

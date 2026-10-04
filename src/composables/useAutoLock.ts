@@ -1,74 +1,41 @@
 /**
- * useAutoLock.ts - 自动锁定 Composable
+ * useAutoLock.ts - 用户活动上报
  *
- * 监听用户活动，无操作一段时间后自动锁定应用。
+ * 自动锁定由后端空闲检测统一负责（以系统空闲为准，见 idle.rs），
+ * 前端不再各自计时锁定——此前前端只看应用内事件、后端取系统与应用空闲的较小值，
+ * 两套语义互相矛盾。本 composable 只负责把前端活动上报给后端
+ * （非 Windows 平台的空闲判定依据）。
  *
  * @example
  * ```ts
- * const { startTracking, stopTracking, resetTimer } = useAutoLock()
- *
- * // 开始监听
- * startTracking()
- *
- * // 停止监听
- * stopTracking()
- *
- * // 重置计时器（用户有操作时调用）
- * resetTimer()
+ * useAutoLock() // 挂载即开始活动上报
  * ```
  */
 
-import { ref, onMounted, onUnmounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-
-/** 自动锁定时间（分钟） */
-const lockTimeoutMinutes = ref(5)
-
-/** 锁定计时器 ID */
-let lockTimer: ReturnType<typeof setTimeout> | null = null
 
 /** 是否正在监听 */
 let isTracking = false
 
+/** 上次上报时间（节流用） */
+let lastReport = 0
+
+/** 上报节流间隔（毫秒） */
+const REPORT_THROTTLE_MS = 2000
+
 /**
- * 自动锁定 Hook
+ * 自动锁定 Hook（仅活动上报，锁定由后端负责）
  */
 export function useAutoLock() {
-
-  /**
-   * 锁定应用
-   * 只需调用后端命令，后端负责清除密钥并通知所有窗口
-   */
-  const lockApp = async () => {
-    try {
-      await invoke('lock_app')
-    } catch (e) {
-      console.error('锁定失败:', e)
-    }
-  }
-
-  /**
-   * 重置锁定计时器
-   * 用户有操作时调用
-   */
-  const resetTimer = () => {
-    if (lockTimer) {
-      clearTimeout(lockTimer)
-    }
-
-    // 设置新的计时器
-    lockTimer = setTimeout(() => {
-      lockApp()
-    }, lockTimeoutMinutes.value * 60 * 1000)
-  }
-
   /**
    * 用户活动事件处理函数
-   * 同时通知后端更新活动时间
+   * 通知后端更新活动时间（节流，避免鼠标移动刷 IPC）
    */
   const handleActivity = () => {
-    resetTimer()
-    // 通知后端更新活动时间（用于后端空闲检测）
+    const now = Date.now()
+    if (now - lastReport < REPORT_THROTTLE_MS) return
+    lastReport = now
     invoke('report_activity').catch(() => {
       // 忽略错误，不影响前端功能
     })
@@ -80,7 +47,6 @@ export function useAutoLock() {
   const startTracking = () => {
     if (isTracking) return
 
-    // 监听各种用户活动
     window.addEventListener('mousemove', handleActivity)
     window.addEventListener('mousedown', handleActivity)
     window.addEventListener('keypress', handleActivity)
@@ -88,9 +54,6 @@ export function useAutoLock() {
     window.addEventListener('scroll', handleActivity)
 
     isTracking = true
-
-    // 启动计时器
-    resetTimer()
   }
 
   /**
@@ -105,24 +68,7 @@ export function useAutoLock() {
     window.removeEventListener('touchmove', handleActivity)
     window.removeEventListener('scroll', handleActivity)
 
-    if (lockTimer) {
-      clearTimeout(lockTimer)
-      lockTimer = null
-    }
-
     isTracking = false
-  }
-
-  /**
-   * 设置锁定时间
-   * @param minutes - 锁定时间（分钟）
-   */
-  const setLockTimeout = (minutes: number) => {
-    lockTimeoutMinutes.value = minutes
-    // 重置计时器
-    if (isTracking) {
-      resetTimer()
-    }
   }
 
   // 组件挂载时开始监听
@@ -138,8 +84,5 @@ export function useAutoLock() {
   return {
     startTracking,
     stopTracking,
-    resetTimer,
-    setLockTimeout,
-    lockTimeoutMinutes,
   }
 }

@@ -14,10 +14,11 @@
 -->
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -56,6 +57,21 @@ onMounted(async () => {
     loadPasswords(),
     loadCategories(),
   ])
+})
+
+/** app-locked 事件监听清理函数 */
+let appLockedUnlisten: UnlistenFn | null = null
+
+// 锁定后跳转解锁页（防止停留在分类页无响应）
+onMounted(async () => {
+  appLockedUnlisten = await listen('app-locked', () => {
+    router.push('/')
+  })
+})
+
+onUnmounted(() => {
+  appLockedUnlisten?.()
+  appLockedUnlisten = null
 })
 
 /** 控制添加分类弹窗是否显示 */

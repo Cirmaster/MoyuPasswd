@@ -89,18 +89,21 @@ export const useShortcutStore = defineStore('shortcuts', () => {
 
   /**
    * 保存快捷键配置到后端
+   *
+   * @returns 注册失败的快捷键列表（空表示全部成功）
    */
-  async function saveShortcuts() {
+  async function saveShortcuts(): Promise<string[]> {
     try {
       const backendConfig = toBackendConfig(shortcuts.value)
       console.log('保存快捷键配置:', backendConfig)
       await invoke('save_shortcuts', { shortcuts: backendConfig })
       console.log('快捷键配置保存成功')
-      
-      // 动态更新全局快捷键
+
+      // 动态更新全局快捷键（返回注册失败列表，不抛错）
       console.log('正在更新全局快捷键...')
-      await invoke('update_global_shortcuts')
-      console.log('全局快捷键更新成功')
+      const failed = await invoke<string[]>('update_global_shortcuts')
+      console.log('全局快捷键更新完成，失败:', failed)
+      return failed
     } catch (e) {
       console.error('保存快捷键配置失败:', e)
       throw e
@@ -111,11 +114,12 @@ export const useShortcutStore = defineStore('shortcuts', () => {
    * 更新单个快捷键
    * @param key - 快捷键名称
    * @param value - 快捷键值
+   * @returns 注册失败的快捷键列表（空表示全部成功）
    */
-  async function updateShortcut(key: keyof ShortcutConfig, value: string) {
+  async function updateShortcut(key: keyof ShortcutConfig, value: string): Promise<string[]> {
     console.log(`更新快捷键: ${key} = ${value}`)
     shortcuts.value = { ...shortcuts.value, [key]: value }
-    await saveShortcuts()
+    return await saveShortcuts()
   }
 
   /**

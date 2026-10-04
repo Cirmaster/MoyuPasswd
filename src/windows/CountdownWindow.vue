@@ -33,7 +33,8 @@ const startCountdown = (seconds: number = 10) => {
 
     if (remaining.value <= 0) {
       stopCountdown()
-      // 剪贴板由后端兜底清除，前端只需关闭窗口
+      // 剪贴板清除由后端在复制时调度（copy_text_to_clipboard → schedule_clear），
+      // 不依赖本窗口存活，前端只需关闭窗口
       closeWindow()
     }
   }, 1000)

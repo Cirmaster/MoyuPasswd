@@ -242,29 +242,50 @@ pub async fn export_data(
     encrypt_export(&plaintext_json, &export_password)
 }
 
+/// 导入结果统计
+#[derive(Debug, serde::Serialize)]
+pub struct ImportResult {
+    /// 新增条目数
+    pub imported: usize,
+    /// 跳过（id 已存在且保留现有）条目数
+    pub skipped: usize,
+    /// 覆盖（id 已存在且被导入数据替换）条目数
+    pub replaced: usize,
+}
+
 /// 导入密码数据
 ///
 /// 从 JSON 格式导入密码和分类。自动识别加密导出与历史明文格式。
+/// 整包在单个事务中执行：任一条失败整体回滚，不留半截导入。
 ///
 /// # Arguments
 ///
 /// * `json` - JSON 数据字符串
 /// * `import_password` - 导入密码（加密导出时使用）
+/// * `on_conflict` - id 冲突策略：`"skip"`（默认，保留现有条目）或 `"replace"`（覆盖）
 /// * `state` - 应用状态
 ///
 /// # Returns
 ///
-/// 导入的密码数量
+/// 导入统计（新增/跳过/覆盖）
 #[tauri::command]
 pub async fn import_data(
     json: String,
     import_password: String,
+    on_conflict: Option<String>,
     state: State<'_, AppState>,
-) -> Result<usize, String> {
+) -> Result<ImportResult, String> {
     // 检查是否已解锁
     if !state.is_unlocked() {
         return Err("应用未解锁".to_string());
     }
+
+    // 冲突策略：默认 skip——绝不静默覆盖现有数据
+    let replace_on_conflict = match on_conflict.as_deref() {
+        None | Some("skip") => false,
+        Some("replace") => true,
+        Some(other) => return Err(format!("未知的冲突策略: {other}")),
+    };
 
     // 获取 AES 密钥
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
@@ -288,19 +309,37 @@ pub async fn import_data(
 
     let db = state.get_db()?;
     let conn = db.conn();
+    // 整包事务：中途任何失败回滚，不留半截导入
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = chrono::Utc::now().timestamp_millis();
-    let mut imported_count = 0;
+    let mut result = ImportResult {
+        imported: 0,
+        skipped: 0,
+        replaced: 0,
+    };
 
-    // 导入分类
+    // 导入分类（id 已存在则跳过）
     for category in &import_data.categories {
-        conn.execute(
+        tx.execute(
             "INSERT OR IGNORE INTO categories (id, name, icon, sort_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![category.id, category.name, category.icon, category.sort_order, now],
         ).map_err(|e| e.to_string())?;
     }
 
-    // 导入密码
+    // 导入密码（按 id 判重，冲突策略决定跳过或覆盖）
     for password in &import_data.passwords {
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM passwords WHERE id = ?1",
+                params![password.id],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if exists && !replace_on_conflict {
+            result.skipped += 1;
+            continue;
+        }
+
         // 加密密码
         let encrypted_password = encrypt_password(&aes_key, &password.password)?;
 
@@ -310,7 +349,7 @@ pub async fn import_data(
             _ => None,
         };
 
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
@@ -327,8 +366,19 @@ pub async fn import_data(
             ],
         ).map_err(|e| e.to_string())?;
 
-        imported_count += 1;
+        if exists {
+            result.replaced += 1;
+        } else {
+            result.imported += 1;
+        }
     }
 
-    Ok(imported_count)
+    tx.commit().map_err(|e| e.to_string())?;
+    log::info!(
+        "导入完成: 新增 {}, 跳过 {}, 覆盖 {}",
+        result.imported,
+        result.skipped,
+        result.replaced
+    );
+    Ok(result)
 }

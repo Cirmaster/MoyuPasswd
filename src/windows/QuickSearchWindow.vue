@@ -228,7 +228,7 @@ const handleUnlock = async () => {
  */
 const copyAndClose = async (text: string) => {
   try {
-    await invoke('copy_text_to_clipboard', { text, clearAfter: null })
+    await invoke('copy_text_to_clipboard', { text, clearAfter: clipboardClearTime.value })
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
 
     // 启动全局倒计时窗口（显示在屏幕中央），使用设置中的清除时间
@@ -288,6 +288,13 @@ const closeWindow = async () => {
  * 注意：Esc 关闭由后端全局快捷键处理
  */
 const handleKeydown = (e: KeyboardEvent) => {
+  // Esc 关闭窗口（窗口级处理，替代原全局 Escape 快捷键——全局裸 Esc 会吞掉系统级 Esc）
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    getCurrentWindow().hide()
+    return
+  }
+
   // 如果未解锁，按 Enter 时触发解锁
   if (!isUnlocked.value) {
     if (e.key === 'Enter') {

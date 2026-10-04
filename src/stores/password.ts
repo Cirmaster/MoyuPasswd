@@ -41,8 +41,10 @@ export interface PasswordItem {
   password: string
   /** 网站 URL（可选） */
   url?: string
-  /** 备注信息（可选） */
+  /** 备注明文（仅 get_password_detail 返回；列表不下发） */
   notes?: string
+  /** 是否有备注（列表用；备注明文按需通过 get_password_detail 获取） */
+  has_notes?: boolean
   /** 所属分类 ID */
   category: string
   /** 是否收藏 */
@@ -83,13 +85,15 @@ interface NewPassword {
 
 /**
  * 更新密码请求
+ *
+ * url/notes 三层语义：字段缺失=不修改、null=清空、字符串=赋值
  */
 interface UpdatePassword {
   title?: string
   username?: string
   password?: string
-  url?: string
-  notes?: string
+  url?: string | null
+  notes?: string | null
   category?: string
   is_favorite?: boolean
 }
@@ -249,7 +253,7 @@ export const usePasswordStore = defineStore('password', () => {
   /**
    * 更新密码
    * @param id - 要更新的密码 ID
-   * @param data - 要更新的字段
+   * @param data - 要更新的字段（url/notes 缺失=不修改、null=清空）
    */
   async function updatePassword(id: string, data: UpdatePassword) {
     loading.value = true
@@ -269,6 +273,16 @@ export const usePasswordStore = defineStore('password', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  /**
+   * 获取单条密码详情（含备注明文，按需调用）
+   *
+   * 列表不下发备注明文，编辑/查看详情时才调用本方法。
+   * @param id - 密码 ID
+   */
+  async function getPasswordDetail(id: string) {
+    return await invoke<PasswordItem>('get_password_detail', { id })
   }
 
   /**
@@ -373,6 +387,7 @@ export const usePasswordStore = defineStore('password', () => {
     setSearchQuery,
     addPassword,
     updatePassword,
+    getPasswordDetail,
     deletePassword,
     toggleFavorite,
     addCategory,

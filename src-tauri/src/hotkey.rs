@@ -1,8 +1,7 @@
 //! 全局热键与键盘钩子模块
 //!
-//! 提供双触发机制：
-//! 1. Ctrl+V 钩子（主推）：捕获用户的 Ctrl+V 按键，拦截并改为注入密码
-//! 2. Ctrl+Shift+V 热键（备用）：高级用户/兜底方案
+//! Ctrl+V 钩子：捕获用户的 Ctrl+V 按键，拦截并改为注入密码。
+//! 一次性钩子语义：复制密码时激活，粘贴状态（pending/倒计时）结束后自动卸载，不常驻。
 //!
 //! 同时监听退出信号（按键放行，只销毁状态）：
 //! * Ctrl+C：用户已经在复制别的东西，密码自然不粘贴了（不碰剪贴板）
@@ -10,47 +9,57 @@
 
 #[cfg(windows)]
 mod win_impl {
-    use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
     use std::ptr;
-    use std::sync::mpsc;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::Threading::GetCurrentThreadId;
 
     /// 一次性钩子句柄
     static HOOK_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
     /// 是否已激活
     static IS_ACTIVE: AtomicBool = AtomicBool::new(false);
-    /// 钩子线程消息发送器
-    static HOOK_SENDER: std::sync::Mutex<Option<mpsc::Sender<u32>>> = std::sync::Mutex::new(None);
+    /// 正在卸载中（WM_QUIT 已投递、清理未完成）
+    static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+    /// 钩子线程 ID（deactivate 用 PostThreadMessageW 退出其消息循环）
+    static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
     /// 主应用句柄（钩子回调里用于取消倒计时窗口等 UI 操作）
     static HOOK_APP: std::sync::Mutex<Option<tauri::AppHandle>> = std::sync::Mutex::new(None);
 
     /// 激活 Ctrl+V 钩子（一次性）
     ///
+    /// 粘贴状态（pending / 倒计时）结束后由监视线程自动卸载钩子，不常驻。
+    ///
     /// # Arguments
     /// * `app` - 应用句柄（钩子线程里销毁粘贴状态时要用）
     pub fn activate(app: tauri::AppHandle) {
-        if IS_ACTIVE.load(Ordering::SeqCst) {
-            log::warn!("钩子已激活，忽略重复激活");
-            return;
-        }
-
         // 保存应用句柄，供钩子回调取消倒计时/作废 pending 使用
         if let Ok(mut guard) = HOOK_APP.lock() {
             *guard = Some(app);
         }
 
-        // 创建消息通道
-        let (tx, rx) = mpsc::channel::<u32>();
-        {
-            let mut sender = HOOK_SENDER.lock().unwrap();
-            *sender = Some(tx);
+        // 若上一个钩子正在卸载，等它清理完成再启动，避免新旧钩子交叠
+        for _ in 0..20 {
+            if !SHUTTING_DOWN.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if IS_ACTIVE.load(Ordering::SeqCst) {
+            log::warn!("钩子已激活，忽略重复激活");
+            return;
         }
 
         // 启动钩子线程（必须有消息循环）
-        std::thread::spawn(move || {
+        std::thread::spawn(|| {
             unsafe {
+                // 先创建线程消息队列（否则 PostThreadMessageW 可能投递失败），
+                // 再发布线程 ID，供 deactivate 发 WM_QUIT 退出消息循环
+                let mut msg: MSG = std::mem::zeroed();
+                let _ = PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE);
+                HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
+
                 // 注册低级键盘钩子
                 let hook = SetWindowsHookExW(
                     WH_KEYBOARD_LL,
@@ -63,10 +72,10 @@ mod win_impl {
                     Ok(h) => {
                         HOOK_HANDLE.store(h.0, Ordering::SeqCst);
                         IS_ACTIVE.store(true, Ordering::SeqCst);
+                        SHUTTING_DOWN.store(false, Ordering::SeqCst);
                         log::info!("Ctrl+V 钩子已激活，句柄={:?}", h.0);
 
-                        // 关键：运行消息循环（钩子依赖消息循环）
-                        let mut msg: MSG = std::mem::zeroed();
+                        // 关键：运行消息循环（钩子依赖消息循环）；deactivate 发 WM_QUIT 使其返回 0 退出
                         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
                             let _ = TranslateMessage(&msg);
                             DispatchMessageW(&msg);
@@ -79,36 +88,76 @@ mod win_impl {
                             HOOK_HANDLE.store(ptr::null_mut(), Ordering::SeqCst);
                         }
                         IS_ACTIVE.store(false, Ordering::SeqCst);
-                        log::info!("钩子线程退出");
+                        SHUTTING_DOWN.store(false, Ordering::SeqCst);
+                        HOOK_THREAD_ID.store(0, Ordering::SeqCst);
+                        log::info!("钩子线程退出，钩子已卸载");
                     }
                     Err(e) => {
                         log::error!("注册 Ctrl+V 钩子失败: {}", e);
+                        SHUTTING_DOWN.store(false, Ordering::SeqCst);
+                        HOOK_THREAD_ID.store(0, Ordering::SeqCst);
                     }
                 }
             }
+        });
 
-            // 接收退出信号
-            drop(rx);
+        // 启动监视线程：粘贴状态结束后自动卸钩（一次性钩子语义）
+        std::thread::spawn(|| {
+            // 等待钩子真正激活
+            for _ in 0..50 {
+                if IS_ACTIVE.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let mut idle_count = 0u32;
+            while IS_ACTIVE.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if !IS_ACTIVE.load(Ordering::SeqCst) {
+                    return;
+                }
+                if has_paste_state() {
+                    idle_count = 0;
+                } else {
+                    idle_count += 1;
+                    // 连续 2 秒无粘贴状态（pending 过期/作废、倒计时关闭）→ 自动卸钩
+                    if idle_count >= 2 {
+                        log::info!("[HOOK] 粘贴状态结束，自动卸载钩子");
+                        deactivate();
+                        return;
+                    }
+                }
+            }
         });
 
         log::info!("钩子线程已启动");
     }
 
     /// 反激活钩子
+    ///
+    /// 向钩子线程投递 WM_QUIT，令 GetMessageW 返回并走卸载清理。
     pub fn deactivate() {
-        if !IS_ACTIVE.load(Ordering::SeqCst) {
+        if !IS_ACTIVE.load(Ordering::SeqCst) && !SHUTTING_DOWN.load(Ordering::SeqCst) {
             return;
         }
-
-        // 发送退出信号给钩子线程
-        {
-            let sender = HOOK_SENDER.lock().unwrap();
-            if let Some(ref tx) = *sender {
-                let _ = tx.send(0);  // 发送任意值触发退出
+        // 已在卸载中则不重复投递
+        if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+        if tid == 0 {
+            SHUTTING_DOWN.store(false, Ordering::SeqCst);
+            return;
+        }
+        unsafe {
+            match PostThreadMessageW(tid, WM_QUIT, WPARAM(0), LPARAM(0)) {
+                Ok(()) => log::info!("已向钩子线程发送 WM_QUIT，卸载钩子"),
+                Err(e) => {
+                    SHUTTING_DOWN.store(false, Ordering::SeqCst);
+                    log::warn!("发送 WM_QUIT 失败: {}", e);
+                }
             }
         }
-
-        log::info!("已发送钩子退出信号");
     }
 
     /// 钩子过程（低级键盘钩子）
@@ -221,36 +270,16 @@ mod win_impl {
             result
         }
     }
-
-    /// 注册全局热键 Ctrl+Shift+V（备用）
-    pub fn register_backup_hotkey() -> bool {
-        log::info!("备用热键 Ctrl+Shift+V 注册（待实现）");
-        true
-    }
-
-    /// 反注册备用热键
-    pub fn unregister_backup_hotkey() {
-        log::info!("备用热键反注册（待实现）");
-    }
 }
 
 #[cfg(not(windows))]
 mod non_windows {
-    /// 非 Windows 平台：不支持钩子，只能用热键
+    /// 非 Windows 平台：不支持钩子
     pub fn activate(_app: tauri::AppHandle) {
-        log::warn!("非 Windows 平台不支持 Ctrl+V 钩子，请使用热键触发");
+        log::warn!("非 Windows 平台不支持 Ctrl+V 钩子");
     }
 
     pub fn deactivate() {
-        // 无操作
-    }
-
-    pub fn register_backup_hotkey() -> bool {
-        log::warn!("非 Windows 平台热键功能待实现");
-        false
-    }
-
-    pub fn unregister_backup_hotkey() {
         // 无操作
     }
 }

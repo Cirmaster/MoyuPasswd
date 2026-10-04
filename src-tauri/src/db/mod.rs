@@ -297,5 +297,13 @@ fn get_migrations() -> Vec<Migration> {
                 ALTER TABLE master_password ADD COLUMN db_salt TEXT;
             ",
         },
+        Migration {
+            version: 6,
+            description: "add_strength_to_passwords",
+            sql: "
+                -- 新增密码强度列（写入时计算并存储，列表加载不再全量解密）
+                ALTER TABLE passwords ADD COLUMN strength INTEGER;
+            ",
+        },
     ]
 }

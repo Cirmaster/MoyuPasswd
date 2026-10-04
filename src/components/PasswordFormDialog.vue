@@ -65,7 +65,7 @@ const emit = defineEmits<{
 
 /** 密码 Store */
 const passwordStore = usePasswordStore()
-const { categories, addPassword, updatePassword } = passwordStore
+const { categories, addPassword, updatePassword, getPasswordDetail } = passwordStore
 
 /**
  * 是否为编辑模式
@@ -104,6 +104,14 @@ const resetForm = () => {
 }
 
 /**
+ * 备注是否已从详情载入
+ *
+ * 备注明文不随列表下发；编辑打开时才拉取详情。
+ * 未载入完成前提交的更新不携带 notes 字段（= 不修改），防止误清空原备注。
+ */
+const notesLoaded = ref(false)
+
+/**
  * 监听编辑项变化
  * 当 editItem 变化时，自动填充表单数据
  * immediate: true 表示初始化时也执行一次
@@ -113,17 +121,31 @@ watch(
   (item) => {
     if (item) {
       // 编辑模式：填充除密码外的所有字段（密码不接触明文）
+      notesLoaded.value = false
       form.value = {
         title: item.title,
         username: item.username,
         password: '', // 编辑时密码留空，提交时为空则保留原密码
         url: item.url || '',
-        notes: item.notes || '',
+        notes: '', // 备注不随列表下发，稍后从详情载入
         category: item.category,
         is_favorite: item.is_favorite,
       }
+      // 按需拉取备注明文（列表零解密）
+      getPasswordDetail(item.id)
+        .then((detail) => {
+          // 快速切换条目时防止串数据
+          if (props.editItem?.id === item.id) {
+            form.value.notes = detail.notes || ''
+            notesLoaded.value = true
+          }
+        })
+        .catch((e) => {
+          console.error('加载备注失败:', e)
+        })
     } else {
       // 添加模式：重置表单
+      notesLoaded.value = false
       resetForm()
     }
   },
@@ -154,7 +176,11 @@ const handleSubmit = async () => {
     // 根据模式执行不同操作
     if (isEditMode.value && props.editItem) {
       // 编辑模式：更新现有密码（密码为空则保留原密码）
-      await updatePassword(props.editItem.id, form.value)
+      // 备注未载入完成时不携带 notes 字段（后端视为不修改），防止误清空原备注
+      await updatePassword(props.editItem.id, {
+        ...form.value,
+        notes: notesLoaded.value ? (form.value.notes || null) : undefined,
+      })
     } else {
       // 添加模式：添加新密码
       await addPassword(form.value)

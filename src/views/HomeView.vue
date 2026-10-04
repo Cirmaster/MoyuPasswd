@@ -22,7 +22,7 @@
 -->
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { invoke } from '@tauri-apps/api/core'
@@ -65,7 +65,7 @@ const clipboardClearTime = ref(30)
  */
 const copyToClipboard = async (text: string, event?: MouseEvent) => {
   try {
-    await invoke('copy_text_to_clipboard', { text, clearAfter: null })
+    await invoke('copy_text_to_clipboard', { text, clearAfter: clipboardClearTime.value })
     showToast('success', '已复制')
 
     // 获取鼠标位置并显示全局倒计时窗口
@@ -93,6 +93,14 @@ const { setActiveCategory, setSearchQuery, toggleFavorite, deletePassword, loadP
 /**
  * 页面加载时从后端获取数据
  */
+/** 事件监听清理函数（组件卸载时统一取消，防止叠加监听） */
+const unlisteners: Array<() => void> = []
+
+onUnmounted(() => {
+  unlisteners.forEach((unlisten) => unlisten())
+  unlisteners.length = 0
+})
+
 onMounted(async () => {
   await Promise.all([
     loadPasswords(),
@@ -110,29 +118,37 @@ onMounted(async () => {
     console.warn('加载设置失败:', e)
   }
 
-  // 监听全局快捷键事件
+  // 监听全局快捷键事件（保存 unlisten，卸载时统一清理，防止反复进出页面叠加监听）
   const { listen } = await import('@tauri-apps/api/event')
-  await listen('show-quick-search', () => {
-    showQuickSearch.value = true
-  })
+  unlisteners.push(
+    await listen('show-quick-search', () => {
+      showQuickSearch.value = true
+    }),
+  )
 
   // 监听后端锁定事件（由 lock_app 命令或系统托盘触发）
-  await listen('app-locked', () => {
-    // 清除本地密码数据
-    passwords.value = []
-    // 跳转到解锁页面
-    router.push('/')
-  })
+  unlisteners.push(
+    await listen('app-locked', () => {
+      // 清除本地密码数据
+      passwords.value = []
+      // 跳转到解锁页面
+      router.push('/')
+    }),
+  )
 
   // 监听快速添加快捷键事件
-  await listen('show-quick-add', () => {
-    showQuickAdd.value = true
-  })
+  unlisteners.push(
+    await listen('show-quick-add', () => {
+      showQuickAdd.value = true
+    }),
+  )
 
   // 监听密码生成器快捷键事件
-  await listen('show-password-generator', () => {
-    showGenerator.value = true
-  })
+  unlisteners.push(
+    await listen('show-password-generator', () => {
+      showGenerator.value = true
+    }),
+  )
 })
 
 // ==================== 本地状态 ====================

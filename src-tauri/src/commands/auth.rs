@@ -66,13 +66,45 @@ pub enum AuthError {
     WrongOldPassword,
 }
 
+/// 命令门禁：要求已解锁
+///
+/// 首跑未设主密码时数据库虽已用默认密钥打开，此窗口期同样禁止未认证访问
+/// 设置/分类/快捷键命令——setup 流程只需要 `set_master_password`。
+pub fn require_unlocked(state: &AppState) -> Result<(), String> {
+    if state.is_unlocked() {
+        Ok(())
+    } else {
+        Err("应用未解锁，请先解锁应用".to_string())
+    }
+}
+
 /// 校验主密码强度（后端兜底）
 ///
-/// 与前端规则一致：至少 6 个字符。
+/// 与前端规则一致（至少 6 个字符）并额外加固：
+/// 拒绝纯空白、拒绝超长输入（Argon2 对超长口令派生很慢）、拒绝常见弱口令。
 /// 前端校验可被绕过，后端必须独立校验。
 fn validate_password_strength(password: &str) -> Result<(), String> {
-    if password.chars().count() < 6 {
+    if password.trim().is_empty() {
+        return Err("主密码不能为纯空白".to_string());
+    }
+    let len = password.chars().count();
+    if len < 6 {
         return Err("主密码长度至少 6 位".to_string());
+    }
+    if len > 256 {
+        return Err("主密码过长（最多 256 字符）".to_string());
+    }
+    // 常见弱口令小黑名单（大小写不敏感）
+    const WEAK_PASSWORDS: &[&str] = &[
+        "123456", "12345678", "123456789", "1234567890", "111111", "000000", "666666", "888888",
+        "654321", "123123", "123321", "112233", "5201314", "password", "password1", "password123",
+        "passw0rd", "p@ssw0rd", "qwerty", "qwerty123", "abc123", "a1b2c3", "1qaz2wsx", "qazwsx",
+        "zxcvbnm", "1q2w3e4r", "123qwe", "qwe123", "admin", "admin123", "letmein", "welcome",
+        "welcome1", "monkey", "dragon", "master", "iloveyou", "sunshine", "princess", "football",
+        "baseball", "trustno1", "superman", "starwars", "whatever", "login", "hello123",
+    ];
+    if WEAK_PASSWORDS.iter().any(|w| password.eq_ignore_ascii_case(w)) {
+        return Err("主密码过于常见，请更换".to_string());
     }
     Ok(())
 }
@@ -134,6 +166,13 @@ pub async fn set_master_password(
     // - rekey 成功而 save_meta 失败：下次启动走首跑路径，旧库无法用默认密钥打开
     //   会被隔离保留（db::quarantine_existing_db），不会困死用户。
     {
+        // 自愈：极端情况下（如首跑窗口期数据库引用被清）db 引用可能丢失，
+        // 元数据未设置时用默认密钥重建，避免 setup 阶段卡死
+        if state.get_db().is_err() {
+            let database = db::Database::new(&state.app_dir, db::DEFAULT_DB_KEY)
+                .map_err(|e| format!("重建数据库失败: {e}"))?;
+            state.set_database(database);
+        }
         let db = state.get_db()?;
         db.rekey(&db_key)?;
     }
@@ -168,6 +207,11 @@ pub async fn set_master_password(
         combined_key.zeroize();
     }
 
+    // 按用户配置重新注册全局快捷键（若有历史自定义配置）
+    if let Err(e) = crate::commands::shortcuts::reload_from_settings(&app, &state) {
+        log::warn!("设置主密码后重注册快捷键失败: {e}");
+    }
+
     Ok(())
 }
 
@@ -196,6 +240,7 @@ pub async fn set_master_password(
 pub async fn verify_master_password(
     password: String,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<bool, String> {
     // 检查是否处于锁定状态
     state.clear_expired_lockout();
@@ -232,6 +277,11 @@ pub async fn verify_master_password(
         state.set_database(database);
         state.set_db_key(db_key);
         state.set_aes_key(aes_key);
+
+        // 解锁成功后按用户配置重新注册全局快捷键（启动时只能注册默认配置）
+        if let Err(e) = crate::commands::shortcuts::reload_from_settings(&app, &state) {
+            log::warn!("解锁后重注册快捷键失败: {e}");
+        }
 
         Ok(true)
     } else {
@@ -657,6 +707,11 @@ pub async fn unlock_with_system_auth(state: State<'_, AppState>, app: tauri::App
     db_key.zeroize();
     let mut combined_key = combined_key;
     combined_key.zeroize();
+
+    // 解锁成功后按用户配置重新注册全局快捷键（启动时只能注册默认配置）
+    if let Err(e) = crate::commands::shortcuts::reload_from_settings(&app, &state) {
+        log::warn!("解锁后重注册快捷键失败: {e}");
+    }
 
     log::info!("系统认证解锁成功");
     Ok(true)

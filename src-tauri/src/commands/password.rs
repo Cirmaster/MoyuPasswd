@@ -5,9 +5,10 @@
 //!
 //! # 命令列表
 //!
-//! - `get_passwords`: 获取密码列表
+//! - `get_passwords`: 获取密码列表（零解密：不含备注明文，强度读预存列）
+//! - `get_password_detail`: 获取单条详情（按需解密备注）
 //! - `add_password`: 添加密码
-//! - `update_password`: 更新密码
+//! - `update_password`: 更新密码（url/notes 支持「不修改/清空/赋值」三层语义）
 //! - `delete_password`: 删除密码（软删除）
 //! - `toggle_favorite`: 切换收藏状态
 
@@ -33,8 +34,10 @@ pub struct PasswordItem {
     pub password: String,
     /// 网站 URL
     pub url: Option<String>,
-    /// 备注信息
+    /// 备注明文（仅 `get_password_detail` 返回；列表不下发）
     pub notes: Option<String>,
+    /// 是否有备注（列表用；备注明文按需通过 `get_password_detail` 获取）
+    pub has_notes: bool,
     /// 所属分类 ID
     pub category: String,
     /// 是否收藏
@@ -75,14 +78,26 @@ pub struct UpdatePassword {
     pub username: Option<String>,
     /// 登录密码
     pub password: Option<String>,
-    /// 网站 URL
-    pub url: Option<String>,
-    /// 备注信息
-    pub notes: Option<String>,
+    /// 网站 URL（三层语义：字段缺失=不修改、null/空串=清空、字符串=赋值）
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub url: Option<Option<String>>,
+    /// 备注信息（三层语义同 url）
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub notes: Option<Option<String>>,
     /// 所属分类 ID
     pub category: Option<String>,
     /// 是否收藏
     pub is_favorite: Option<bool>,
+}
+
+/// 双层 Option 反序列化：区分「字段缺失（不修改）」与「显式 null（清空）」
+fn de_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let value: Option<T> = Deserialize::deserialize(deserializer)?;
+    Ok(Some(value))
 }
 
 /// 解密密码数据
@@ -251,18 +266,21 @@ pub async fn get_passwords(
         return Err("应用未解锁".to_string());
     }
 
-    // 获取 AES 密钥（用于解密备注）
+    // 获取 AES 密钥（仅用于存量数据强度回填）
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
     let db = state.get_db()?;
     let conn = db.conn();
 
-    // 是否显示密码强度（开启时解密密码计算强度，仍不返回明文）
+    // 是否显示密码强度（仅控制返回值，不影响落库）
     let show_strength = is_show_strength_enabled(&conn);
 
-    // 构建参数化查询
+    // 存量数据强度回填（strength 为空的行补算一次并落库，之后列表零解密）
+    backfill_strength(&conn, &aes_key);
+
+    // 构建参数化查询（列表不解密任何数据：备注只给 has_notes，强度读预存列）
     let mut sql = String::from(
-        "SELECT id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at
+        "SELECT id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at
          FROM passwords
          WHERE deleted_at IS NULL"
     );
@@ -299,45 +317,35 @@ pub async fn get_passwords(
             let id: String = row.get(0)?;
             let title: String = row.get(1)?;
             let username: String = row.get(2)?;
-            let password_encrypted: String = row.get(3)?;
-            let url: Option<String> = row.get(4)?;
-            let notes_encrypted: Option<String> = row.get(5)?;
-            let category_id: String = row.get(6)?;
-            let is_favorite: i32 = row.get(7)?;
+            let url: Option<String> = row.get(3)?;
+            let notes_encrypted: Option<String> = row.get(4)?;
+            let category_id: String = row.get(5)?;
+            let is_favorite: i32 = row.get(6)?;
+            let strength: Option<i32> = row.get(7)?;
             let created_at: i64 = row.get(8)?;
             let updated_at: i64 = row.get(9)?;
 
-            Ok((id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at))
+            Ok((id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    // 转换结果（列表不返回明文密码；解密备注；按需计算强度）
+    // 转换结果：列表零解密——不返回明文密码、不下发备注（只给 has_notes）、强度读预存列
     let result = passwords
         .into_iter()
-        .map(|(id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at)| {
-            let notes = match notes_encrypted {
-                Some(enc) => decrypt_password(&aes_key, &enc).ok(),
-                None => None,
-            };
-            let password_strength = if show_strength {
-                decrypt_password(&aes_key, &password_encrypted)
-                    .ok()
-                    .map(|p| crate::crypto::password_strength_level(&p))
-            } else {
-                None
-            };
+        .map(|(id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at)| {
             PasswordItem {
                 id,
                 title,
                 username,
                 password: String::new(), // 列表不返回明文
                 url,
-                notes,
+                notes: None,
+                has_notes: notes_encrypted.is_some(),
                 category: category_id,
                 is_favorite: is_favorite != 0,
-                password_strength,
+                password_strength: if show_strength { strength } else { None },
                 created_at,
                 updated_at,
             }
@@ -347,11 +355,54 @@ pub async fn get_passwords(
     Ok(result)
 }
 
-/// 获取单个密码（内部使用，非对外命令）
+/// 存量数据强度一次性回填
 ///
-/// 根据 ID 获取单个密码的详细信息，备注解密后返回。
-/// 仅由 update_password 内部调用，不作为 Tauri 命令暴露。
-fn get_password_internal(state: &AppState, id: &str) -> Result<PasswordItem, String> {
+/// 强度列上线前的旧记录没有 strength 值；首次列表加载时补算并落库，
+/// 之后列表读取列即可（不再解密全库）。解密失败的行跳过，下次再试。
+fn backfill_strength(conn: &rusqlite::Connection, aes_key: &[u8; 32]) {
+    let rows: Vec<(String, String)> = match conn
+        .prepare("SELECT id, password_encrypted FROM passwords WHERE strength IS NULL")
+    {
+        Ok(mut stmt) => match stmt
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(_) => return,
+        },
+        Err(_) => return,
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let mut filled = 0usize;
+    for (id, encrypted) in rows {
+        if let Ok(plaintext) = decrypt_password(aes_key, &encrypted) {
+            let level = crate::crypto::password_strength_level(&plaintext);
+            if conn
+                .execute(
+                    "UPDATE passwords SET strength = ?1 WHERE id = ?2",
+                    params![level, id],
+                )
+                .is_ok()
+            {
+                filled += 1;
+            }
+        }
+    }
+    log::info!("密码强度回填完成: {} 条", filled);
+}
+
+/// 获取单个密码详情（含备注明文）
+///
+/// 备注按需获取：列表不下发备注明文（只给 `has_notes`），
+/// 编辑/查看详情时才调用本命令。备注解密失败直接报错，绝不静默返回空。
+#[tauri::command]
+pub async fn get_password_detail(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<PasswordItem, String> {
     // 检查是否已解锁
     if !state.is_unlocked() {
         return Err("应用未解锁".to_string());
@@ -365,7 +416,7 @@ fn get_password_internal(state: &AppState, id: &str) -> Result<PasswordItem, Str
 
     // 查询数据库
     let result = conn.query_row(
-        "SELECT id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at
+        "SELECT id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at
          FROM passwords
          WHERE id = ?1 AND deleted_at IS NULL",
         params![id],
@@ -373,22 +424,23 @@ fn get_password_internal(state: &AppState, id: &str) -> Result<PasswordItem, Str
             let id: String = row.get(0)?;
             let title: String = row.get(1)?;
             let username: String = row.get(2)?;
-            let password_encrypted: String = row.get(3)?;
-            let url: Option<String> = row.get(4)?;
-            let notes_encrypted: Option<String> = row.get(5)?;
-            let category_id: String = row.get(6)?;
-            let is_favorite: i32 = row.get(7)?;
+            let url: Option<String> = row.get(3)?;
+            let notes_encrypted: Option<String> = row.get(4)?;
+            let category_id: String = row.get(5)?;
+            let is_favorite: i32 = row.get(6)?;
+            let strength: Option<i32> = row.get(7)?;
             let created_at: i64 = row.get(8)?;
             let updated_at: i64 = row.get(9)?;
 
-            Ok((id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at))
+            Ok((id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at))
         },
     );
 
     match result {
-        Ok((id, title, username, _password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at)) => {
+        Ok((id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at)) => {
+            // 备注解密失败必须报错：静默返回 None 会让更新流程把原备注覆盖清空
             let notes = match notes_encrypted {
-                Some(enc) => decrypt_password(&aes_key, &enc).ok(),
+                Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
                 None => None,
             };
             Ok(PasswordItem {
@@ -397,10 +449,11 @@ fn get_password_internal(state: &AppState, id: &str) -> Result<PasswordItem, Str
                 username,
                 password: String::new(), // 不返回明文
                 url,
+                has_notes: notes.is_some(),
                 notes,
                 category: category_id,
                 is_favorite: is_favorite != 0,
-                password_strength: None, // 内部使用，不计算强度
+                password_strength: strength,
                 created_at,
                 updated_at,
             })
@@ -460,6 +513,9 @@ pub async fn add_password(
     // 加密密码
     let encrypted_password = encrypt_password(&aes_key, &data.password)?;
 
+    // 密码强度写入时计算并落库（列表读列即可，不再全量解密）
+    let strength = crate::crypto::password_strength_level(&data.password);
+
     // 加密备注（若有）
     let encrypted_notes = match &data.notes {
         Some(n) if !n.is_empty() => Some(encrypt_password(&aes_key, n)?),
@@ -469,13 +525,13 @@ pub async fn add_password(
     let db = state.get_db()?;
     let conn = db.conn();
 
-    // 是否显示密码强度
+    // 是否显示密码强度（仅控制返回值）
     let show_strength = is_show_strength_enabled(&conn);
 
     // 插入数据库
     conn.execute(
-        "INSERT INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             id,
             data.title,
@@ -485,26 +541,24 @@ pub async fn add_password(
             encrypted_notes,
             data.category,
             data.is_favorite as i32,
+            strength,
             now,
             now,
         ],
     ).map_err(|e| e.to_string())?;
 
-    // 返回新添加的密码项（不返回明文密码）
+    // 返回新添加的密码项（不返回明文密码、不回显备注明文）
     Ok(PasswordItem {
         id,
         title: data.title,
         username: data.username,
         password: String::new(),
         url: data.url,
-        notes: data.notes,
+        notes: None,
+        has_notes: encrypted_notes.is_some(),
         category: data.category,
         is_favorite: data.is_favorite,
-        password_strength: if show_strength {
-            Some(crate::crypto::password_strength_level(&data.password))
-        } else {
-            None
-        },
+        password_strength: if show_strength { Some(strength) } else { None },
         created_at: now,
         updated_at: now,
     })
@@ -549,54 +603,104 @@ pub async fn update_password(
     // 获取 AES 密钥
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    // 获取当前密码数据
-    let current = get_password_internal(&state, &id)?;
-
-    // 构建更新字段
-    let title = data.title.unwrap_or(current.title);
-    let username = data.username.unwrap_or(current.username);
-    let password = data.password.unwrap_or_default();
-    let url = data.url.or(current.url);
-    let notes = data.notes.or(current.notes);
-    let category = data.category.unwrap_or(current.category);
-    let is_favorite = data.is_favorite.unwrap_or(current.is_favorite);
-
-    // 密码为空时保留原密码，否则重新加密
-    let encrypted_password = if password.is_empty() {
-        // 独立作用域：查询完立即释放数据库锁，避免与后续 UPDATE 死锁
-        {
-            let db = state.get_db()?;
-    let conn = db.conn();
-            conn.query_row(
-                "SELECT password_encrypted FROM passwords WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, String>(0),
-            ).map_err(|e| e.to_string())?
-        }
-    } else {
-        encrypt_password(&aes_key, &password)?
-    };
-
-    // 加密备注
-    let encrypted_notes = match &notes {
-        Some(n) if !n.is_empty() => Some(encrypt_password(&aes_key, n)?),
-        _ => None,
-    };
-
     let now = chrono::Utc::now().timestamp_millis();
 
+    // 读取当前原始行：备注密文不改动则完全不解密、不重写，
+    // 从根上消除「备注解密失败 → 静默清空」的问题
     let db = state.get_db()?;
     let conn = db.conn();
 
-    // 是否显示密码强度
+    let (
+        cur_title,
+        cur_username,
+        cur_password_enc,
+        cur_url,
+        cur_notes_enc,
+        cur_category,
+        cur_is_favorite,
+        cur_strength,
+        created_at,
+    ): (String, String, String, Option<String>, Option<String>, String, i32, Option<i32>, i64) = conn
+        .query_row(
+            "SELECT title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, strength, created_at
+             FROM passwords
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => "未找到密码".to_string(),
+            _ => e.to_string(),
+        })?;
+
+    // 标量字段：None = 不修改
+    let title = data.title.unwrap_or(cur_title);
+    let username = data.username.unwrap_or(cur_username);
+    let category = data.category.unwrap_or(cur_category);
+    let is_favorite = data.is_favorite.unwrap_or(cur_is_favorite != 0);
+
+    // URL 三层语义：缺失=不修改、null/空串=清空、字符串=赋值
+    let url = match data.url {
+        None => cur_url,
+        Some(None) => None,
+        Some(Some(v)) => {
+            let v = v.trim().to_string();
+            if v.is_empty() {
+                None
+            } else {
+                Some(v)
+            }
+        }
+    };
+
+    // 备注三层语义：缺失=保持原密文不动、null/空串=清空、字符串=重新加密
+    let encrypted_notes = match &data.notes {
+        None => cur_notes_enc,
+        Some(None) => None,
+        Some(Some(n)) if n.trim().is_empty() => None,
+        Some(Some(n)) => Some(encrypt_password(&aes_key, n)?),
+    };
+    let has_notes = encrypted_notes.is_some();
+
+    // 密码：为空/缺失保留原密文与原强度，否则重新加密并重算强度
+    let (encrypted_password, strength) = match &data.password {
+        Some(p) if !p.is_empty() => (
+            encrypt_password(&aes_key, p)?,
+            crate::crypto::password_strength_level(p),
+        ),
+        _ => {
+            let level = match cur_strength {
+                Some(l) => l,
+                // 旧数据无强度值：解密补算一次（单条，可接受）
+                None => decrypt_password(&aes_key, &cur_password_enc)
+                    .map(|p| crate::crypto::password_strength_level(&p))
+                    .unwrap_or(0),
+            };
+            (cur_password_enc, level)
+        }
+    };
+
+    // 是否显示密码强度（仅控制返回值）
     let show_strength = is_show_strength_enabled(&conn);
 
-    // 更新数据库
+    // 更新数据库（含强度列）
     conn.execute(
         "UPDATE passwords
          SET title = ?1, username = ?2, password_encrypted = ?3, url = ?4, notes_encrypted = ?5,
-             category_id = ?6, is_favorite = ?7, updated_at = ?8
-         WHERE id = ?9",
+             category_id = ?6, is_favorite = ?7, strength = ?8, updated_at = ?9
+         WHERE id = ?10",
         params![
             title,
             username,
@@ -605,32 +709,25 @@ pub async fn update_password(
             encrypted_notes,
             category,
             is_favorite as i32,
+            strength,
             now,
             id,
         ],
     ).map_err(|e| e.to_string())?;
 
-    // 计算密码强度（开启时；保留原密码则解密后计算）
-    let password_strength = if show_strength {
-        decrypt_password(&aes_key, &encrypted_password)
-            .ok()
-            .map(|p| crate::crypto::password_strength_level(&p))
-    } else {
-        None
-    };
-
-    // 返回更新后的密码项（不返回明文密码）
+    // 返回更新后的密码项（不返回明文密码、不回显备注明文）
     Ok(PasswordItem {
         id,
         title,
         username,
         password: String::new(),
         url,
-        notes,
+        notes: None,
+        has_notes,
         category,
         is_favorite,
-        password_strength,
-        created_at: current.created_at,
+        password_strength: if show_strength { Some(strength) } else { None },
+        created_at,
         updated_at: now,
     })
 }

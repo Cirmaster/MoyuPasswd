@@ -71,6 +71,9 @@ impl Default for Settings {
 /// ```
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -131,6 +134,9 @@ pub async fn get_setting(
     key: String,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -176,6 +182,9 @@ pub async fn save_setting(
     value: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -222,6 +231,9 @@ pub async fn save_settings(
     settings: Settings,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+    crate::commands::auth::require_unlocked(&state)?;
+
     let db = state.get_db()?;
     let conn = db.conn();
 

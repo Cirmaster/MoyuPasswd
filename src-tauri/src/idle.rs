@@ -5,9 +5,10 @@
 //!
 //! # 工作原理
 //!
-//! - Windows: 使用 `GetLastInputInfo` API 获取系统空闲时间
-//! - 非 Windows: 依赖前端 `report_activity` 上报
-//! - 后台线程每 30 秒检查一次，超时触发锁定
+//! - Windows: 使用 `GetLastInputInfo` API 获取**系统空闲时间**（全局键鼠输入），
+//!   用户在其他应用工作视为「未离开」，不触发锁定
+//! - 非 Windows: 无系统空闲 API，退化为应用内活动（前端 `report_activity` 上报）
+//! - 后台线程每 10 秒检查一次，超过设置阈值触发锁定
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -40,15 +41,24 @@ pub async fn report_activity() {
 
 /// 获取自上次活动以来的空闲时间（秒）
 ///
-/// 综合系统空闲时间和应用内活动时间，取较小值
+/// 自动锁定语义以「用户是否离开电脑」为准（唯一权威信号）：
+/// - Windows：取系统空闲时间——用户在其他应用工作不算空闲
+/// - 其他平台：退化为应用内活动（`report_activity` 上报）
+///
+/// 返回 `u64::MAX` 表示「无法判定」，调用方不应据此锁定。
 pub fn get_idle_seconds() -> u64 {
-    let system_idle = get_system_idle_seconds();
-    let app_idle = get_app_idle_seconds();
-
-    system_idle.min(app_idle)
+    #[cfg(windows)]
+    {
+        get_system_idle_seconds()
+    }
+    #[cfg(not(windows))]
+    {
+        get_app_idle_seconds()
+    }
 }
 
-/// 获取应用内空闲时间（秒）
+/// 获取应用内空闲时间（秒）（非 Windows 平台的空闲判定依据）
+#[cfg(not(windows))]
 fn get_app_idle_seconds() -> u64 {
     let last_activity = LAST_ACTIVITY.load(Ordering::SeqCst);
     if last_activity == 0 {
@@ -110,8 +120,8 @@ where
         log::info!("空闲检测线程已启动");
 
         loop {
-            // 每 30 秒检查一次
-            std::thread::sleep(std::time::Duration::from_secs(30));
+            // 每 10 秒检查一次（粒度太粗会让锁定明显晚于设置值）
+            std::thread::sleep(std::time::Duration::from_secs(10));
 
             // 从全局获取自动锁定时间设置（分钟）
             let auto_lock_minutes = get_auto_lock_minutes();
@@ -120,6 +130,10 @@ where
             }
 
             let idle_seconds = get_idle_seconds();
+            // 无法判定空闲时间时不动（fail open，避免误锁）
+            if idle_seconds == u64::MAX {
+                continue;
+            }
             let lock_seconds = auto_lock_minutes * 60;
 
             if idle_seconds >= lock_seconds {
