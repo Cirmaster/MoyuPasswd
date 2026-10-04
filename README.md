@@ -9,19 +9,48 @@
 ### 核心功能
 
 - 🔐 **主密码保护** — 使用 Argon2id 哈希 + AES-256-GCM 加密存储所有密码
-- 🔍 **快速搜索** — 全局快捷键 `Ctrl+K` 一键呼出，支持拼音/模糊搜索
+- ⌨️ **Ctrl+V 注入** — 复制密码后倒计时内，在目标窗口按 `Ctrl+V` 直接注入（**密码不进系统剪贴板**），`Esc`/`Ctrl+C` 可放弃
+- 🔍 **快速搜索** — 全局快捷键 `Ctrl+K` 一键呼出，支持标题/用户名/URL 模糊搜索
 - ⚡ **快速添加** — `Ctrl+Shift+N` 快速录入新密码
 - 🎲 **密码生成器** — 可配置长度、字符类型，实时显示密码强度
-- 📋 **安全复制** — 复制密码到剪贴板，支持自动清除（可配置 10s/30s/60s）
+- 📋 **安全复制** — 用户名/URL 等文本复制进剪贴板后按设置自动清除（10s/30s/60s 可配）
 - 📂 **分类管理** — 自定义分类，支持收藏夹功能
+
+### 🔁 密码明文生命周期
+
+> **入库即加密，用时才解密，用完即清零，锁定全作废。**
+
+```mermaid
+%%{init: {'flowchart': {'nodeSpacing': 22, 'rankSpacing': 22, 'curve': 'linear'}, 'themeVariables': {'fontSize': '12px'}}}%%
+flowchart TD
+    A(["录入/修改"]) --> B["🟢① 明文生成<br/>表单→IPC，随即加密入库"]
+    B --> C["🔴① 明文终结<br/>参数释放，盘上只剩密文"]
+    C --> D["复制登记（无明文<br/>仅 ID+解密闭包）"]
+    D --> E{"Ctrl+V<br/>已锁定？"}
+    E -->|否| F["🟢② 明文生成<br/>闭包现场解密"]
+    F --> G["SendInput 注入<br/>🔴② 立即 zeroize 清零"]
+    E -->|是| H["⛔ 拒绝解密<br/>失败关闭"]
+    D -.->|"超时/Esc/Ctrl+C/锁定"| I["🔴 闭包销毁<br/>无法再生成明文"]
+
+    classDef born fill:#16a34a,stroke:#15803d,color:#fff
+    classDef dead fill:#b91c1c,stroke:#991b1b,color:#fff
+    classDef denied fill:#6b7280,stroke:#4b5563,color:#fff
+    class B,F born
+    class C,I dead
+    class H denied
+```
 
 ### 安全特性
 
-- 🛡️ **自动锁定** — 空闲超时自动锁定，清除内存中的密钥
-- 🖥️ **系统认证** — 支持 Windows Hello / Touch ID 生物识别解锁
+- 🛡️ **自动锁定** — 系统空闲超时自动锁定（离开电脑才锁定），清除内存中的密钥
+- 🔐 **暴力破解防护** — 连续输错渐进锁定（30s→15min），失败计数持久化、重启不清零
+- 🖥️ **系统认证** — 支持 Windows Hello / Touch ID 生物识别解锁，改密后密钥自动轮换
 - 🔒 **剪贴板保护** — 复制后自动清除，锁定时强制清空
-- 📁 **文件权限加固** — 数据库文件 ACL 限制访问
-- 💾 **数据导入导出** — 支持备份和恢复（加密格式）
+- 🚫 **注入黑名单** — 拒绝向终端等高危进程注入密码（归因失败也不注入）
+- 🧾 **注入审计** — 每次注入记录目标进程与结果（不含明文）
+- 🔄 **改密崩溃安全** — 修改主密码失败/断电自动回滚，不丢数据
+- 📁 **文件权限加固** — 数据库/审计日志文件 ACL 限制访问
+- 💾 **数据导入导出** — 加密格式备份恢复；导入整包事务 + 冲突策略（默认跳过已有条目）
 
 ### 便捷功能
 
@@ -83,7 +112,7 @@
 
 1. **添加密码**: 点击右上角「+」按钮，或使用快捷键 `Ctrl+Shift+N`
 2. **搜索密码**: 使用快捷键 `Ctrl+K` 呼出快速搜索
-3. **复制密码**: 在密码列表中点击复制图标，或在快速搜索中选中后回车
+3. **使用密码**: 在密码列表中点击复制图标，或在快速搜索中选中后回车——随后切到目标窗口，在倒计时内按 `Ctrl+V` 注入（密码不进剪贴板）
 4. **编辑密码**: 双击密码条目进行编辑
 5. **分类管理**: 在左侧边栏创建和管理分类
 
@@ -116,11 +145,11 @@ cargo build
 ### 开发命令
 
 ```bash
-# 启动开发服务器（前端 + Tauri 热重载）
-pnpm dev
+# 启动开发模式（前端 + Rust 热重载）
+pnpm tauri dev
 
 # 仅启动前端开发服务器
-pnpm dev:frontend
+pnpm dev
 
 # 类型检查
 pnpm type-check
@@ -149,11 +178,11 @@ moyu-passwd/
 │   │   ├── QuickSearch.vue           # 快速搜索组件
 │   │   ├── QuickAdd.vue              # 快速添加组件
 │   │   ├── ScreenCountdown.vue       # 屏幕倒计时悬浮窗
+│   │   ├── CaretCountdown.vue        # 光标跟随倒计时
 │   │   └── Toast.vue                 # Toast 提示
 │   ├── composables/                  # 组合式函数
 │   │   ├── useTheme.ts               # 主题管理
-│   │   ├── useAutoLock.ts            # 自动锁定逻辑
-│   │   └── useClipboard.ts           # 剪贴板管理
+│   │   └── useAutoLock.ts            # 用户活动上报（锁定由后端负责）
 │   ├── stores/                       # Pinia 状态管理
 │   │   ├── password.ts               # 密码数据状态
 │   │   └── shortcuts.ts              # 快捷键配置状态
@@ -170,22 +199,28 @@ moyu-passwd/
 │   │   ├── main.rs                   # 应用入口
 │   │   ├── lib.rs                    # 模块注册、应用初始化
 │   │   ├── db/                       # 数据库模块
-│   │   │   └── mod.rs                # SQLite 初始化、迁移
+│   │   │   └── mod.rs                # SQLite(SQLCipher) 初始化、迁移
 │   │   ├── crypto/                   # 加密模块
 │   │   │   └── mod.rs                # Argon2id、AES-256-GCM
+│   │   ├── db_meta.rs                # 凭证元数据（Credential Manager / 文件）
 │   │   ├── state/                    # 状态管理
-│   │   │   └── mod.rs                # AES 密钥、解锁状态
-│   │   ├── clipboard/                # 剪贴板模块
+│   │   │   └── mod.rs                # 密钥、解锁状态、爆破锁定计数
+│   │   ├── pending.rs                # 待粘贴密码槽（延迟解密、审计）
+│   │   ├── hotkey.rs                 # Ctrl+V 键盘钩子（一次性）
+│   │   ├── inject.rs                 # 进程归因 + SendInput 密码注入
+│   │   ├── audit.rs                  # 注入审计日志
+│   │   ├── clipboard/                # 剪贴板模块（防历史/云端同步 + 定时清除）
 │   │   ├── acl/                      # 文件权限加固
-│   │   ├── idle/                     # 空闲检测
+│   │   ├── idle/                     # 空闲检测（系统空闲为准）
 │   │   ├── system_auth/              # 系统认证（Windows Hello）
 │   │   └── commands/                 # Tauri 命令
-│   │       ├── auth.rs               # 认证命令
+│   │       ├── auth.rs               # 认证命令（含统一锁定入口 lockdown）
 │   │       ├── password.rs           # 密码 CRUD
 │   │       ├── category.rs           # 分类管理
 │   │       ├── settings.rs           # 设置管理
 │   │       ├── data.rs               # 数据导入导出
-│   │       └── shortcuts.rs          # 快捷键管理
+│   │       ├── shortcuts.rs          # 快捷键管理
+│   │       └── countdown.rs          # 倒计时窗口管理
 │   ├── tauri.conf.json               # Tauri 配置
 │   ├── Cargo.toml                    # Rust 依赖配置
 │   └── icons/                        # 应用图标
@@ -232,18 +267,22 @@ moyu-passwd/
 
 ### 数据存储
 
-- **数据库文件**: `moyu_passwd.db` (SQLite，AES-256-GCM 加密)
-- **元数据文件**: `.moyu_passwd_meta` (主密码哈希、配置)
+- **数据库文件**: `moyu_passwd.db`（SQLCipher 全库加密；密码/备注条目再以 AES-256-GCM 加密）
+- **凭证元数据**: 主密码哈希与派生盐——Windows 存于 **Credential Manager**（系统加密存储），其他平台为 `.moyu_passwd_meta` 文件（ACL 加固）
+- **辅助文件**: `lockout.json`（爆破锁定计数）、`audit.log`（注入审计）、`backup/`（修改主密码前的自动备份）
 - **存储位置**: `%APPDATA%/com.moyu.passwd/`
 
 ### 安全措施
 
-1. **密钥派生**: 使用 Argon2id（抗 GPU/ASIC 暴力破解）
-2. **数据加密**: AES-256-GCM（认证加密，防篡改）
-3. **内存保护**: 锁定时清除内存中的密钥
-4. **剪贴板保护**: 复制后自动清除，锁定时强制清空
-5. **文件权限**: 数据库文件 ACL 限制访问
-6. **空闲检测**: 超时自动锁定
+1. **密钥派生**: 使用 Argon2id（抗 GPU/ASIC 暴力破解），AES 密钥与数据库密钥独立派生
+2. **数据加密**: SQLCipher 全库加密 + AES-256-GCM 条目加密（认证加密，防篡改）
+3. **内存保护**: 锁定时清除内存中的密钥；解密闭包不持有密钥副本
+4. **剪贴板保护**: 密码不进剪贴板（注入式粘贴）；文本复制后自动清除，锁定时强制清空
+5. **文件权限**: 数据库/审计日志文件 ACL 限制访问
+6. **空闲检测**: 系统空闲超时自动锁定
+7. **爆破防护**: 连续失败渐进锁定（30s→15min），失败计数持久化
+8. **注入防护**: 目标进程归因 + 黑名单，归因失败拒绝注入
+9. **崩溃安全**: 修改主密码失败/断电自动回滚，不产生半新半旧的数据
 
 ---
 
