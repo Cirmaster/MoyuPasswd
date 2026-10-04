@@ -14,6 +14,10 @@
 //! - 主密码哈希使用 Argon2id，与数据库加密密钥独立
 //! - 每种密钥（AES、数据库）使用独立的随机盐
 //! - Windows Credential Manager 由系统加密保护，绑定当前用户
+//! - 元数据读取区分「不存在」与「读取失败」（三态），
+//!   读取失败绝不允许被上层当作「首次运行」，防止误删密码库
+//! - 修改主密码时先写「事务日志」（旧 meta 副本），
+//!   中途崩溃由启动恢复逻辑确定性回滚（见 `commands::auth`）
 
 use std::path::Path;
 
@@ -32,43 +36,55 @@ pub struct MetaInfo {
     pub db_salt: String,
 }
 
+/// 元数据状态（三态）
+///
+/// 关键约束：**「从未设置」与「读取失败」必须可区分**。
+/// 若读取失败被当成「不存在」，上层会走首次运行流程并可能毁掉已有密码库。
+#[derive(Debug)]
+pub enum MetaStatus {
+    /// 元数据存在且可解析
+    Present,
+    /// 确认从未设置（可以安全地走首次运行流程）
+    Absent,
+    /// 读取失败或内容损坏（**绝不能当作「不存在」处理**）
+    Unavailable(String),
+}
+
+/// 主元数据存储键（修改主密码事务日志以外的正常元数据）
+const META_KEY: &str = "meta";
+/// 修改主密码事务日志存储键（保存旧 meta 副本，作为回滚依据）
+const JOURNAL_KEY: &str = "meta.old";
+
 // ==================== Windows 实现 ====================
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::MetaInfo;
     use std::path::Path;
     use windows::Win32::Foundation::FILETIME;
     use windows::Win32::Security::Credentials::{
-        CredDeleteW, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE,
-        CRED_TYPE_GENERIC,
+        CredDeleteW, CredFree, CredReadW, CredWriteW, CREDENTIALW, CRED_FLAGS,
+        CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC,
     };
     use windows::core::{PCWSTR, PWSTR};
 
-    /// Credential Manager 中的凭据名称
-    const CREDENTIAL_NAME: &str = "com.moyu.passwd.meta";
+    /// 凭据名称前缀
+    const CREDENTIAL_PREFIX: &str = "com.moyu.passwd.";
 
-    /// 检查元数据是否存在
-    pub fn meta_exists(_app_dir: &Path) -> bool {
-        read_credential().is_some()
+    /// 存储键 → 凭据名称
+    fn cred_name(key: &str) -> String {
+        format!("{}{}", CREDENTIAL_PREFIX, key)
     }
 
-    /// 加载元数据
-    pub fn load_meta(_app_dir: &Path) -> Option<MetaInfo> {
-        let data = read_credential()?;
-        serde_json::from_str(&data).ok()
-    }
-
-    /// 保存元数据
-    pub fn save_meta(_app_dir: &Path, meta: &MetaInfo) -> Result<(), String> {
-        let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
-        write_credential(&content)
-    }
-
-    /// 读取凭据
-    fn read_credential() -> Option<String> {
+    /// 读取凭据原始字符串
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(None)`：确认不存在（`ERROR_NOT_FOUND`）
+    /// - `Ok(Some(s)`：内容
+    /// - `Err(_)`：读取失败或内容异常（**调用方不得当作「不存在」**）
+    pub fn read_meta(_app_dir: &Path, key: &str) -> Result<Option<String>, String> {
         unsafe {
-            let name_wide = to_wide(CREDENTIAL_NAME);
+            let name_wide = to_wide(&cred_name(key));
             let mut credential: *mut CREDENTIALW = std::ptr::null_mut();
 
             let result = CredReadW(
@@ -78,36 +94,44 @@ mod platform {
                 &mut credential,
             );
 
-            if result.is_err() {
-                return None;
+            if let Err(err) = result {
+                // ERROR_NOT_FOUND = 1168：确认从未设置；其他错误一律上抛
+                let code = (err.code().0 as u32) & 0xFFFF;
+                if code == 1168 {
+                    return Ok(None);
+                }
+                return Err(format!("读取凭据失败: {err}"));
             }
 
             let cred = &*credential;
-            if cred.CredentialBlobSize == 0 || cred.CredentialBlob.is_null() {
-                return None;
-            }
+            // 先把数据拷贝出来，随后立即 CredFree 释放（防止泄漏）
+            let data = if cred.CredentialBlobSize == 0 || cred.CredentialBlob.is_null() {
+                // 空凭据是异常状态：按「不可读」处理，绝不当作「不存在」
+                Err("凭据内容为空（元数据损坏）".to_string())
+            } else {
+                let blob = std::slice::from_raw_parts(
+                    cred.CredentialBlob,
+                    cred.CredentialBlobSize as usize,
+                );
+                let utf16_data: Vec<u16> = blob
+                    .chunks_exact(2)
+                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                    .collect();
+                String::from_utf16(&utf16_data)
+                    .map(Some)
+                    .map_err(|e| format!("凭据内容编码错误: {e}"))
+            };
 
-            // 凭据数据是 UTF-16 编码
-            let blob = std::slice::from_raw_parts(
-                cred.CredentialBlob,
-                cred.CredentialBlobSize as usize,
-            );
-
-            // 转换为 UTF-8 字符串
-            let utf16_data: Vec<u16> = blob
-                .chunks_exact(2)
-                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-                .collect();
-
-            String::from_utf16(&utf16_data).ok()
+            CredFree(credential.cast());
+            data
         }
     }
 
-    /// 写入凭据
-    fn write_credential(data: &str) -> Result<(), String> {
+    /// 写入凭据原始字符串
+    pub fn write_meta(_app_dir: &Path, key: &str, data: &str) -> Result<(), String> {
         unsafe {
-            let name_wide = to_wide(CREDENTIAL_NAME);
-            let target_wide = to_wide(CREDENTIAL_NAME);
+            let name_wide = to_wide(&cred_name(key));
+            let target_wide = to_wide(&cred_name(key));
 
             // 将字符串转为 UTF-16 字节
             let utf16: Vec<u16> = data.encode_utf16().collect();
@@ -136,25 +160,35 @@ mod platform {
                 return Err(format!("写入凭据失败: {:?}", result));
             }
 
-            log::info!("元数据已存入 Windows Credential Manager");
+            log::info!("元数据已存入 Windows Credential Manager（key={}）", key);
             Ok(())
         }
     }
 
-    /// 删除凭据
-    pub fn delete_meta(_app_dir: &Path) -> Result<(), String> {
+    /// 删除凭据（不存在视为成功，保证幂等）
+    pub fn delete_meta(_app_dir: &Path, key: &str) -> Result<(), String> {
         unsafe {
-            let name_wide = to_wide(CREDENTIAL_NAME);
+            let name_wide = to_wide(&cred_name(key));
             let result = CredDeleteW(
                 PCWSTR(name_wide.as_ptr()),
                 CRED_TYPE_GENERIC,
                 0,
             );
 
-            if result.is_ok() {
-                log::info!("已从 Credential Manager 删除元数据");
+            match result {
+                Ok(()) => {
+                    log::info!("已从 Credential Manager 删除凭据（key={}）", key);
+                    Ok(())
+                }
+                Err(err) => {
+                    let code = (err.code().0 as u32) & 0xFFFF;
+                    if code == 1168 {
+                        Ok(())
+                    } else {
+                        Err(format!("删除凭据失败: {err}"))
+                    }
+                }
             }
-            Ok(())
         }
     }
 
@@ -168,30 +202,33 @@ mod platform {
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
-    use super::MetaInfo;
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    /// 元数据文件名
-    const META_FILENAME: &str = ".moyu_passwd_meta";
-
-    fn meta_path(app_dir: &Path) -> PathBuf {
-        app_dir.join(META_FILENAME)
+    /// 存储键 → 元数据文件名
+    fn meta_path(app_dir: &Path, key: &str) -> PathBuf {
+        app_dir.join(format!(".moyu_passwd_{}", key))
     }
 
-    pub fn meta_exists(app_dir: &Path) -> bool {
-        meta_path(app_dir).exists()
+    /// 读取元数据原始字符串
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(None)`：文件不存在（确认从未设置）
+    /// - `Ok(Some(s)`：内容
+    /// - `Err(_)`：读取失败（**不得当作「不存在」**）
+    pub fn read_meta(app_dir: &Path, key: &str) -> Result<Option<String>, String> {
+        match fs::read_to_string(meta_path(app_dir, key)) {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("读取元数据文件失败: {e}")),
+        }
     }
 
-    pub fn load_meta(app_dir: &Path) -> Option<MetaInfo> {
-        let content = fs::read_to_string(meta_path(app_dir)).ok()?;
-        serde_json::from_str(&content).ok()
-    }
-
-    pub fn save_meta(app_dir: &Path, meta: &MetaInfo) -> Result<(), String> {
-        let path = meta_path(app_dir);
-        let content = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
-        fs::write(&path, content).map_err(|e| format!("保存元数据文件失败: {e}"))?;
+    /// 写入元数据原始字符串
+    pub fn write_meta(app_dir: &Path, key: &str, data: &str) -> Result<(), String> {
+        let path = meta_path(app_dir, key);
+        fs::write(&path, data).map_err(|e| format!("保存元数据文件失败: {e}"))?;
 
         // 收紧文件 ACL
         if let Err(e) = crate::acl::harden_file_acl(&path) {
@@ -201,33 +238,90 @@ mod platform {
         Ok(())
     }
 
-    pub fn delete_meta(app_dir: &Path) -> Result<(), String> {
-        let path = meta_path(app_dir);
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| format!("删除元数据文件失败: {e}"))?;
+    /// 删除元数据（不存在视为成功，保证幂等）
+    pub fn delete_meta(app_dir: &Path, key: &str) -> Result<(), String> {
+        let path = meta_path(app_dir, key);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("删除元数据文件失败: {e}")),
         }
-        Ok(())
     }
 }
 
 // ==================== 公共接口 ====================
 
-/// 检查元数据是否存在
-pub fn meta_exists(app_dir: &Path) -> bool {
-    platform::meta_exists(app_dir)
+/// 检查元数据状态（三态）
+///
+/// 首次运行判定、设置主密码前检查等关键路径必须使用本函数，
+/// 根据 `MetaStatus` 分别处理，**绝不能把 `Unavailable` 当成 `Absent`**。
+pub fn meta_status(app_dir: &Path) -> MetaStatus {
+    match load_meta(app_dir) {
+        Ok(Some(_)) => MetaStatus::Present,
+        Ok(None) => MetaStatus::Absent,
+        Err(e) => MetaStatus::Unavailable(e),
+    }
 }
 
 /// 加载元数据
-pub fn load_meta(app_dir: &Path) -> Option<MetaInfo> {
-    platform::load_meta(app_dir)
+///
+/// # Returns
+///
+/// - `Ok(None)`：确认从未设置
+/// - `Ok(Some(meta)`：元数据
+/// - `Err(_)`：读取失败或内容损坏
+pub fn load_meta(app_dir: &Path) -> Result<Option<MetaInfo>, String> {
+    match platform::read_meta(app_dir, META_KEY)? {
+        Some(content) => serde_json::from_str(&content)
+            .map(Some)
+            .map_err(|e| format!("元数据损坏: {e}")),
+        None => Ok(None),
+    }
 }
 
 /// 保存元数据
 pub fn save_meta(app_dir: &Path, meta: &MetaInfo) -> Result<(), String> {
-    platform::save_meta(app_dir, meta)
+    let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
+    platform::write_meta(app_dir, META_KEY, &content)
 }
 
 /// 删除元数据
 pub fn delete_meta(app_dir: &Path) -> Result<(), String> {
-    platform::delete_meta(app_dir)
+    platform::delete_meta(app_dir, META_KEY)
+}
+
+// ==================== 修改主密码事务日志 ====================
+//
+// 协议（详见 commands::auth::change_master_password）：
+// 1. 备份数据库
+// 2. save_meta_journal(旧 meta)   —— 进入可回滚窗口
+// 3. 重加密 / rekey / save_meta(新 meta)
+// 4. delete_meta_journal()        —— 提交点
+// 任意时刻崩溃：启动时只要日志存在就按旧 meta + 备份回滚。
+
+/// 写入修改主密码事务日志（保存旧 meta 副本）
+pub fn save_meta_journal(app_dir: &Path, meta: &MetaInfo) -> Result<(), String> {
+    let content = serde_json::to_string(meta).map_err(|e| e.to_string())?;
+    platform::write_meta(app_dir, JOURNAL_KEY, &content)
+}
+
+/// 读取修改主密码事务日志
+///
+/// # Returns
+///
+/// - `Ok(None)`：无未完成的修改
+/// - `Ok(Some(meta)`：回滚依据（旧 meta）
+/// - `Err(_)`：日志读取失败或损坏（此时不应贸然回滚）
+pub fn load_meta_journal(app_dir: &Path) -> Result<Option<MetaInfo>, String> {
+    match platform::read_meta(app_dir, JOURNAL_KEY)? {
+        Some(content) => serde_json::from_str(&content)
+            .map(Some)
+            .map_err(|e| format!("事务日志损坏: {e}")),
+        None => Ok(None),
+    }
+}
+
+/// 删除修改主密码事务日志（提交点；不存在视为成功）
+pub fn delete_meta_journal(app_dir: &Path) -> Result<(), String> {
+    platform::delete_meta(app_dir, JOURNAL_KEY)
 }

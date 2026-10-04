@@ -56,16 +56,42 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 
+/// 显示致命错误弹窗（启动阶段数据安全相关的失败）
+#[cfg(target_os = "windows")]
+fn show_fatal_error(message: &str) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    use windows::core::PCWSTR;
+
+    let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    let caption: Vec<u16> = "MoyuPasswd".encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        MessageBoxW(
+            HWND(std::ptr::null_mut()),
+            PCWSTR(text.as_ptr()),
+            PCWSTR(caption.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+/// 显示致命错误（非 Windows 平台退化为 stderr）
+#[cfg(not(target_os = "windows"))]
+fn show_fatal_error(message: &str) {
+    eprintln!("MoyuPasswd: {message}");
+}
+
 /// 运行 Tauri 应用
 ///
 /// 初始化所有插件、注册命令、设置状态管理。
 ///
 /// # 启动流程
 ///
-/// 1. 检查元数据文件是否存在，判断是否首次运行
-/// 2. 首次运行：使用默认密钥创建数据库
-/// 3. 后续运行：数据库待认证后创建
-/// 4. 注册全局快捷键和系统托盘
+/// 1. 恢复可能中断的主密码修改（有事务日志则回滚）
+/// 2. 检查元数据状态（三态）判断运行模式；读取失败中止启动，绝不当作首次运行
+/// 3. 首次运行：使用默认密钥创建数据库
+/// 4. 后续运行：数据库待认证后创建
+/// 5. 注册全局快捷键和系统托盘
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -107,21 +133,34 @@ pub fn run() {
             let app_dir = app.path().app_data_dir()
                 .expect("无法获取应用数据目录");
 
-            // 根据元数据文件判断是否首次运行
-            let is_first_run = !db_meta::meta_exists(&app_dir);
+            // 先恢复可能中断的主密码修改（幂等：无事务日志时不做任何事）
+            commands::auth::recover_interrupted_change(&app_dir);
 
-            if is_first_run {
-                // ========== 首次运行 ==========
-                // 使用默认密钥创建数据库（后续设置主密码时会 rekey）
-                log::info!("首次运行，使用默认密钥创建数据库");
-                let database = db::Database::new(&app_dir, db::DEFAULT_DB_KEY)
-                    .expect("无法初始化数据库");
-                app.manage(AppState::new(app_dir.clone(), database));
-            } else {
-                // ========== 后续运行 ==========
-                // 数据库待用户输入主密码后创建
-                log::info!("检测到已有配置，等待用户解锁");
-                app.manage(AppState::new_without_db(app_dir.clone()));
+            // 根据元数据状态判断运行模式（三态：读取失败绝不当作首次运行）
+            match db_meta::meta_status(&app_dir) {
+                db_meta::MetaStatus::Present => {
+                    // ========== 后续运行 ==========
+                    // 数据库待用户输入主密码后创建
+                    log::info!("检测到已有配置，等待用户解锁");
+                    app.manage(AppState::new_without_db(app_dir.clone()));
+                }
+                db_meta::MetaStatus::Absent => {
+                    // ========== 首次运行 ==========
+                    // 使用默认密钥创建数据库（后续设置主密码时会 rekey）
+                    log::info!("首次运行，使用默认密钥创建数据库");
+                    let database = db::Database::new(&app_dir, db::DEFAULT_DB_KEY)
+                        .expect("无法初始化数据库");
+                    app.manage(AppState::new(app_dir.clone(), database));
+                }
+                db_meta::MetaStatus::Unavailable(reason) => {
+                    // ========== 元数据不可读 ==========
+                    // 中止启动以保护密码库：不删、不写、绝不进首跑流程
+                    log::error!("元数据不可读，已中止启动以保护密码库: {reason}");
+                    show_fatal_error(&format!(
+                        "无法读取凭据元数据，已中止启动以保护密码库。\n\n原因：{reason}\n\n请检查系统凭据存储后重新启动应用。"
+                    ));
+                    std::process::exit(1);
+                }
             }
 
             // 启动空闲检测后台线程
@@ -129,14 +168,8 @@ pub fn run() {
                 let app_handle = app.handle().clone();
                 idle::start_idle_watcher(move || {
                     let state = app_handle.state::<AppState>();
-                    state.clear_aes_key();
-                    crate::pending::revoke("auto-lock");
-                    crate::hotkey::deactivate();
-                    if let Err(e) = crate::clipboard::clear_now(&app_handle) {
-                        log::warn!("自动锁定时清空剪贴板失败: {e}");
-                    }
-                    let _ = app_handle.emit("app-locked", ());
-                    log::info!("空闲超时，应用已自动锁定");
+                    // 统一锁定入口：作废 pending → 卸钩子 → 清密钥 → 清剪贴板 → 通知窗口
+                    commands::auth::lockdown(&state, &app_handle, "auto-lock");
                 });
             }
 
@@ -167,10 +200,8 @@ pub fn run() {
                         }
                         "lock" => {
                             let state = app.state::<AppState>();
-                            state.clear_aes_key();
-                            crate::pending::revoke("manual-lock");
-                            crate::hotkey::deactivate();
-                            let _ = app.emit("app-locked", ());
+                            // 统一锁定入口（含清剪贴板，与命令锁定/空闲锁定语义一致）
+                            commands::auth::lockdown(&state, app, "manual-lock");
                         }
                         "quit" => {
                             crate::pending::revoke("quit");

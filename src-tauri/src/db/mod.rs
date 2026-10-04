@@ -5,7 +5,8 @@
 //!
 //! # 加密流程
 //!
-//! - **首次运行**：使用默认密钥创建数据库，设置主密码后用 `rekey` 切换为派生密钥
+//! - **首次运行**：使用默认密钥创建数据库，设置主密码后用 `rekey` 切换为派生密钥；
+//!   若目录中已存在无法用默认密钥打开的旧库文件，改名隔离保留，绝不删除
 //! - **后续运行**：使用派生密钥打开数据库（密钥从主密码 + db_salt 派生）
 //!
 //! # 数据库表
@@ -17,7 +18,7 @@
 
 use rusqlite::Connection;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use parking_lot::Mutex;
 
 /// 数据库文件名
@@ -28,6 +29,52 @@ pub const DB_NAME: &str = "moyu_passwd.db";
 /// 首次创建数据库时使用，设置主密码后通过 PRAGMA rekey 切换为派生密钥。
 /// 32 字节，硬编码在代码中（不保密，仅用于初始创建阶段）。
 pub const DEFAULT_DB_KEY: &[u8; 32] = b"moyu-passwd-default-key-00000000";
+
+/// 尝试用指定密钥打开数据库并触发一次实际读取
+///
+/// 密钥错误时 SQLCipher 要到第一次读取才报错，`PRAGMA user_version` 会触发读取。
+/// 用于首跑时判断「已存在的数据库文件」能否用默认密钥复用。
+fn can_open_with_key(db_path: &Path, key: &[u8; 32]) -> bool {
+    let conn = match Connection::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("探测旧数据库打开失败: {e}");
+            return false;
+        }
+    };
+    let key_hex = hex::encode(key);
+    if let Err(e) = conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key_hex)) {
+        log::warn!("探测旧数据库设置密钥失败: {e}");
+        return false;
+    }
+    match conn.query_row("PRAGMA user_version;", [], |row| row.get::<_, i32>(0)) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("探测旧数据库密钥不匹配或文件损坏: {e}");
+            false
+        }
+    }
+}
+
+/// 隔离已存在的旧数据库文件（改名保留，绝不删除用户数据）
+///
+/// 旧数据库可能是明文 SQLite、使用不同密钥加密或已损坏；
+/// 一律改名为 `moyu_passwd.db.invalid-<时间戳>` 保留备查，由用户决定去留。
+fn quarantine_existing_db(app_dir: &Path) -> Result<(), String> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    for suffix in ["", "-wal", "-shm"] {
+        let src = app_dir.join(format!("{}{}", DB_NAME, suffix));
+        if src.exists() {
+            let dst = app_dir.join(format!("{}.invalid-{}{}", DB_NAME, ts, suffix));
+            fs::rename(&src, &dst).map_err(|e| format!("隔离旧数据库失败: {e}"))?;
+            log::warn!("已隔离旧数据库文件: {:?} -> {:?}", src, dst);
+        }
+    }
+    Ok(())
+}
 
 /// 数据库连接管理器
 pub struct Database {
@@ -55,14 +102,11 @@ impl Database {
         // 数据库文件路径
         let db_path = app_dir.join(DB_NAME);
 
-        // 如果是用默认 key 创建（首次运行），删除可能存在的旧数据库
-        // 旧数据库可能是明文 SQLite 或使用不同 key 加密的
-        if key == DEFAULT_DB_KEY && db_path.exists() {
-            log::info!("删除旧数据库文件: {:?}", db_path);
-            fs::remove_file(&db_path).map_err(|e| format!("删除旧数据库失败: {e}"))?;
-            // 同时删除 WAL 和 SHM 文件
-            let _ = fs::remove_file(app_dir.join(format!("{}-wal", DB_NAME)));
-            let _ = fs::remove_file(app_dir.join(format!("{}-shm", DB_NAME)));
+        // 如果是用默认 key 创建（首次运行）且已存在数据库文件：
+        // 能用默认密钥打开就直接复用；打不开（明文旧库/异密钥/损坏）则改名隔离。
+        // 注意：绝不删除用户数据——「读取失败」也绝不能走到这里（见 db_meta 三态）。
+        if key == DEFAULT_DB_KEY && db_path.exists() && !can_open_with_key(&db_path, DEFAULT_DB_KEY) {
+            quarantine_existing_db(app_dir)?;
         }
 
         // 打开数据库连接

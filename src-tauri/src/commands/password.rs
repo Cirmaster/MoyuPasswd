@@ -137,8 +137,9 @@ pub(crate) fn encrypt_password(aes_key: &[u8; 32], password: &str) -> Result<Str
 /// 用新密钥重加密全部密码记录（密码 + 备注）
 ///
 /// 在修改主密码时调用：用旧密钥解密所有记录，再用新密钥重新加密。
-/// 本函数不自行开启事务，由调用方统一在事务中执行，
-/// 以保证“重加密 + 更新 master_password”原子提交。
+/// 本函数不自行开启事务，由调用方统一在事务中执行。
+/// 注意：meta（主密码哈希/盐值）不在该事务内——跨存储无法真原子，
+/// 由调用方的「备份 + 事务日志 + 回滚」协议保证崩溃一致性（见 auth::change_master_password）。
 ///
 /// # Arguments
 ///
@@ -760,9 +761,6 @@ pub async fn copy_password_to_clipboard(
         return Err("应用未解锁".to_string());
     }
 
-    // 获取 AES 密钥（用于解密）
-    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
-
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -795,9 +793,18 @@ pub async fn copy_password_to_clipboard(
 
     log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s", id, clear_time);
 
-    // 创建解密闭包（捕获密文和密钥，实现真正的延迟解密）
+    // 创建解密闭包：不捕获密钥副本，调用时从状态现场取密钥。
+    // 锁定后任何迟到的调用都会失败（fail closed），杜绝锁定后仍可解密注入。
     let encrypted_clone = encrypted.clone();
+    let app_handle = app.clone();
     let decrypt_fn: crate::pending::DecryptFn = std::sync::Arc::new(move |_entry_id: &str| -> Result<String, String> {
+        use tauri::Manager;
+        let state = app_handle.state::<AppState>();
+        if !state.is_unlocked() {
+            log::warn!("[DECRYPT] 应用已锁定，拒绝解密");
+            return Err("应用已锁定，无法解密".to_string());
+        }
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
         log::info!("[DECRYPT] 调用解密闭包，解密密文");
         let plaintext = decrypt_password(&aes_key, &encrypted_clone)?;
         log::info!("[DECRYPT] 解密成功，长度={}", plaintext.len());
