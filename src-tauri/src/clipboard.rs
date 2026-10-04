@@ -75,6 +75,14 @@ pub fn clear_now(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// 作废所有 pending 的清除任务（**不清空**剪贴板）
+///
+/// 用户复制了新内容（如 Ctrl+C）时调用：旧的定时清除任务若照常触发，
+/// 会把用户刚复制的新内容误清掉。自增代数让旧任务醒来后自行放弃。
+pub fn invalidate_scheduled_clear() {
+    CLEAR_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
+
 /// 复制文本到剪贴板（前端调用；排除历史与云端同步）
 ///
 /// `clear_after` 为 Some 时，后端会在指定秒数后自动清空剪贴板（用于敏感内容）。

@@ -46,6 +46,29 @@ fn get_cursor_position() -> Option<(i32, i32)> {
     None
 }
 
+/// 显示窗口但不激活（不抢焦点）
+///
+/// 不能用 show()+set_focus()，否则倒计时小窗会把前台焦点从目标应用抢走，
+/// Ctrl+V 钩子检测到前台是自己就会拒绝拦截。
+#[cfg(windows)]
+fn show_without_activate(window: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNA};
+
+    if let Ok(hwnd) = window.hwnd() {
+        // tauri 依赖的 windows crate 版本与本项目不同，HWND 是两个类型，
+        // 底层都是 *mut c_void，手动桥接
+        let hwnd = windows::Win32::Foundation::HWND(hwnd.0);
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_SHOWNA);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn show_without_activate(window: &tauri::WebviewWindow) {
+    let _ = window.show();
+}
+
 /// 开始跟随光标移动
 ///
 /// 启动一个后台线程，持续更新倒计时窗口位置使其跟随鼠标。
@@ -169,8 +192,8 @@ pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle)
         }));
         // 发送重置事件
         let _ = window.emit("reset-countdown", serde_json::json!({ "seconds": seconds }));
-        let _ = window.show();
-        let _ = window.set_focus();
+        // 显示但不抢焦点
+        show_without_activate(&window);
     } else {
         log::info!("Creating new countdown window");
         // 创建新窗口 - 透明无边框，始终置顶，无阴影
@@ -236,4 +259,36 @@ pub async fn clear_clipboard(app: tauri::AppHandle) -> Result<(), String> {
     crate::clipboard::clear_now(&app)?;
     log::info!("Clipboard cleared");
     Ok(())
+}
+
+/// 统一销毁「粘贴/倒计时」状态（钩子检测到 Ctrl+C / Esc 时调用）
+///
+/// 作废 pending 密码槽、收掉倒计时窗口和光标跟随，并按需处理剪贴板：
+///
+/// * `clear_clipboard = true`（Esc 主动放弃）：立即清空剪贴板，把敏感残留销毁干净
+/// * `clear_clipboard = false`（Ctrl+C，用户正在复制别的东西）：只作废遗留的
+///   定时清除任务，**绝不能清剪贴板**，否则会毁掉用户刚复制的新内容
+pub fn cancel_paste_state(app: &tauri::AppHandle, reason: &str, clear_clipboard: bool) {
+    log::info!("销毁粘贴状态: reason={}, clear_clipboard={}", reason, clear_clipboard);
+
+    // 1. 作废待粘贴密码（无 pending 时是空操作）
+    crate::pending::revoke(reason);
+
+    // 2. 处理剪贴板
+    if clear_clipboard {
+        if let Err(e) = crate::clipboard::clear_now(app) {
+            log::warn!("销毁状态时清空剪贴板失败: {e}");
+        }
+    } else {
+        crate::clipboard::invalidate_scheduled_clear();
+    }
+
+    // 3. 停止光标跟随线程（join 回收，防止窗口关掉后线程变孤儿）
+    stop_follow_cursor_internal();
+
+    // 4. 收掉倒计时窗口（前端监听 cancel-countdown 自行关窗，hide 是兜底）
+    let _ = app.emit("cancel-countdown", ());
+    if let Some(window) = app.get_webview_window("countdown") {
+        let _ = window.hide();
+    }
 }

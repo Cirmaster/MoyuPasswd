@@ -107,6 +107,21 @@ pub(crate) fn decrypt_password(aes_key: &[u8; 32], encrypted: &str) -> Result<St
     String::from_utf8(decrypted).map_err(|e| e.to_string())
 }
 
+/// 根据密码 ID 解密密码（供 inject 模块调用）
+///
+/// # Arguments
+/// * `entry_id` - 密码条目 ID
+///
+/// # Returns
+/// 解密后的明文密码
+///
+/// # Deprecated
+/// 此函数已废弃，请使用 register_with_decrypt 传递解密闭包
+#[deprecated(note = "请使用 register_with_decrypt 传递解密闭包")]
+pub fn decrypt_password_by_id(_entry_id: &str) -> Result<String, String> {
+    Err("已废弃：请使用 register_with_decrypt 传递解密闭包".to_string())
+}
+
 /// 加密密码数据
 pub(crate) fn encrypt_password(aes_key: &[u8; 32], password: &str) -> Result<String, String> {
     let encrypted = crypto::encrypt_aes256gcm(aes_key, password.as_bytes())
@@ -708,10 +723,13 @@ pub async fn toggle_favorite(
     Ok(is_favorite != 0)
 }
 
-/// 解密密码并直接写入系统剪贴板
+/// 解密密码并准备粘贴注入（延迟解密）
 ///
-/// 前端全程不接触明文。Rust 解密后直接写入剪贴板，
-/// 前端负责显示倒计时并在到期后清除剪贴板。
+/// 复制动作**不解密**，只登记待粘贴状态和解密闭包并激活 Ctrl+V 钩子。
+/// 用户在目标窗口按 Ctrl+V 时，钩子拦截并触发注入流程：
+/// 归因（识别目标进程）→ 调用闭包解密 → SendInput 注入 → 立即清零。
+/// 倒计时（TTL）内可多次 Ctrl+V 粘贴，每次都重新解密并立即清零；
+/// 密码不进系统剪贴板。
 ///
 /// # Arguments
 ///
@@ -721,7 +739,7 @@ pub async fn toggle_favorite(
 ///
 /// # Returns
 ///
-/// 剪贴板清除时间（秒）
+/// 待粘贴有效期（秒）
 ///
 /// # 前端调用
 ///
@@ -734,18 +752,21 @@ pub async fn copy_password_to_clipboard(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<u32, String> {
+    log::info!("[CMD] copy_password_to_clipboard 被调用: id={}", id);
+
     // 检查是否已解锁
     if !state.is_unlocked() {
+        log::warn!("[CMD] 应用未解锁");
         return Err("应用未解锁".to_string());
     }
 
-    // 获取 AES 密钥
+    // 获取 AES 密钥（用于解密）
     let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
     let db = state.get_db()?;
     let conn = db.conn();
 
-    // 查询加密的密码
+    // 验证密码条目存在并获取密文
     let encrypted: String = conn
         .query_row(
             "SELECT password_encrypted FROM passwords WHERE id = ?1 AND deleted_at IS NULL",
@@ -753,17 +774,14 @@ pub async fn copy_password_to_clipboard(
             |row| row.get(0),
         )
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => "未找到密码".to_string(),
+            rusqlite::Error::QueryReturnedNoRows => {
+                log::warn!("[CMD] 未找到密码: id={}", id);
+                "未找到密码".to_string()
+            }
             _ => e.to_string(),
         })?;
 
-    // 解密密码
-    let plaintext = decrypt_password(&aes_key, &encrypted)?;
-
-    // 直接写入系统剪贴板（排除剪贴板历史与云端同步）
-    crate::clipboard::write_text_excluded(&app, &plaintext)?;
-
-    // 读取剪贴板清除时间设置
+    // 读取剪贴板清除时间设置（作为 pending TTL）
     let clear_time: u32 = conn
         .query_row(
             "SELECT value FROM settings WHERE key = 'clipboard_clear_time'",
@@ -775,10 +793,24 @@ pub async fn copy_password_to_clipboard(
         )
         .unwrap_or(30);
 
-    // 后端兜底：定时清空剪贴板，不依赖前端倒计时窗口是否存活
-    crate::clipboard::schedule_clear(&app, clear_time);
+    log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s", id, clear_time);
 
-    log::info!("密码已写入剪贴板，将在 {} 秒后清除", clear_time);
+    // 创建解密闭包（捕获密文和密钥，实现真正的延迟解密）
+    let encrypted_clone = encrypted.clone();
+    let decrypt_fn: crate::pending::DecryptFn = std::sync::Arc::new(move |_entry_id: &str| -> Result<String, String> {
+        log::info!("[DECRYPT] 调用解密闭包，解密密文");
+        let plaintext = decrypt_password(&aes_key, &encrypted_clone)?;
+        log::info!("[DECRYPT] 解密成功，长度={}", plaintext.len());
+        Ok(plaintext)
+    });
+
+    // 登记待粘贴密码（带解密闭包）
+    let seq = crate::pending::register_with_decrypt(&id, clear_time, decrypt_fn);
+
+    // 激活 Ctrl+V 钩子（传入句柄，钩子检测到 Ctrl+C / Esc 时销毁粘贴状态）
+    crate::hotkey::activate(app);
+
+    log::info!("[CMD] copy_password_to_clipboard 完成: id={}, seq={}, ttl={}s", id, seq, clear_time);
 
     Ok(clear_time)
 }

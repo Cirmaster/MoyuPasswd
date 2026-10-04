@@ -189,8 +189,8 @@ const openEditDialog = (item: PasswordItem) => {
 }
 
 /**
- * 通过后端复制密码到剪贴板
- * 前端全程不接触明文，Rust 解密后直接写入系统剪贴板
+ * 通过后端登记待粘贴密码（不进系统剪贴板）
+ * 前端全程不接触明文；倒计时内在目标窗口按 Ctrl+V 由后端解密并注入
  * @param id - 密码项 ID
  * @param event - 鼠标事件（用于定位倒计时窗口）
  */
@@ -199,7 +199,7 @@ const copyPasswordViaBackend = async (id: string, event?: MouseEvent) => {
     const x = event?.screenX ?? window.screen.width / 2
     const y = event?.screenY ?? window.screen.height / 2
     const clearTime = await invoke<number>('copy_password_to_clipboard', { id })
-    showToast('success', '密码已复制')
+    showToast('success', '密码就绪，倒计时内按 Ctrl+V 粘贴')
     // 启动倒计时和光标跟随
     await invoke('show_countdown', { seconds: clearTime, x, y })
     await invoke('start_follow_cursor')

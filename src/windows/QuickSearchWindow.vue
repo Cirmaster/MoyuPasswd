@@ -250,13 +250,14 @@ const copyAndClose = async (text: string) => {
 }
 
 /**
- * 按需解密并复制密码后关闭窗口（前端不接触明文）
+ * 登记待粘贴密码后关闭窗口（前端不接触明文，密码不进系统剪贴板）
+ * 倒计时内在目标窗口按 Ctrl+V，由后端解密并注入
  * @param id - 密码 ID
  */
 const copyPasswordByIdAndClose = async (id: string) => {
   try {
     const clearTime = await invoke<number>('copy_password_to_clipboard', { id })
-    toast.value = { show: true, type: 'success', message: '密码已复制到剪贴板' }
+    toast.value = { show: true, type: 'success', message: '密码就绪，倒计时内按 Ctrl+V 粘贴' }
 
     // 启动全局倒计时窗口
     const x = window.screen.width / 2

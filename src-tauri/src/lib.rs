@@ -23,6 +23,18 @@ pub mod crypto;
 /// 剪贴板模块
 pub mod clipboard;
 
+/// 密码粘贴待处理槽
+pub mod pending;
+
+/// 全局热键与键盘钩子模块
+pub mod hotkey;
+
+/// 密码注入模块
+pub mod inject;
+
+/// 审计模块
+pub mod audit;
+
 /// 文件 ACL 加固模块
 pub mod acl;
 
@@ -85,6 +97,12 @@ pub fn run() {
             // 初始化空闲检测模块
             idle::init();
 
+            // 初始化审计模块
+            {
+                let app_dir = app.path().app_data_dir().expect("无法获取应用数据目录");
+                audit::init(&app_dir);
+            }
+
             // 获取应用数据目录
             let app_dir = app.path().app_data_dir()
                 .expect("无法获取应用数据目录");
@@ -112,6 +130,8 @@ pub fn run() {
                 idle::start_idle_watcher(move || {
                     let state = app_handle.state::<AppState>();
                     state.clear_aes_key();
+                    crate::pending::revoke("auto-lock");
+                    crate::hotkey::deactivate();
                     if let Err(e) = crate::clipboard::clear_now(&app_handle) {
                         log::warn!("自动锁定时清空剪贴板失败: {e}");
                     }
@@ -148,9 +168,13 @@ pub fn run() {
                         "lock" => {
                             let state = app.state::<AppState>();
                             state.clear_aes_key();
+                            crate::pending::revoke("manual-lock");
+                            crate::hotkey::deactivate();
                             let _ = app.emit("app-locked", ());
                         }
                         "quit" => {
+                            crate::pending::revoke("quit");
+                            crate::hotkey::deactivate();
                             if let Err(e) = crate::clipboard::clear_now(app) {
                                 log::warn!("退出时清空剪贴板失败: {e}");
                             }
