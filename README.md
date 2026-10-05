@@ -77,7 +77,7 @@ flowchart TD
 | Tailwind CSS | 4.3  | 原子化 CSS             |
 | Pinia        | 4.0  | 状态管理               |
 | Vue Router   | 5.2  | 路由管理               |
-| Lucide Vue   | —    | 图标库                 |
+| vite-svg-loader | 5.1 | SVG 图标转组件（图标自管于 `src/assets/svg/`，可直接预览） |
 
 ### 后端
 
@@ -171,8 +171,11 @@ pnpm release
 moyu-passwd/
 ├── src/                              # 前端源码
 │   ├── assets/                       # 静态资源、样式
+│   │   └── svg/                      # SVG 图标文件（可直接预览，经 vite-svg-loader 转组件）
 │   ├── components/                   # Vue 组件
 │   │   ├── ui/                       # Shadcn Vue 基础组件
+│   │   ├── icons/                    # 图标统一导入入口（index.ts，复用 @/assets/svg）
+│   │   ├── CustomFieldsEditor.vue    # 自定义字段编辑器
 │   │   ├── PasswordFormDialog.vue    # 密码表单弹窗
 │   │   ├── PasswordGenerator.vue     # 密码生成器
 │   │   ├── PasswordStrength.vue      # 密码强度指示器
@@ -184,6 +187,9 @@ moyu-passwd/
 │   ├── composables/                  # 组合式函数
 │   │   ├── useTheme.ts               # 主题管理
 │   │   └── useAutoLock.ts            # 用户活动上报（锁定由后端负责）
+│   ├── lib/                          # 通用工具
+│   │   ├── utils.ts                  # 通用工具函数
+│   │   └── windowSetup.ts            # 窗口通用环境设置（禁用右键菜单等）
 │   ├── stores/                       # Pinia 状态管理
 │   │   ├── password.ts               # 密码数据状态
 │   │   └── shortcuts.ts              # 快捷键配置状态
@@ -230,6 +236,21 @@ moyu-passwd/
 ├── package.json                      # 前端依赖配置
 └── README.md                         # 项目说明
 ```
+
+### 图标规范
+
+- 界面图标统一使用 `src/assets/svg/` 下的 **SVG 文件**（24×24 描边风格，IDE 可直接预览），由 vite-svg-loader 在构建时转为 Vue 组件
+- 一律从 `@/components/icons` 导入复用，**不要在组件里内联 SVG，不要用 emoji 当图标**：
+
+  ```ts
+  import { IconSearch, IconLock } from '@/components/icons'
+  ```
+
+  ```vue
+  <IconSearch class="h-4 w-4" />
+  ```
+
+- 新增图标：svg 文件放入 `src/assets/svg/`，在 `src/components/icons/index.ts` 追加一行导出即可
 
 ---
 
@@ -283,7 +304,7 @@ moyu-passwd/
 5. **文件权限**: 数据库/审计日志文件 ACL 限制访问
 6. **空闲检测**: 系统空闲超时自动锁定
 7. **爆破防护**: 连续失败渐进锁定（30s→15min），失败计数持久化
-8. **注入防护**: 目标进程归因 + 黑名单，归因失败拒绝注入
+8. **注入防护**: 目标进程归因 + 终端黑名单（命中需二次确认放行，可设置永久放行），归因失败拒绝注入
 9. **崩溃安全**: 修改主密码失败/断电自动回滚，不产生半新半旧的数据
 
 ---
@@ -315,7 +336,7 @@ moyu-passwd/
 | [vue-frontend.md](./docs/errors/vue-frontend.md) | Vue、Tailwind CSS、Shadcn Vue 相关问题 |
 
 ---
-5230
+
 ## 🤝 贡献
 
 欢迎提交 Issue 和 Pull Request！

@@ -43,6 +43,22 @@ import { formatTimestamp } from '@/lib/utils'
 import PasswordFormDialog from '@/components/PasswordFormDialog.vue'
 import PasswordGenerator from '@/components/PasswordGenerator.vue'
 import PasswordStrength from '@/components/PasswordStrength.vue'
+import {
+  IconLock,
+  IconGrid,
+  IconSettings,
+  IconSun,
+  IconMoon,
+  IconMinus,
+  IconSquarePen,
+  IconSearch,
+  IconPlus,
+  IconStar,
+  IconCopy,
+  IconPencil,
+  IconTrash,
+  IconEmpty,
+} from '@/components/icons'
 import QuickSearch from '@/components/QuickSearch.vue'
 import QuickAdd from '@/components/QuickAdd.vue'
 import Toast from '@/components/Toast.vue'
@@ -255,99 +271,27 @@ const handleLock = async () => {
     <!-- 顶部导航栏 -->
     <header class="border-b px-4 py-3 flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-6 w-6 text-primary"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-        >
-          <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-        </svg>
+        <IconLock class="h-6 w-6 text-primary" stroke-linecap="round" stroke-linejoin="round" />
         <h1 class="text-lg font-semibold">MoyuPasswd</h1>
       </div>
 
       <div class="flex items-center gap-2">
         <Button variant="ghost" size="icon" @click="showGenerator = true">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-5 w-5"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <rect width="18" height="18" x="3" y="3" rx="2" />
-            <path d="M7 7h.01M7 12h.01M7 17h.01M12 7h.01M12 12h.01M12 17h.01M17 7h.01M17 12h.01M17 17h.01" />
-          </svg>
+          <IconGrid class="h-5 w-5" />
         </Button>
         <Button variant="ghost" size="icon" @click="router.push('/settings')">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-5 w-5"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-            <circle cx="12" cy="12" r="3" />
-          </svg>
+          <IconSettings class="h-5 w-5" />
         </Button>
         <Button variant="ghost" size="icon" @click="toggleTheme">
-          <svg
-            v-if="isDark"
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-5 w-5"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <circle cx="12" cy="12" r="4" />
-            <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-          </svg>
-          <svg
-            v-else
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-5 w-5"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-          </svg>
+          <IconSun v-if="isDark" class="h-5 w-5" />
+          <IconMoon v-else class="h-5 w-5" />
         </Button>
         <!-- 最小化到托盘按钮 -->
         <Button variant="ghost" size="icon" @click="handleMinimizeToTray" title="最小化到托盘">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-5 w-5"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M5 12h14" />
-          </svg>
+          <IconMinus class="h-5 w-5" />
         </Button>
         <Button variant="ghost" size="icon" @click="handleLock">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-5 w-5"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
+          <IconLock class="h-5 w-5" />
         </Button>
       </div>
     </header>
@@ -372,17 +316,7 @@ const handleLock = async () => {
             class="px-3 py-2 rounded-md cursor-pointer text-sm text-muted-foreground hover:bg-muted transition-colors flex items-center gap-2"
             @click="router.push('/categories')"
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="h-4 w-4"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-              <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" />
-            </svg>
+            <IconSquarePen class="h-4 w-4" />
             管理分类
           </div>
         </div>
@@ -393,17 +327,7 @@ const handleLock = async () => {
         <!-- 搜索和操作栏 -->
         <div class="p-4 border-b flex items-center gap-4">
           <div class="relative flex-1">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <circle cx="11" cy="11" r="8" />
-              <path d="m21 21-4.3-4.3" />
-            </svg>
+            <IconSearch class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
               v-model="searchQuery"
               placeholder="搜索密码..."
@@ -411,16 +335,7 @@ const handleLock = async () => {
             />
           </div>
           <Button @click="openAddDialog">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="h-4 w-4 mr-2"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-            >
-              <path d="M5 12h14M12 5v14" />
-            </svg>
+            <IconPlus class="h-4 w-4 mr-2" />
             添加密码
           </Button>
         </div>
@@ -462,16 +377,7 @@ const handleLock = async () => {
                       class="shrink-0 text-muted-foreground hover:text-yellow-500 transition-colors"
                       @click="toggleFavorite(item.id)"
                     >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        :fill="item.is_favorite ? 'currentColor' : 'none'"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        stroke-width="2"
-                      >
-                        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                      </svg>
+                      <IconStar class="h-4 w-4" :fill="item.is_favorite ? 'currentColor' : 'none'" />
                     </button>
                     <span class="truncate" :title="item.title">{{ item.title }}</span>
                   </div>
@@ -483,17 +389,7 @@ const handleLock = async () => {
                       class="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                       @click="(e) => copyToClipboard(item.username, e)"
                     >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                      >
-                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
-                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
-                      </svg>
+                      <IconCopy class="h-4 w-4" />
                     </button>
                   </div>
                 </TableCell>
@@ -510,17 +406,7 @@ const handleLock = async () => {
                       class="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                       @click="(e) => copyPasswordViaBackend(item.id, e)"
                     >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                      >
-                        <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
-                        <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
-                      </svg>
+                      <IconCopy class="h-4 w-4" />
                     </button>
                   </div>
                 </TableCell>
@@ -543,17 +429,7 @@ const handleLock = async () => {
                 <TableCell class="sticky right-0 bg-background group-hover:bg-muted/50">
                   <div class="flex items-center justify-center gap-1">
                     <Button variant="ghost" size="icon" @click="openEditDialog(item)">
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                      >
-                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                        <path d="m15 5 4 4" />
-                      </svg>
+                      <IconPencil class="h-4 w-4" />
                     </Button>
                     <Button
                       variant="ghost"
@@ -561,16 +437,7 @@ const handleLock = async () => {
                       class="text-destructive hover:text-destructive"
                       @click="deletePassword(item.id)"
                     >
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                      >
-                        <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                      </svg>
+                      <IconTrash class="h-4 w-4" />
                     </Button>
                   </div>
                 </TableCell>
@@ -583,17 +450,7 @@ const handleLock = async () => {
             v-if="filteredPasswords.length === 0"
             class="flex flex-col items-center justify-center py-12 text-muted-foreground"
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              class="h-12 w-12 mb-4"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.5"
-            >
-              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              <path d="M21 12H3M12 3v9" />
-            </svg>
+            <IconEmpty class="h-12 w-12 mb-4" stroke-width="1.5" />
             <p class="text-lg font-medium">暂无密码</p>
             <p class="text-sm">点击"添加密码"按钮开始使用</p>
           </div>

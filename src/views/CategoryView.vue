@@ -22,6 +22,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { IconArrowLeft, IconPlus, IconPencil, IconTrash } from '@/components/icons'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
   Dialog,
@@ -174,16 +175,7 @@ const handleDelete = async (id: string) => {
     <!-- 顶部导航 -->
     <header class="border-b px-4 py-3 flex items-center gap-4">
       <Button variant="ghost" size="icon" @click="router.push('/home')">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-5 w-5"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <path d="m12 19-7-7 7-7M19 12H5" />
-        </svg>
+        <IconArrowLeft class="h-5 w-5" />
       </Button>
       <h1 class="text-lg font-semibold">分类管理</h1>
     </header>
@@ -193,16 +185,7 @@ const handleDelete = async (id: string) => {
       <div class="flex justify-between items-center mb-6">
         <p class="text-muted-foreground">管理您的密码分类</p>
         <Button @click="openAdd">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-4 w-4 mr-2"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M5 12h14M12 5v14" />
-          </svg>
+          <IconPlus class="h-4 w-4 mr-2" />
           添加分类
         </Button>
       </div>
@@ -228,17 +211,7 @@ const handleDelete = async (id: string) => {
                 size="icon"
                 @click="openEdit(category)"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-4 w-4"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                  <path d="m15 5 4 4" />
-                </svg>
+                <IconPencil class="h-4 w-4" />
               </Button>
               <Button
                 variant="ghost"
@@ -246,16 +219,7 @@ const handleDelete = async (id: string) => {
                 class="text-destructive hover:text-destructive"
                 @click="handleDelete(category.id)"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  class="h-4 w-4"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-                </svg>
+                <IconTrash class="h-4 w-4" />
               </Button>
             </div>
           </CardContent>

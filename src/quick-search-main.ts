@@ -6,6 +6,10 @@
 
 // 导入全局样式
 import './assets/main.css'
+import { disableContextMenu } from './lib/windowSetup'
+
+// 禁用浏览器默认右键菜单
+disableContextMenu()
 
 // Vue 核心
 import { createApp } from 'vue'

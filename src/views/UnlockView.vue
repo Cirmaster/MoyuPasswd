@@ -18,6 +18,7 @@ import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { IconSun, IconMoon, IconLock, IconSpinner, IconLoader } from '@/components/icons'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { useTheme } from '@/composables/useTheme'
@@ -272,34 +273,9 @@ const handleSetup = async () => {
       @click="toggleTheme"
     >
       <!-- 太阳图标：当处于暗色模式时显示，点击切换到亮色 -->
-      <svg
-        v-if="isDark"
-        xmlns="http://www.w3.org/2000/svg"
-        class="h-5 w-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <circle cx="12" cy="12" r="4" />
-        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-      </svg>
+      <IconSun v-if="isDark" class="h-5 w-5" stroke-linecap="round" stroke-linejoin="round" />
       <!-- 月亮图标：当处于亮色模式时显示，点击切换到暗色 -->
-      <svg
-        v-else
-        xmlns="http://www.w3.org/2000/svg"
-        class="h-5 w-5"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-      >
-        <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-      </svg>
+      <IconMoon v-else class="h-5 w-5" stroke-linecap="round" stroke-linejoin="round" />
     </Button>
 
     <!-- 主卡片容器 -->
@@ -308,19 +284,7 @@ const handleSetup = async () => {
       <CardHeader class="text-center">
         <!-- 锁图标容器 -->
         <div class="mx-auto mb-4 w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-8 w-8 text-primary"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
+          <IconLock class="h-8 w-8 text-primary" stroke-linecap="round" stroke-linejoin="round" />
         </div>
         <CardTitle class="text-2xl">MoyuPasswd</CardTitle>
         <CardDescription>
@@ -335,15 +299,7 @@ const handleSetup = async () => {
       <CardContent v-if="attemptingSystemAuth" class="text-center py-8">
         <div class="flex flex-col items-center gap-4">
           <!-- 加载动画 -->
-          <svg
-            class="h-12 w-12 animate-spin text-primary"
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-          >
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-          </svg>
+          <IconSpinner class="h-12 w-12 animate-spin text-primary" />
           <p class="text-sm text-muted-foreground">请在弹出的窗口中选择解锁方式</p>
           <Button variant="outline" size="sm" @click="showPasswordInput = true; attemptingSystemAuth = false">
             使用主密码解锁
@@ -410,17 +366,7 @@ const handleSetup = async () => {
           @click="isSetupMode ? handleSetup() : handleUnlock()"
         >
           <!-- 加载动画：仅在 loading 时显示 -->
-          <svg
-            v-if="loading"
-            class="mr-2 h-4 w-4 animate-spin"
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
+          <IconLoader v-if="loading" class="mr-2 h-4 w-4 animate-spin" />
           <!-- 按钮文字：根据模式、加载状态和锁定状态切换 -->
           <template v-if="lockoutRemaining > 0">
             请等待 {{ lockoutRemaining }} 秒

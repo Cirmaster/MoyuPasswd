@@ -36,6 +36,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import Toast from './Toast.vue'
+import { IconLoader, IconCopy } from '@/components/icons'
 
 /**
  * 组件 Props
@@ -288,31 +289,12 @@ watch(
       <DialogFooter class="flex gap-2">
         <!-- 重新生成按钮 -->
         <Button variant="outline" @click="generate">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-4 w-4 mr-2"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-          </svg>
+          <IconLoader class="h-4 w-4 mr-2" />
           重新生成
         </Button>
         <!-- 复制按钮 -->
         <Button variant="outline" @click="copyToClipboard">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-4 w-4 mr-2"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
-            <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
-          </svg>
+          <IconCopy class="h-4 w-4 mr-2" />
           复制
         </Button>
         <!-- 使用密码按钮 -->

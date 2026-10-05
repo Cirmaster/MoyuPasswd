@@ -7,6 +7,7 @@
 
 <script setup lang="ts">
 import { ref, watch, onUnmounted } from 'vue'
+import { IconClock } from '@/components/icons'
 
 /**
  * 组件 Props
@@ -110,17 +111,7 @@ onUnmounted(() => {
       >
         <!-- 动画图标 -->
         <div class="relative">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            class="h-5 w-5 text-blue-500"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <circle cx="12" cy="12" r="10" />
-            <polyline points="12 6 12 12 16 14" />
-          </svg>
+          <IconClock class="h-5 w-5 text-blue-500" />
           <div class="absolute inset-0 rounded-full bg-blue-500/20 animate-ping" />
         </div>
 

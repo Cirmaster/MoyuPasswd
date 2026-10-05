@@ -29,6 +29,7 @@ import {
   DialogContent,
 } from '@/components/ui/dialog'
 import { usePasswordStore, type CustomField } from '@/stores/password'
+import { IconSearch, IconLock } from '@/components/icons'
 import Toast from './Toast.vue'
 
 /**
@@ -261,17 +262,7 @@ onMounted(() => {
       <!-- 搜索输入框区域 -->
       <div class="flex items-center border-b px-4">
         <!-- 搜索图标 -->
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-5 w-5 text-muted-foreground shrink-0"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <circle cx="11" cy="11" r="8" />
-          <path d="m21 21-4.3-4.3" />
-        </svg>
+        <IconSearch class="h-5 w-5 text-muted-foreground shrink-0" />
         <!-- 搜索输入框 -->
         <Input
           v-model="searchQuery"
@@ -289,52 +280,54 @@ onMounted(() => {
           未找到匹配的密码
         </div>
         <!-- 结果列表 -->
-        <div v-for="(item, index) in results" :key="item.id" class="rounded-md overflow-hidden">
-          <!-- 结果行 -->
+        <div v-for="(item, index) in results" :key="item.id" class="mb-1">
+          <!-- 结果行（选中高亮 = action 色，与复制密码按钮严格同色；暗色主题为深板岩蓝而非近白） -->
           <div
-            class="flex items-center justify-between p-3 cursor-pointer transition-colors"
+            class="flex items-stretch cursor-pointer transition-colors"
             :class="{
-              'bg-muted': index === selectedIndex,        // 选中状态
-              'hover:bg-muted/50': index !== selectedIndex, // 悬停状态
+              'bg-action text-action-foreground': index === selectedIndex,
+              'hover:bg-action/10': index !== selectedIndex,
             }"
             @click="copyPasswordById(item.id)"
             @mouseenter="selectedIndex = index"
           >
             <!-- 左侧：密码信息 -->
-            <div class="flex-1 min-w-0">
+            <div class="flex-1 min-w-0 flex flex-col justify-center p-3">
               <div class="font-medium truncate">{{ item.title }}</div>
-              <div class="text-sm text-muted-foreground truncate">{{ item.username }}</div>
+              <div class="text-sm truncate" :class="index === selectedIndex ? 'text-action-foreground/70' : 'text-muted-foreground'">
+                {{ item.username }}
+              </div>
             </div>
-            <!-- 右侧：操作按钮 -->
-            <div class="flex items-center gap-2 ml-4">
-              <!-- 详情按钮：展开/收起字段面板 -->
-              <Button
+            <!-- 右侧操作：三档强调梯度（安静→中→主操作），选中行自动切换为反相芯片 -->
+            <div class="flex items-stretch shrink-0">
+              <!-- 详情（安静档）：展开/收起字段面板 -->
+              <button
                 v-if="item.extra_fields && item.extra_fields.length > 0"
-                variant="ghost"
-                size="sm"
-                class="h-8 px-2 text-xs"
+                class="w-[56px] flex items-center justify-center text-xs font-medium transition-colors"
+                :class="index === selectedIndex
+                  ? 'bg-action-foreground/10 text-action-foreground/90 hover:bg-action-foreground/25'
+                  : 'bg-muted text-muted-foreground hover:bg-muted/70'"
                 @click.stop="toggleDetail(item)"
               >
                 {{ expandedId === item.id ? '收起' : '详情' }}
-              </Button>
-              <!-- 复制用户名按钮 -->
-              <Button
-                variant="ghost"
-                size="sm"
-                class="h-8 px-2 text-xs"
+              </button>
+              <!-- 复制用户（中等档） -->
+              <button
+                class="w-[76px] flex items-center justify-center text-xs font-medium transition-colors"
+                :class="index === selectedIndex
+                  ? 'bg-action-foreground/20 text-action-foreground hover:bg-action-foreground/35'
+                  : 'bg-primary/10 text-primary hover:bg-primary/25'"
                 @click.stop="copyToClipboard(item.username)"
               >
                 复制用户
-              </Button>
-              <!-- 复制密码按钮 -->
-              <Button
-                variant="ghost"
-                size="sm"
-                class="h-8 px-2 text-xs"
+              </button>
+              <!-- 复制密码（主操作档）：底色与行高亮严格同色（bg-action），hover 用提亮表达高亮态（不动行高亮色） -->
+              <button
+                class="w-[76px] flex items-center justify-center text-xs font-medium transition bg-action text-action-foreground hover:brightness-125 active:brightness-110"
                 @click.stop="copyPasswordById(item.id)"
               >
                 复制密码
-              </Button>
+              </button>
             </div>
           </div>
 
@@ -355,7 +348,11 @@ onMounted(() => {
                 <span class="flex-1 min-w-0 truncate font-mono" :title="field.value">
                   {{ field.value || (field.sensitive ? '••••••' : '') }}
                 </span>
-                <span v-if="field.sensitive" class="shrink-0" title="敏感字段，加密存储">🔒</span>
+                <IconLock
+                  v-if="field.sensitive"
+                  class="shrink-0 size-3.5"
+                  title="敏感字段，加密存储"
+                />
                 <Button
                   v-if="field.value"
                   variant="ghost"

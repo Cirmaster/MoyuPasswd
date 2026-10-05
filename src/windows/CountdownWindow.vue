@@ -9,6 +9,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { disableContextMenu } from '@/lib/windowSetup'
 
 /** 剩余秒数 */
 const remaining = ref(10)
@@ -170,6 +171,9 @@ const handleClick = async () => {
  * 初始化
  */
 onMounted(async () => {
+  // 禁用浏览器默认右键菜单（入口已拦一道；组件内再拦，保证热替换后也生效）
+  disableContextMenu()
+
   try {
     // 动态导入 Tauri API
     const { invoke } = await import('@tauri-apps/api/core')

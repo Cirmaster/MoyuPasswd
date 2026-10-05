@@ -16,6 +16,7 @@ import type { Directive } from 'vue'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { IconClose } from '@/components/icons'
 import type { CustomField } from '@/stores/password'
 
 /**
@@ -157,7 +158,7 @@ const insertDbTemplate = () => {
         title="删除字段"
         @click="removeField(index)"
       >
-        ✕
+        <IconClose class="size-3.5" />
       </Button>
     </div>
   </div>

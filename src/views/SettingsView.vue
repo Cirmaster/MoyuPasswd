@@ -20,6 +20,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { IconArrowLeft, IconLoader, IconPencil } from '@/components/icons'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -711,16 +712,7 @@ const handleImport = async () => {
     <!-- 顶部导航 -->
     <header class="border-b px-4 py-3 flex items-center gap-4">
       <Button variant="ghost" size="icon" @click="router.push('/home')">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          class="h-5 w-5"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <path d="m12 19-7-7 7-7M19 12H5" />
-        </svg>
+        <IconArrowLeft class="h-5 w-5" />
       </Button>
       <h1 class="text-lg font-semibold">设置</h1>
     </header>
@@ -947,17 +939,7 @@ const handleImport = async () => {
               </div>
 
               <Button @click="handleChangePassword" :disabled="changingPassword">
-                <svg
-                  v-if="changingPassword"
-                  class="mr-2 h-4 w-4 animate-spin"
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                </svg>
+                <IconLoader v-if="changingPassword" class="mr-2 h-4 w-4 animate-spin" />
                 {{ changingPassword ? '修改中...' : '修改密码' }}
               </Button>
             </CardContent>
@@ -989,9 +971,7 @@ const handleImport = async () => {
                         <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
                         <span v-if="i < formatShortcut(shortcuts.quickSearch).split(' + ').length - 1" class="text-muted-foreground">+</span>
                       </template>
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 ml-1 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                      </svg>
+                      <IconPencil class="h-3 w-3 ml-1 text-muted-foreground" />
                     </div>
                   </div>
                   
@@ -1054,9 +1034,7 @@ const handleImport = async () => {
                         <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
                         <span v-if="i < formatShortcut(shortcuts.quickAdd).split(' + ').length - 1" class="text-muted-foreground">+</span>
                       </template>
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 ml-1 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                      </svg>
+                      <IconPencil class="h-3 w-3 ml-1 text-muted-foreground" />
                     </div>
                   </div>
                   
@@ -1119,9 +1097,7 @@ const handleImport = async () => {
                         <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
                         <span v-if="i < formatShortcut(shortcuts.passwordGenerator).split(' + ').length - 1" class="text-muted-foreground">+</span>
                       </template>
-                      <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 ml-1 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
-                      </svg>
+                      <IconPencil class="h-3 w-3 ml-1 text-muted-foreground" />
                     </div>
                   </div>
                   

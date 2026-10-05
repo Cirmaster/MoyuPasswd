@@ -7,6 +7,8 @@
 
 @theme inline {
   --font-heading: var(--font-sans);
+  --color-action: var(--action);
+  --color-action-foreground: var(--action-foreground);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -46,6 +48,10 @@
 
 :root {
   --radius: 0.625rem;
+  /* 动作/高亮色：快捷搜索「复制密码」按钮与行高亮共用。
+     亮色=主色藏青；暗色不能用 primary（暗色主题下 primary 是近白），用深板岩蓝。 */
+  --action: var(--primary);
+  --action-foreground: var(--primary-foreground);
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -80,6 +86,9 @@
 }
 
 .dark {
+  /* 暗色动作/高亮色：深板岩蓝——在深底上清晰可辨，但绝不刺眼 */
+  --action: oklch(0.32 0.03 286);
+  --action-foreground: oklch(0.97 0 0);
   --background: oklch(0.141 0.005 285.823);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.21 0.006 285.885);
@@ -119,6 +128,13 @@
   }
   body {
     @apply bg-background text-foreground;
+  }
+
+  /* 关闭弹性滚动：触摸板过冲时不再回弹（WebView2 的回弹渲染在文档层，
+   * 在 html/body 上禁用即可全局生效，列表滚动行为不受影响） */
+  html,
+  body {
+    overscroll-behavior: none;
   }
 
   /* ==================== 滚动条美化 ====================

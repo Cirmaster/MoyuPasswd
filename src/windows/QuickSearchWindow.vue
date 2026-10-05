@@ -25,6 +25,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useTheme } from '@/composables/useTheme'
 import type { CustomField } from '@/stores/password'
+import { disableContextMenu } from '@/lib/windowSetup'
+import { IconLock, IconSearch, IconSpinner } from '@/components/icons'
 import Toast from '@/components/Toast.vue'
 
 /** 主题管理 */
@@ -418,6 +420,8 @@ watch(searchQuery, (newQuery) => {
 onMounted(async () => {
   // 初始化主题
   initTheme()
+  // 禁用浏览器默认右键菜单（入口已拦一道；组件内再拦，保证热替换后也生效）
+  disableContextMenu()
 
   // 加载设置
   await loadSettings()
@@ -493,10 +497,7 @@ onMounted(async () => {
         <!-- 系统认证进行中 -->
         <div v-if="attemptingSystemAuth" class="p-6 text-center">
           <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 mb-4">
-            <svg class="h-7 w-7 animate-spin text-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-            </svg>
+            <IconSpinner class="h-7 w-7 animate-spin text-primary" />
           </div>
           <h2 class="text-lg font-semibold mb-1">正在认证</h2>
           <p class="text-sm text-muted-foreground mb-4">请在弹出的窗口中选择解锁方式</p>
@@ -508,10 +509,7 @@ onMounted(async () => {
         <!-- 系统认证已启用：只显示认证按钮 -->
         <div v-else-if="systemAuthReady && !showPasswordInput" class="p-6 text-center">
           <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 mb-4">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
+            <IconLock class="h-7 w-7 text-primary" />
           </div>
           <h2 class="text-lg font-semibold mb-1">密码库已锁定</h2>
           <p class="text-sm text-muted-foreground mb-5">点击下方按钮解锁</p>
@@ -528,10 +526,7 @@ onMounted(async () => {
         <!-- 主密码输入（系统认证未启用或用户选择主密码） -->
         <div v-else class="p-6 text-center">
           <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 mb-4">
-            <svg xmlns="http://www.w3.org/2000/svg" class="h-7 w-7 text-primary" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
+            <IconLock class="h-7 w-7 text-primary" />
           </div>
           <h2 class="text-lg font-semibold mb-1">密码库已锁定</h2>
           <p class="text-sm text-muted-foreground mb-5">输入主密码解锁</p>
@@ -565,10 +560,7 @@ onMounted(async () => {
     <div v-else class="flex-1 min-h-0 flex flex-col bg-card backdrop-blur-sm border shadow-lg">
       <!-- 搜索框 -->
       <div class="flex items-center gap-3 px-4 h-12 border-b">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <circle cx="11" cy="11" r="8" />
-          <path d="m21 21-4.3-4.3" />
-        </svg>
+        <IconSearch class="h-4 w-4 text-muted-foreground" />
         <input
           v-model="searchQuery"
           type="text"
@@ -596,48 +588,55 @@ onMounted(async () => {
             v-for="(item, index) in results"
             :key="item.id"
             :data-index="index"
-            class="border-b last:border-b-0"
+            class="mb-1"
           >
-            <!-- 结果行 -->
+            <!-- 结果行（选中高亮 = action 色，与复制密码按钮严格同色；暗色主题为深板岩蓝而非近白） -->
             <div
-              class="flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors"
+              class="flex items-stretch cursor-pointer transition-colors"
               :class="{
-                'bg-primary text-primary-foreground': index === selectedIndex,
-                'hover:bg-muted': index !== selectedIndex,
+                'bg-action text-action-foreground': index === selectedIndex,
+                'hover:bg-action/10': index !== selectedIndex,
               }"
               @click="copyPasswordByIdAndClose(item.id)"
               @mouseenter="selectedIndex = index"
             >
-              <div class="flex-1 min-w-0">
+              <!-- 左侧：标题/用户名 -->
+              <div class="flex-1 min-w-0 flex flex-col justify-center px-4 py-2.5">
                 <div class="text-sm font-medium truncate">{{ item.title }}</div>
-                <div class="text-xs truncate mt-0.5" :class="index === selectedIndex ? 'text-primary-foreground/70' : 'text-muted-foreground'">
+                <div class="text-xs truncate mt-0.5" :class="index === selectedIndex ? 'text-action-foreground/70' : 'text-muted-foreground'">
                   {{ item.username }}
                 </div>
               </div>
-              <div class="flex gap-1">
-                <!-- 详情按钮：展开/收起字段面板 -->
-                <span
+              <!-- 右侧操作：三档强调梯度（安静→中→主操作），选中行自动切换为反相芯片 -->
+              <div class="flex items-stretch shrink-0">
+                <!-- 详情（安静档）：展开/收起字段面板 -->
+                <button
                   v-if="item.extra_fields && item.extra_fields.length > 0"
-                  class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
-                  :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                  class="w-[56px] flex items-center justify-center text-xs font-medium transition-colors"
+                  :class="index === selectedIndex
+                    ? 'bg-action-foreground/10 text-action-foreground/90 hover:bg-action-foreground/25'
+                    : 'bg-muted text-muted-foreground hover:bg-muted/70'"
                   @click.stop="toggleDetail(item)"
                 >
                   {{ expandedId === item.id ? '收起' : '详情' }}
-                </span>
-                <span
-                  class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
-                  :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                </button>
+                <!-- 复制用户（中等档） -->
+                <button
+                  class="w-[76px] flex items-center justify-center text-xs font-medium transition-colors"
+                  :class="index === selectedIndex
+                    ? 'bg-action-foreground/20 text-action-foreground hover:bg-action-foreground/35'
+                    : 'bg-primary/10 text-primary hover:bg-primary/25'"
                   @click.stop="copyAndClose(item.username)"
                 >
                   复制用户
-                </span>
-                <span
-                  class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
-                  :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                </button>
+                <!-- 复制密码（主操作档）：底色与行高亮严格同色（bg-action），hover 用提亮表达高亮态（不动行高亮色） -->
+                <button
+                  class="w-[76px] flex items-center justify-center text-xs font-medium transition bg-action text-action-foreground hover:brightness-125 active:brightness-110"
                   @click.stop="copyPasswordByIdAndClose(item.id)"
                 >
                   复制密码
-                </span>
+                </button>
               </div>
             </div>
 
@@ -658,7 +657,11 @@ onMounted(async () => {
                   <span class="flex-1 min-w-0 truncate font-mono" :title="field.value">
                     {{ field.value || (field.sensitive ? '••••••' : '') }}
                   </span>
-                  <span v-if="field.sensitive" class="shrink-0" title="敏感字段，加密存储">🔒</span>
+                  <IconLock
+                    v-if="field.sensitive"
+                    class="shrink-0 size-3.5"
+                    title="敏感字段，加密存储"
+                  />
                   <span
                     v-if="field.value"
                     class="shrink-0 px-1.5 py-0.5 rounded cursor-pointer transition-colors hover:bg-muted text-muted-foreground hover:text-foreground"

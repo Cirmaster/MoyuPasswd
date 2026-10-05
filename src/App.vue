@@ -17,6 +17,7 @@ import { onMounted } from 'vue'
 import { RouterView } from 'vue-router'
 import { useTheme } from '@/composables/useTheme'
 import { useAutoLock } from '@/composables/useAutoLock'
+import { disableContextMenu } from '@/lib/windowSetup'
 
 /** 主题管理 */
 const { initTheme } = useTheme()
@@ -29,6 +30,8 @@ useAutoLock()
  */
 onMounted(() => {
   initTheme()
+  // 禁用浏览器默认右键菜单（入口已拦一道；组件内再拦，保证热替换后也生效）
+  disableContextMenu()
 })
 </script>
 
