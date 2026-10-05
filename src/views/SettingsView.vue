@@ -60,6 +60,7 @@ onMounted(async () => {
       close_to_tray: boolean
       show_password_strength: boolean
       show_on_startup: boolean
+      allow_terminal_inject: boolean
     }>('get_settings')
 
     // 应用通用设置
@@ -72,6 +73,7 @@ onMounted(async () => {
     security.value.autoLockTime = savedSettings.auto_lock_time
     security.value.clipboardClearTime = savedSettings.clipboard_clear_time
     security.value.showPasswordStrength = savedSettings.show_password_strength
+    security.value.allowTerminalInject = savedSettings.allow_terminal_inject ?? false
 
     // 应用主题
     if (savedSettings.theme && savedSettings.theme !== theme.value) {
@@ -146,6 +148,8 @@ const security = ref({
   clipboardClearTime: 30,
   /** 是否在密码列表中显示密码强度指示器 */
   showPasswordStrength: true,
+  /** 是否允许向终端注入密码（关闭时命中黑名单需二次确认） */
+  allowTerminalInject: false,
 })
 
 /**
@@ -511,6 +515,7 @@ const handleSaveGeneral = async () => {
         close_to_tray: settings.value.closeToTray,
         show_password_strength: security.value.showPasswordStrength,
         show_on_startup: settings.value.showOnStartup,
+        allow_terminal_inject: security.value.allowTerminalInject,
       },
     })
 
@@ -566,6 +571,7 @@ const handleSaveSecurity = async () => {
         close_to_tray: settings.value.closeToTray,
         show_password_strength: security.value.showPasswordStrength,
         show_on_startup: settings.value.showOnStartup,
+        allow_terminal_inject: security.value.allowTerminalInject,
       },
     })
     showToast('success', '安全设置已保存')
@@ -859,6 +865,21 @@ const handleImport = async () => {
                 </div>
                 <input
                   v-model="security.showPasswordStrength"
+                  type="checkbox"
+                  class="h-4 w-4"
+                />
+              </div>
+
+              <!-- 允许向终端注入 -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>允许向终端注入密码</Label>
+                  <p class="text-sm text-muted-foreground">
+                    关闭时向终端注入需按两次 Ctrl+V 确认（防止密码进命令行历史/回显）；开启后直接注入
+                  </p>
+                </div>
+                <input
+                  v-model="security.allowTerminalInject"
                   type="checkbox"
                   class="h-4 w-4"
                 />

@@ -294,20 +294,28 @@ pub fn trigger_inject() {
         return;
     }
 
-    // 3. 策略检查（黑名单等）
+    // 3. 策略检查（终端黑名单）
+    // 默认拒绝向终端注入：密码落到命令行会进 shell 历史文件/回显在屏幕上。
+    // 拒绝的同时打开 5 秒确认窗口，窗口内再次按 Ctrl+V 视为用户确认，放行一次；
+    // 设置 allow_terminal_inject=true 可跳过本检查（设置页开关）。
     log::info!("[INJECT] 步骤 3：策略检查");
-    if is_blacklisted(&target_name) {
-        log::warn!("[INJECT] 目标进程在黑名单中，拒绝注入: {}", target_name);
-        crate::pending::record_audit(crate::pending::InjectAuditEvent {
-            ts: SystemTime::now(),
-            seq,
-            entry_id,
-            action: crate::pending::AuditAction::Denied("blacklisted".to_string()),
-            target_pid,
-            target_name: Some(target_name),
-            target_path,
-        });
-        return;
+    if is_blacklisted(&target_name) && !allow_terminal_inject() {
+        if !consume_terminal_grant(&target_name) {
+            log::warn!("[INJECT] 目标进程在黑名单中，等待二次确认: {}", target_name);
+            arm_terminal_grant(&target_name);
+            notify_terminal_confirm(&target_name);
+            crate::pending::record_audit(crate::pending::InjectAuditEvent {
+                ts: SystemTime::now(),
+                seq,
+                entry_id,
+                action: crate::pending::AuditAction::Denied("blacklisted_confirm_required".to_string()),
+                target_pid,
+                target_name: Some(target_name),
+                target_path,
+            });
+            return;
+        }
+        log::info!("[INJECT] 终端二次确认通过，放行注入: {}", target_name);
     }
 
     // 4. 调用解密闭包解密密码
@@ -367,11 +375,24 @@ pub fn trigger_inject() {
 }
 
 /// 默认注入黑名单
+///
+/// 终端/Shell 类进程：注入的密码可能回显在屏幕上或进 shell 历史文件（明文落盘）。
+/// 注意 Windows 11 默认终端宿主是 WindowsTerminal.exe（cmd/powershell 都跑在它里面），
+/// 归因拿到的是宿主进程名，因此宿主也必须在名单里才拦得住。
 fn default_blacklist() -> Vec<String> {
-    ["cmd.exe", "powershell.exe", "pwsh.exe"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "cmd.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "WindowsTerminal.exe",
+        "conhost.exe",
+        "bash.exe",
+        "mintty.exe",
+        "wsl.exe",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// 加载注入黑名单
@@ -414,6 +435,64 @@ fn is_blacklisted(process_name: &str) -> bool {
     load_blacklist()
         .iter()
         .any(|x| x.eq_ignore_ascii_case(process_name))
+}
+
+/// 是否允许向终端注入（设置项 `allow_terminal_inject`，默认 false）
+///
+/// 开启后跳过黑名单检查（不再二次确认），供明确知道自己在做什么的用户使用。
+fn allow_terminal_inject() -> bool {
+    get_app_handle()
+        .and_then(|app| {
+            use tauri::Manager;
+            let state = app.state::<crate::state::AppState>();
+            let db = state.get_db().ok()?;
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'allow_terminal_inject'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .map(|v| v == "true")
+        .unwrap_or(false)
+}
+
+/// 终端二次确认窗口（进程名 + 登记时刻）
+///
+/// 命中黑名单时先登记确认窗口并拒绝；窗口内再次 Ctrl+V 视为用户确认，放行一次。
+static TERMINAL_GRANT: std::sync::Mutex<Option<(String, std::time::Instant)>> =
+    std::sync::Mutex::new(None);
+
+/// 确认窗口有效期：过期后需要重新走一次「拒绝 → 确认」流程
+const TERMINAL_GRANT_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// 登记终端二次确认窗口
+fn arm_terminal_grant(process_name: &str) {
+    if let Ok(mut guard) = TERMINAL_GRANT.lock() {
+        *guard = Some((process_name.to_string(), std::time::Instant::now()));
+    }
+}
+
+/// 消费确认窗口：同一进程且未过期则放行一次（窗口一次性用掉）
+fn consume_terminal_grant(process_name: &str) -> bool {
+    if let Ok(mut guard) = TERMINAL_GRANT.lock() {
+        if let Some((name, at)) = guard.take() {
+            return name.eq_ignore_ascii_case(process_name) && at.elapsed() <= TERMINAL_GRANT_TTL;
+        }
+    }
+    false
+}
+
+/// 通知前端（倒计时窗口）提示用户二次确认
+fn notify_terminal_confirm(process_name: &str) {
+    if let Some(app) = get_app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "terminal-inject-confirm",
+            serde_json::json!({ "process": process_name }),
+        );
+    }
 }
 
 /// 应用句柄（读取设置中的黑名单用；由 lib.rs 启动时注入）

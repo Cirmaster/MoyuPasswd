@@ -305,5 +305,16 @@ fn get_migrations() -> Vec<Migration> {
                 ALTER TABLE passwords ADD COLUMN strength INTEGER;
             ",
         },
+        Migration {
+            version: 7,
+            description: "add_extra_fields_to_passwords",
+            sql: "
+                -- 新增自定义字段两列：
+                -- extra_fields_plain: 明文 JSON（全部字段的 label/order + 非敏感字段的 value，可被搜索）
+                -- extra_fields_encrypted: 敏感字段 value 的 AES-256-GCM 密文（JSON，仅含 order + value）
+                ALTER TABLE passwords ADD COLUMN extra_fields_plain TEXT;
+                ALTER TABLE passwords ADD COLUMN extra_fields_encrypted TEXT;
+            ",
+        },
     ]
 }

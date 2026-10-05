@@ -35,6 +35,9 @@ pub struct Settings {
     pub show_password_strength: bool,
     /// 启动时是否显示主窗口
     pub show_on_startup: bool,
+    /// 是否允许向终端注入密码（默认拒绝，命中黑名单需二次确认）
+    #[serde(default)]
+    pub allow_terminal_inject: bool,
 }
 
 impl Default for Settings {
@@ -48,6 +51,7 @@ impl Default for Settings {
             close_to_tray: true,
             show_password_strength: true,
             show_on_startup: true,
+            allow_terminal_inject: false,
         }
     }
 }
@@ -104,6 +108,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String
             "close_to_tray" => settings.close_to_tray = value == "true",
             "show_password_strength" => settings.show_password_strength = value == "true",
             "show_on_startup" => settings.show_on_startup = value == "true",
+            "allow_terminal_inject" => settings.allow_terminal_inject = value == "true",
             _ => {}
         }
     }
@@ -247,6 +252,7 @@ pub async fn save_settings(
         ("close_to_tray", settings.close_to_tray.to_string()),
         ("show_password_strength", settings.show_password_strength.to_string()),
         ("show_on_startup", settings.show_on_startup.to_string()),
+        ("allow_terminal_inject", settings.allow_terminal_inject.to_string()),
     ];
 
     for (key, value) in settings_vec {

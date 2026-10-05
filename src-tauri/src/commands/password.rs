@@ -5,10 +5,10 @@
 //!
 //! # 命令列表
 //!
-//! - `get_passwords`: 获取密码列表（零解密：不含备注明文，强度读预存列）
-//! - `get_password_detail`: 获取单条详情（按需解密备注）
+//! - `get_passwords`: 获取密码列表（零解密：不含备注明文，强度读预存列；自定义字段仅明文列）
+//! - `get_password_detail`: 获取单条详情（按需解密备注与敏感自定义字段）
 //! - `add_password`: 添加密码
-//! - `update_password`: 更新密码（url/notes 支持「不修改/清空/赋值」三层语义）
+//! - `update_password`: 更新密码（url/notes/extra_fields 支持「不修改/清空/赋值」三层语义）
 //! - `delete_password`: 删除密码（软删除）
 //! - `toggle_favorite`: 切换收藏状态
 
@@ -18,6 +18,134 @@ use tauri::State;
 
 use crate::crypto;
 use crate::state::AppState;
+
+/// 自定义字段（接口层）
+///
+/// 一条密码可携带任意多个附加字段（如数据库连接地址/端口/连接命令）。
+/// `sensitive` 为 true 的字段值加密存储、列表只下发空值占位，
+/// 明文按需通过 `get_password_detail` 获取；非敏感字段值明文存储并参与搜索。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomField {
+    /// 字段名（如 "连接地址"）
+    pub label: String,
+    /// 字段值（列表响应中敏感字段为空串）
+    pub value: String,
+    /// 是否敏感（敏感字段值加密存储）
+    pub sensitive: bool,
+}
+
+/// 自定义字段明文列存储项
+///
+/// 全部字段的 label/order 都在明文列（label 非机密，便于列表展示与搜索）；
+/// 敏感字段的 value 置 null，真值存密文列。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlainField {
+    label: String,
+    value: Option<String>,
+    order: usize,
+}
+
+/// 自定义字段密文列存储项（AES 解密后的形态）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SecretField {
+    order: usize,
+    value: String,
+}
+
+/// 拆分自定义字段为「明文列 JSON + 密文列密文」
+///
+/// 无字段时两列都为 NULL。无名（label 为空）的行直接丢弃。
+pub(crate) fn split_extra_fields(
+    aes_key: &[u8; 32],
+    fields: &[CustomField],
+) -> Result<(Option<String>, Option<String>), String> {
+    let mut plain: Vec<PlainField> = Vec::new();
+    let mut secrets: Vec<SecretField> = Vec::new();
+
+    for (i, f) in fields.iter().enumerate() {
+        let label = f.label.trim();
+        if label.is_empty() {
+            continue;
+        }
+        if f.sensitive {
+            plain.push(PlainField {
+                label: label.to_string(),
+                value: None,
+                order: i,
+            });
+            secrets.push(SecretField {
+                order: i,
+                value: f.value.clone(),
+            });
+        } else {
+            plain.push(PlainField {
+                label: label.to_string(),
+                value: Some(f.value.clone()),
+                order: i,
+            });
+        }
+    }
+
+    if plain.is_empty() {
+        return Ok((None, None));
+    }
+
+    let plain_json = serde_json::to_string(&plain).map_err(|e| e.to_string())?;
+    let enc = if secrets.is_empty() {
+        None
+    } else {
+        // 敏感字段值整体走与备注同一 AES 通道（nonce_hex:ciphertext_hex）
+        let secrets_json = serde_json::to_string(&secrets).map_err(|e| e.to_string())?;
+        Some(encrypt_password(aes_key, &secrets_json)?)
+    };
+    Ok((Some(plain_json), enc))
+}
+
+/// 合并两列为自定义字段列表（按 order 排序还原用户设定顺序）
+///
+/// `aes_key` 为 Some 时解密敏感字段值（详情/导出用），为 None 时敏感值留空（列表用）。
+/// 详情模式下密文解密失败直接报错，绝不静默返回空值。
+pub(crate) fn merge_extra_fields(
+    plain_json: Option<&str>,
+    enc: Option<&str>,
+    aes_key: Option<&[u8; 32]>,
+) -> Result<Vec<CustomField>, String> {
+    let Some(pj) = plain_json else {
+        return Ok(Vec::new());
+    };
+    let plain: Vec<PlainField> = serde_json::from_str(pj).map_err(|e| e.to_string())?;
+
+    let secrets: Vec<SecretField> = match (enc, aes_key) {
+        (Some(enc), Some(key)) => {
+            let decrypted = decrypt_password(key, enc)?;
+            serde_json::from_str(&decrypted).map_err(|e| e.to_string())?
+        }
+        _ => Vec::new(),
+    };
+
+    let mut out: Vec<(usize, CustomField)> = Vec::with_capacity(plain.len());
+    for pf in plain {
+        let sensitive = pf.value.is_none();
+        let value = match pf.value {
+            Some(v) => v,
+            None => secrets
+                .iter()
+                .find(|s| s.order == pf.order)
+                .map(|s| s.value.clone())
+                .unwrap_or_default(),
+        };
+        out.push((
+            pf.order,
+            CustomField {
+                label: pf.label,
+                value,
+                sensitive,
+            },
+        ));
+    }
+    out.sort_by_key(|(o, _)| *o);
+    Ok(out.into_iter().map(|(_, f)| f).collect())
+}
 
 /// 密码项结构体
 ///
@@ -38,6 +166,8 @@ pub struct PasswordItem {
     pub notes: Option<String>,
     /// 是否有备注（列表用；备注明文按需通过 `get_password_detail` 获取）
     pub has_notes: bool,
+    /// 自定义字段（列表中敏感字段 value 为空串，详情解密后回填）
+    pub extra_fields: Vec<CustomField>,
     /// 所属分类 ID
     pub category: String,
     /// 是否收藏
@@ -63,6 +193,8 @@ pub struct NewPassword {
     pub url: Option<String>,
     /// 备注信息
     pub notes: Option<String>,
+    /// 自定义字段（可选）
+    pub extra_fields: Option<Vec<CustomField>>,
     /// 所属分类 ID
     pub category: String,
     /// 是否收藏
@@ -84,6 +216,9 @@ pub struct UpdatePassword {
     /// 备注信息（三层语义同 url）
     #[serde(default, deserialize_with = "de_double_option")]
     pub notes: Option<Option<String>>,
+    /// 自定义字段（三层语义同 url：缺失=不修改、null/空数组=清空、数组=整体替换）
+    #[serde(default, deserialize_with = "de_double_option")]
+    pub extra_fields: Option<Option<Vec<CustomField>>>,
     /// 所属分类 ID
     pub category: Option<String>,
     /// 是否收藏
@@ -149,7 +284,7 @@ pub(crate) fn encrypt_password(aes_key: &[u8; 32], password: &str) -> Result<Str
     Ok(format!("{}:{}", nonce_hex, ciphertext_hex))
 }
 
-/// 用新密钥重加密全部密码记录（密码 + 备注）
+/// 用新密钥重加密全部密码记录（密码 + 备注 + 敏感自定义字段）
 ///
 /// 在修改主密码时调用：用旧密钥解密所有记录，再用新密钥重新加密。
 /// 本函数不自行开启事务，由调用方统一在事务中执行。
@@ -174,9 +309,11 @@ pub(crate) fn reencrypt_all_passwords(
     old_key: &[u8; 32],
     new_key: &[u8; 32],
 ) -> Result<usize, String> {
-    // 先取出所有记录（密码 + 备注密文），再逐条重加密
+    // 先取出所有记录（密码 + 备注 + 敏感字段密文），再逐条重加密
     let mut stmt = conn
-        .prepare("SELECT id, password_encrypted, notes_encrypted FROM passwords")
+        .prepare(
+            "SELECT id, password_encrypted, notes_encrypted, extra_fields_encrypted FROM passwords",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -184,15 +321,16 @@ pub(crate) fn reencrypt_all_passwords(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<(String, String, Option<String>)>, _>>()
+        .collect::<Result<Vec<(String, String, Option<String>, Option<String>)>, _>>()
         .map_err(|e| e.to_string())?;
     drop(stmt);
 
     let mut count = 0usize;
-    for (id, encrypted_password, encrypted_notes) in rows {
+    for (id, encrypted_password, encrypted_notes, encrypted_fields) in rows {
         let plaintext = decrypt_password(old_key, &encrypted_password)?;
         let new_encrypted_password = encrypt_password(new_key, &plaintext)?;
 
@@ -201,9 +339,17 @@ pub(crate) fn reencrypt_all_passwords(
             None => None,
         };
 
+        // 敏感字段值 JSON 整体重加密（内容无需解析，按密文通道整体换钥）
+        let new_encrypted_fields = match encrypted_fields {
+            Some(n) => Some(encrypt_password(new_key, &decrypt_password(old_key, &n)?)?),
+            None => None,
+        };
+
         conn.execute(
-            "UPDATE passwords SET password_encrypted = ?1, notes_encrypted = ?2 WHERE id = ?3",
-            params![new_encrypted_password, new_encrypted_notes, id],
+            "UPDATE passwords
+             SET password_encrypted = ?1, notes_encrypted = ?2, extra_fields_encrypted = ?3
+             WHERE id = ?4",
+            params![new_encrypted_password, new_encrypted_notes, new_encrypted_fields, id],
         )
         .map_err(|e| e.to_string())?;
         count += 1;
@@ -278,9 +424,10 @@ pub async fn get_passwords(
     // 存量数据强度回填（strength 为空的行补算一次并落库，之后列表零解密）
     backfill_strength(&conn, &aes_key);
 
-    // 构建参数化查询（列表不解密任何数据：备注只给 has_notes，强度读预存列）
+    // 构建参数化查询（列表不解密任何数据：备注只给 has_notes，强度读预存列，
+    // 自定义字段读明文列、敏感值只给空串占位）
     let mut sql = String::from(
-        "SELECT id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at
+        "SELECT id, title, username, url, notes_encrypted, extra_fields_plain, category_id, is_favorite, strength, created_at, updated_at
          FROM passwords
          WHERE deleted_at IS NULL"
     );
@@ -296,11 +443,14 @@ pub async fn get_passwords(
         }
     }
 
-    // 按关键词搜索（参数化 + LIKE 通配符转义）
+    // 按关键词搜索（参数化 + LIKE 通配符转义）；自定义字段明文列（label + 非敏感值）参与搜索
     if let Some(search_text) = &search {
         if !search_text.is_empty() {
-            sql.push_str(" AND (title LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')");
+            sql.push_str(
+                " AND (title LIKE ? ESCAPE '\\' OR username LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\' OR extra_fields_plain LIKE ? ESCAPE '\\')",
+            );
             let pattern = format!("%{}%", escape_like(search_text));
+            params.push(pattern.clone());
             params.push(pattern.clone());
             params.push(pattern.clone());
             params.push(pattern);
@@ -319,22 +469,26 @@ pub async fn get_passwords(
             let username: String = row.get(2)?;
             let url: Option<String> = row.get(3)?;
             let notes_encrypted: Option<String> = row.get(4)?;
-            let category_id: String = row.get(5)?;
-            let is_favorite: i32 = row.get(6)?;
-            let strength: Option<i32> = row.get(7)?;
-            let created_at: i64 = row.get(8)?;
-            let updated_at: i64 = row.get(9)?;
+            let extra_fields_plain: Option<String> = row.get(5)?;
+            let category_id: String = row.get(6)?;
+            let is_favorite: i32 = row.get(7)?;
+            let strength: Option<i32> = row.get(8)?;
+            let created_at: i64 = row.get(9)?;
+            let updated_at: i64 = row.get(10)?;
 
-            Ok((id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at))
+            Ok((id, title, username, url, notes_encrypted, extra_fields_plain, category_id, is_favorite, strength, created_at, updated_at))
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    // 转换结果：列表零解密——不返回明文密码、不下发备注（只给 has_notes）、强度读预存列
+    // 转换结果：列表零解密——不返回明文密码、不下发备注（只给 has_notes）、强度读预存列，
+    // 自定义字段敏感值留空（明文列里本来就是 null）
     let result = passwords
         .into_iter()
-        .map(|(id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at)| {
+        .map(|(id, title, username, url, notes_encrypted, extra_fields_plain, category_id, is_favorite, strength, created_at, updated_at)| {
+            let extra_fields = merge_extra_fields(extra_fields_plain.as_deref(), None, None)
+                .unwrap_or_default();
             PasswordItem {
                 id,
                 title,
@@ -343,6 +497,7 @@ pub async fn get_passwords(
                 url,
                 notes: None,
                 has_notes: notes_encrypted.is_some(),
+                extra_fields,
                 category: category_id,
                 is_favorite: is_favorite != 0,
                 password_strength: if show_strength { strength } else { None },
@@ -416,7 +571,7 @@ pub async fn get_password_detail(
 
     // 查询数据库
     let result = conn.query_row(
-        "SELECT id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at
+        "SELECT id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at
          FROM passwords
          WHERE id = ?1 AND deleted_at IS NULL",
         params![id],
@@ -426,23 +581,31 @@ pub async fn get_password_detail(
             let username: String = row.get(2)?;
             let url: Option<String> = row.get(3)?;
             let notes_encrypted: Option<String> = row.get(4)?;
-            let category_id: String = row.get(5)?;
-            let is_favorite: i32 = row.get(6)?;
-            let strength: Option<i32> = row.get(7)?;
-            let created_at: i64 = row.get(8)?;
-            let updated_at: i64 = row.get(9)?;
+            let extra_fields_plain: Option<String> = row.get(5)?;
+            let extra_fields_encrypted: Option<String> = row.get(6)?;
+            let category_id: String = row.get(7)?;
+            let is_favorite: i32 = row.get(8)?;
+            let strength: Option<i32> = row.get(9)?;
+            let created_at: i64 = row.get(10)?;
+            let updated_at: i64 = row.get(11)?;
 
-            Ok((id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at))
+            Ok((id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at))
         },
     );
 
     match result {
-        Ok((id, title, username, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at)) => {
+        Ok((id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at)) => {
             // 备注解密失败必须报错：静默返回 None 会让更新流程把原备注覆盖清空
             let notes = match notes_encrypted {
                 Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
                 None => None,
             };
+            // 敏感字段值按需解密；解密失败同样必须报错，绝不静默空值
+            let extra_fields = merge_extra_fields(
+                extra_fields_plain.as_deref(),
+                extra_fields_encrypted.as_deref(),
+                Some(&aes_key),
+            )?;
             Ok(PasswordItem {
                 id,
                 title,
@@ -451,6 +614,7 @@ pub async fn get_password_detail(
                 url,
                 has_notes: notes.is_some(),
                 notes,
+                extra_fields,
                 category: category_id,
                 is_favorite: is_favorite != 0,
                 password_strength: strength,
@@ -522,6 +686,10 @@ pub async fn add_password(
         _ => None,
     };
 
+    // 拆分自定义字段（明文列 + 敏感值密文列）
+    let (extra_fields_plain, extra_fields_encrypted) =
+        split_extra_fields(&aes_key, data.extra_fields.as_deref().unwrap_or_default())?;
+
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -530,8 +698,8 @@ pub async fn add_password(
 
     // 插入数据库
     conn.execute(
-        "INSERT INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, strength, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             id,
             data.title,
@@ -539,6 +707,8 @@ pub async fn add_password(
             encrypted_password,
             data.url,
             encrypted_notes,
+            extra_fields_plain,
+            extra_fields_encrypted,
             data.category,
             data.is_favorite as i32,
             strength,
@@ -547,7 +717,9 @@ pub async fn add_password(
         ],
     ).map_err(|e| e.to_string())?;
 
-    // 返回新添加的密码项（不返回明文密码、不回显备注明文）
+    // 返回新添加的密码项（不返回明文密码、不回显备注明文、敏感字段值留空）
+    let extra_fields =
+        merge_extra_fields(extra_fields_plain.as_deref(), None, None).unwrap_or_default();
     Ok(PasswordItem {
         id,
         title: data.title,
@@ -556,6 +728,7 @@ pub async fn add_password(
         url: data.url,
         notes: None,
         has_notes: encrypted_notes.is_some(),
+        extra_fields,
         category: data.category,
         is_favorite: data.is_favorite,
         password_strength: if show_strength { Some(strength) } else { None },
@@ -605,8 +778,8 @@ pub async fn update_password(
 
     let now = chrono::Utc::now().timestamp_millis();
 
-    // 读取当前原始行：备注密文不改动则完全不解密、不重写，
-    // 从根上消除「备注解密失败 → 静默清空」的问题
+    // 读取当前原始行：备注/敏感字段密文不改动则完全不解密、不重写，
+    // 从根上消除「解密失败 → 静默清空」的问题
     let db = state.get_db()?;
     let conn = db.conn();
 
@@ -616,13 +789,27 @@ pub async fn update_password(
         cur_password_enc,
         cur_url,
         cur_notes_enc,
+        cur_extra_plain,
+        cur_extra_enc,
         cur_category,
         cur_is_favorite,
         cur_strength,
         created_at,
-    ): (String, String, String, Option<String>, Option<String>, String, i32, Option<i32>, i64) = conn
+    ): (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+        i32,
+        Option<i32>,
+        i64,
+    ) = conn
         .query_row(
-            "SELECT title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, strength, created_at
+            "SELECT title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at
              FROM passwords
              WHERE id = ?1 AND deleted_at IS NULL",
             params![id],
@@ -637,6 +824,8 @@ pub async fn update_password(
                     row.get(6)?,
                     row.get(7)?,
                     row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
                 ))
             },
         )
@@ -674,6 +863,13 @@ pub async fn update_password(
     };
     let has_notes = encrypted_notes.is_some();
 
+    // 自定义字段三层语义：缺失=不修改、null/空数组=清空、数组=整体替换
+    let (extra_fields_plain, extra_fields_encrypted) = match &data.extra_fields {
+        None => (cur_extra_plain, cur_extra_enc),
+        Some(None) => (None, None),
+        Some(Some(fields)) => split_extra_fields(&aes_key, fields)?,
+    };
+
     // 密码：为空/缺失保留原密文与原强度，否则重新加密并重算强度
     let (encrypted_password, strength) = match &data.password {
         Some(p) if !p.is_empty() => (
@@ -695,18 +891,21 @@ pub async fn update_password(
     // 是否显示密码强度（仅控制返回值）
     let show_strength = is_show_strength_enabled(&conn);
 
-    // 更新数据库（含强度列）
+    // 更新数据库（含强度列与自定义字段两列）
     conn.execute(
         "UPDATE passwords
          SET title = ?1, username = ?2, password_encrypted = ?3, url = ?4, notes_encrypted = ?5,
-             category_id = ?6, is_favorite = ?7, strength = ?8, updated_at = ?9
-         WHERE id = ?10",
+             extra_fields_plain = ?6, extra_fields_encrypted = ?7,
+             category_id = ?8, is_favorite = ?9, strength = ?10, updated_at = ?11
+         WHERE id = ?12",
         params![
             title,
             username,
             encrypted_password,
             url,
             encrypted_notes,
+            extra_fields_plain,
+            extra_fields_encrypted,
             category,
             is_favorite as i32,
             strength,
@@ -715,7 +914,9 @@ pub async fn update_password(
         ],
     ).map_err(|e| e.to_string())?;
 
-    // 返回更新后的密码项（不返回明文密码、不回显备注明文）
+    // 返回更新后的密码项（不返回明文密码、不回显备注明文、敏感字段值留空）
+    let extra_fields =
+        merge_extra_fields(extra_fields_plain.as_deref(), None, None).unwrap_or_default();
     Ok(PasswordItem {
         id,
         title,
@@ -724,6 +925,7 @@ pub async fn update_password(
         url,
         notes: None,
         has_notes,
+        extra_fields,
         category,
         is_favorite,
         password_strength: if show_strength { Some(strength) } else { None },

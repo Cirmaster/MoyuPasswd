@@ -20,9 +20,13 @@ import { computed } from 'vue'
 interface Props {
   /** 密码强度等级：0(空/未知) | 1(弱) | 2(中) | 3(强) | 4(非常强) */
   level: number
+  /** 紧凑模式：只显示强度条（文字进 title），用于表格等窄列场景 */
+  compact?: boolean
 }
 
-const props = defineProps<Props>()
+const props = withDefaults(defineProps<Props>(), {
+  compact: false,
+})
 
 const strength = computed(() => {
   switch (props.level) {
@@ -41,7 +45,7 @@ const strength = computed(() => {
 </script>
 
 <template>
-  <div v-if="level > 0" class="flex items-center gap-2">
+  <div v-if="level > 0" class="flex items-center gap-2" :title="compact ? `密码强度：${strength.text}` : undefined">
     <!-- 强度条 -->
     <div class="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
       <div
@@ -50,8 +54,9 @@ const strength = computed(() => {
         :style="{ width: `${strength.percent}%` }"
       />
     </div>
-    <!-- 强度文字 -->
+    <!-- 强度文字（紧凑模式隐藏，文字进 title） -->
     <span
+      v-if="!compact"
       class="text-xs font-medium shrink-0"
       :class="{
         'text-destructive': strength.level === 1,

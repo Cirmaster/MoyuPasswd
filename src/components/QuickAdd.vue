@@ -2,7 +2,7 @@
   QuickAdd.vue - 快速添加密码弹窗
 
   全局快捷键 Ctrl+Shift+N 呼出，快速保存当前网站密码。
-  简化版的密码添加表单，只包含必要字段。
+  简化版的密码添加表单，只包含必要字段（含可选自定义字段）。
 
   @example
   ```vue
@@ -24,7 +24,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
-import { usePasswordStore } from '@/stores/password'
+import { usePasswordStore, type CustomField } from '@/stores/password'
+import CustomFieldsEditor from './CustomFieldsEditor.vue'
 import Toast from './Toast.vue'
 
 /**
@@ -54,6 +55,7 @@ const form = ref({
   username: '',
   password: '',
   url: '',
+  extra_fields: [] as CustomField[],
 })
 
 /** Toast 提示状态 */
@@ -75,6 +77,7 @@ const resetForm = () => {
     username: '',
     password: '',
     url: '',
+    extra_fields: [],
   }
 }
 
@@ -96,6 +99,7 @@ const handleSave = async () => {
       password: form.value.password,
       url: form.value.url || undefined,
       notes: undefined,
+      extra_fields: form.value.extra_fields,
       category: 'other',
       is_favorite: false,
     })
@@ -135,49 +139,56 @@ onMounted(async () => {
 
 <template>
   <Dialog :open="open" @update:open="handleOpenChange">
-    <DialogContent class="sm:max-w-[400px]">
+    <!-- 高度封顶 + 标题/按钮钉住，中间表单区内部滚动 -->
+    <DialogContent class="sm:max-w-[480px] max-h-[85vh] grid-rows-[auto_1fr_auto]">
       <DialogHeader>
         <DialogTitle>快速添加密码</DialogTitle>
         <DialogDescription>快速保存密码到您的密码库</DialogDescription>
       </DialogHeader>
 
-      <div class="grid gap-4 py-4">
-        <div class="grid gap-2">
-          <Label for="quick-title">名称 *</Label>
-          <Input
-            id="quick-title"
-            v-model="form.title"
-            placeholder="例如：GitHub"
-            autofocus
-          />
-        </div>
+      <!-- 表单内容（可滚动区） -->
+      <div class="min-h-0 overflow-y-auto">
+        <div class="grid gap-4 py-1">
+          <div class="grid gap-2">
+            <Label for="quick-title">名称 *</Label>
+            <Input
+              id="quick-title"
+              v-model="form.title"
+              placeholder="例如：GitHub"
+              autofocus
+            />
+          </div>
 
-        <div class="grid gap-2">
-          <Label for="quick-username">用户名</Label>
-          <Input
-            id="quick-username"
-            v-model="form.username"
-            placeholder="邮箱或用户名"
-          />
-        </div>
+          <div class="grid gap-2">
+            <Label for="quick-username">用户名</Label>
+            <Input
+              id="quick-username"
+              v-model="form.username"
+              placeholder="邮箱或用户名"
+            />
+          </div>
 
-        <div class="grid gap-2">
-          <Label for="quick-password">密码 *</Label>
-          <Input
-            id="quick-password"
-            v-model="form.password"
-            type="password"
-            placeholder="输入密码"
-          />
-        </div>
+          <div class="grid gap-2">
+            <Label for="quick-password">密码 *</Label>
+            <Input
+              id="quick-password"
+              v-model="form.password"
+              type="password"
+              placeholder="输入密码"
+            />
+          </div>
 
-        <div class="grid gap-2">
-          <Label for="quick-url">网址</Label>
-          <Input
-            id="quick-url"
-            v-model="form.url"
-            placeholder="https://example.com"
-          />
+          <div class="grid gap-2">
+            <Label for="quick-url">网址</Label>
+            <Input
+              id="quick-url"
+              v-model="form.url"
+              placeholder="https://example.com"
+            />
+          </div>
+
+          <!-- 自定义字段（可选）：连接地址/端口/连接命令等 -->
+          <CustomFieldsEditor v-model="form.extra_fields" />
         </div>
       </div>
 

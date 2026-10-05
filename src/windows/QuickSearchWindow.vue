@@ -8,6 +8,11 @@
   - 每次显示时实时检查锁定状态
   - 不缓存密码数据，每次从后端实时获取
   - 锁定后立即清除本地数据
+
+  功能：
+  - 搜索标题/用户名/URL/自定义字段（明文字段）
+  - ↵ 复制密码（注入式，密码不进剪贴板）
+  - →/Tab 或「详情」按钮展开字段面板，按字段复制（含敏感字段，按需解密）
 -->
 
 <script setup lang="ts">
@@ -19,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useTheme } from '@/composables/useTheme'
+import type { CustomField } from '@/stores/password'
 import Toast from '@/components/Toast.vue'
 
 /** 主题管理 */
@@ -71,9 +77,19 @@ const results = ref<Array<{
   username: string
   password: string
   url?: string
+  extra_fields?: CustomField[]
   category: string
   is_favorite: boolean
 }>>([])
+
+/** 当前展开详情面板的条目 ID */
+const expandedId = ref<string | null>(null)
+
+/** 详情字段缓存（id → 字段列表；敏感值经 get_password_detail 解密，锁定时清空） */
+const detailFields = ref<Record<string, CustomField[]>>({})
+
+/** 详情加载中 */
+const detailLoading = ref(false)
 
 /**
  * 加载设置（剪贴板清除时间等）
@@ -103,6 +119,7 @@ const searchPasswords = async (query: string) => {
       username: string
       password: string
       url?: string
+      extra_fields?: CustomField[]
       category: string
       is_favorite: boolean
     }>>('get_passwords', {
@@ -284,6 +301,46 @@ const closeWindow = async () => {
 }
 
 /**
+ * 展开/收起条目详情面板
+ *
+ * 展开时按需调用 get_password_detail 解密敏感字段值（列表零解密），
+ * 结果只缓存在内存中，锁定/搜索词变化即清。
+ * @param item - 搜索结果项
+ */
+const toggleDetail = async (item: { id: string }) => {
+  // 已展开则收起
+  if (expandedId.value === item.id) {
+    expandedId.value = null
+    return
+  }
+  expandedId.value = item.id
+
+  // 已缓存过直接展示
+  if (detailFields.value[item.id]) return
+
+  detailLoading.value = true
+  try {
+    const detail = await invoke<{ extra_fields?: CustomField[] }>('get_password_detail', {
+      id: item.id,
+    })
+    detailFields.value = { ...detailFields.value, [item.id]: detail.extra_fields || [] }
+  } catch (e) {
+    console.error('加载详情失败:', e)
+    toast.value = { show: true, type: 'error', message: '加载详情失败' }
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+/**
+ * 复制单个字段值并关闭窗口（与复制用户名/密码行为一致）
+ * @param text - 字段值文本
+ */
+const copyFieldText = async (text: string) => {
+  await copyAndClose(text)
+}
+
+/**
  * 键盘事件处理
  * 注意：Esc 关闭由后端全局快捷键处理
  */
@@ -313,6 +370,17 @@ const handleKeydown = (e: KeyboardEvent) => {
     e.preventDefault()
     selectedIndex.value = Math.max(selectedIndex.value - 1, 0)
     scrollToSelected()
+  } else if (e.key === 'ArrowRight' || e.key === 'Tab') {
+    // →/Tab 展开选中条目的字段详情（再按一次收起）
+    e.preventDefault()
+    const selectedItem = results.value[selectedIndex.value]
+    if (selectedItem) {
+      toggleDetail(selectedItem)
+    }
+  } else if (e.key === 'ArrowLeft') {
+    // ← 收起详情面板
+    e.preventDefault()
+    expandedId.value = null
   } else if (e.key === 'Enter') {
     e.preventDefault()
     const selectedItem = results.value[selectedIndex.value]
@@ -337,6 +405,9 @@ const scrollToSelected = () => {
  */
 watch(searchQuery, (newQuery) => {
   selectedIndex.value = 0
+  expandedId.value = null
+  // 搜索词变化时丢弃已解密的字段缓存
+  detailFields.value = {}
   // 搜索词变化时实时查询后端
   searchPasswords(newQuery)
 })
@@ -359,11 +430,13 @@ onMounted(async () => {
 
   // 监听锁定事件（来自主应用）
   await listen('app-locked', () => {
-    // 收到锁定事件，立即清除数据
+    // 收到锁定事件，立即清除数据（含已解密的字段缓存）
     isUnlocked.value = false
     results.value = []
     searchQuery.value = ''
     masterPassword.value = ''
+    expandedId.value = null
+    detailFields.value = {}
   })
 
   // 监听窗口显示事件（每次窗口从隐藏变为显示时触发）
@@ -412,7 +485,8 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-screen bg-transparent text-foreground flex flex-col">
+  <!-- overflow-hidden + min-h-0 链条：列表高度收敛到窗口内，滚动条长在结果区而不是整个窗口 -->
+  <div class="h-screen overflow-hidden bg-transparent text-foreground flex flex-col">
     <!-- 未解锁 -->
     <div v-if="!isUnlocked" class="flex-1 flex items-center justify-center bg-card">
       <div class="w-full max-w-sm bg-card border shadow-lg">
@@ -488,7 +562,7 @@ onMounted(async () => {
     </div>
 
     <!-- 已解锁 - 搜索界面 -->
-    <div v-else class="flex-1 flex flex-col bg-card backdrop-blur-sm border shadow-lg">
+    <div v-else class="flex-1 min-h-0 flex flex-col bg-card backdrop-blur-sm border shadow-lg">
       <!-- 搜索框 -->
       <div class="flex items-center gap-3 px-4 h-12 border-b">
         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -504,8 +578,8 @@ onMounted(async () => {
         />
       </div>
 
-      <!-- 结果区域 -->
-      <div class="flex-1 overflow-y-auto">
+      <!-- 结果区域（min-h-0 才能让 overflow-y-auto 在 flex 布局中真正生效） -->
+      <div class="flex-1 min-h-0 overflow-y-auto">
         <!-- 加载中 -->
         <div v-if="loading" class="h-full flex items-center justify-center text-sm text-muted-foreground">
           搜索中...
@@ -522,35 +596,84 @@ onMounted(async () => {
             v-for="(item, index) in results"
             :key="item.id"
             :data-index="index"
-            class="flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors border-b last:border-b-0"
-            :class="{
-              'bg-primary text-primary-foreground': index === selectedIndex,
-              'hover:bg-muted': index !== selectedIndex,
-            }"
-            @click="copyPasswordByIdAndClose(item.id)"
-            @mouseenter="selectedIndex = index"
+            class="border-b last:border-b-0"
           >
-            <div class="flex-1 min-w-0">
-              <div class="text-sm font-medium truncate">{{ item.title }}</div>
-              <div class="text-xs truncate mt-0.5" :class="index === selectedIndex ? 'text-primary-foreground/70' : 'text-muted-foreground'">
-                {{ item.username }}
+            <!-- 结果行 -->
+            <div
+              class="flex items-center gap-3 px-4 py-2.5 cursor-pointer transition-colors"
+              :class="{
+                'bg-primary text-primary-foreground': index === selectedIndex,
+                'hover:bg-muted': index !== selectedIndex,
+              }"
+              @click="copyPasswordByIdAndClose(item.id)"
+              @mouseenter="selectedIndex = index"
+            >
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium truncate">{{ item.title }}</div>
+                <div class="text-xs truncate mt-0.5" :class="index === selectedIndex ? 'text-primary-foreground/70' : 'text-muted-foreground'">
+                  {{ item.username }}
+                </div>
+              </div>
+              <div class="flex gap-1">
+                <!-- 详情按钮：展开/收起字段面板 -->
+                <span
+                  v-if="item.extra_fields && item.extra_fields.length > 0"
+                  class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
+                  :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                  @click.stop="toggleDetail(item)"
+                >
+                  {{ expandedId === item.id ? '收起' : '详情' }}
+                </span>
+                <span
+                  class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
+                  :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                  @click.stop="copyAndClose(item.username)"
+                >
+                  复制用户
+                </span>
+                <span
+                  class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
+                  :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
+                  @click.stop="copyPasswordByIdAndClose(item.id)"
+                >
+                  复制密码
+                </span>
               </div>
             </div>
-            <div class="flex gap-1">
-              <span
-                class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
-                :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
-                @click.stop="copyAndClose(item.username)"
-              >
-                复制用户
-              </span>
-              <span
-                class="px-2 py-1 text-xs rounded cursor-pointer transition-colors"
-                :class="index === selectedIndex ? 'bg-primary-foreground/15 hover:bg-primary-foreground/25 text-primary-foreground' : 'hover:bg-muted text-muted-foreground hover:text-foreground'"
-                @click.stop="copyPasswordByIdAndClose(item.id)"
-              >
-                复制密码
-              </span>
+
+            <!-- 字段详情面板（→/Tab 或「详情」按钮展开） -->
+            <div v-if="expandedId === item.id" class="px-4 py-2 bg-muted/40 border-t space-y-1">
+              <div v-if="detailLoading && !detailFields[item.id]" class="text-xs text-muted-foreground">
+                加载字段中...
+              </div>
+              <template v-else>
+                <div
+                  v-for="(field, fi) in detailFields[item.id] || []"
+                  :key="fi"
+                  class="flex items-center gap-2 text-xs"
+                >
+                  <span class="w-20 shrink-0 text-muted-foreground truncate" :title="field.label">
+                    {{ field.label }}
+                  </span>
+                  <span class="flex-1 min-w-0 truncate font-mono" :title="field.value">
+                    {{ field.value || (field.sensitive ? '••••••' : '') }}
+                  </span>
+                  <span v-if="field.sensitive" class="shrink-0" title="敏感字段，加密存储">🔒</span>
+                  <span
+                    v-if="field.value"
+                    class="shrink-0 px-1.5 py-0.5 rounded cursor-pointer transition-colors hover:bg-muted text-muted-foreground hover:text-foreground"
+                    @click.stop="copyFieldText(field.value)"
+                  >
+                    复制
+                  </span>
+                </div>
+                <div
+                  v-if="(detailFields[item.id] || []).length === 0"
+                  class="text-xs text-muted-foreground"
+                >
+                  无附加字段
+                </div>
+              </template>
             </div>
           </div>
         </template>
@@ -561,6 +684,7 @@ onMounted(async () => {
         <div class="flex gap-3">
           <span>↑↓ 导航</span>
           <span>↵ 复制</span>
+          <span>→/Tab 详情</span>
           <span>Esc 关闭</span>
         </div>
         <span>MoyuPasswd</span>

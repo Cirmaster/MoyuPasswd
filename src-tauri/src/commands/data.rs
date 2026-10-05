@@ -8,6 +8,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::commands::password::{self, CustomField};
 use crate::crypto;
 use crate::state::AppState;
 
@@ -23,6 +24,9 @@ pub struct ExportData {
 }
 
 /// 导出密码项
+///
+/// 导出文件是解密后的全量内容（密码/备注/敏感字段都已解密），
+/// `extra_fields` 对旧版本导出文件向后兼容（缺失视为空）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportPasswordItem {
     pub id: String,
@@ -31,6 +35,8 @@ pub struct ExportPasswordItem {
     pub password: String,
     pub url: Option<String>,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub extra_fields: Vec<CustomField>,
     pub category: String,
     pub is_favorite: bool,
     pub created_at: i64,
@@ -156,11 +162,11 @@ pub async fn export_data(
     let db = state.get_db()?;
     let conn = db.conn();
 
-    // 查询所有密码（含加密备注）
+    // 查询所有密码（含加密备注与自定义字段两列）
     let passwords = {
         let mut stmt = conn
             .prepare(
-                "SELECT id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at
+                "SELECT id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at
                  FROM passwords WHERE deleted_at IS NULL",
             )
             .map_err(|e| e.to_string())?;
@@ -173,10 +179,12 @@ pub async fn export_data(
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
-                    row.get::<_, String>(6)?,
-                    row.get::<_, i32>(7)?,
-                    row.get::<_, i64>(8)?,
-                    row.get::<_, i64>(9)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i32>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             })
             .map_err(|e| e.to_string())?
@@ -188,12 +196,18 @@ pub async fn export_data(
 
     // 解密并转换
     let mut export_passwords = Vec::new();
-    for (id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at) in passwords {
+    for (id, title, username, password_encrypted, url, notes_encrypted, extra_plain, extra_enc, category_id, is_favorite, created_at, updated_at) in passwords {
         let password = decrypt_password(&aes_key, &password_encrypted)?;
         let notes = match notes_encrypted {
             Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
             None => None,
         };
+        // 自定义字段：敏感值随导出一并解密（导出文件整体由导出密码加密保护）
+        let extra_fields = password::merge_extra_fields(
+            extra_plain.as_deref(),
+            extra_enc.as_deref(),
+            Some(&aes_key),
+        )?;
 
         export_passwords.push(ExportPasswordItem {
             id,
@@ -202,6 +216,7 @@ pub async fn export_data(
             password,
             url,
             notes,
+            extra_fields,
             category: category_id,
             is_favorite: is_favorite != 0,
             created_at,
@@ -349,9 +364,13 @@ pub async fn import_data(
             _ => None,
         };
 
+        // 自定义字段：拆分明文列 + 敏感值密文列（旧导出文件无该字段时视为空）
+        let (extra_fields_plain, extra_fields_encrypted) =
+            password::split_extra_fields(&aes_key, &password.extra_fields)?;
+
         tx.execute(
-            "INSERT OR REPLACE INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, category_id, is_favorite, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR REPLACE INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 password.id,
                 password.title,
@@ -359,6 +378,8 @@ pub async fn import_data(
                 encrypted_password,
                 password.url,
                 encrypted_notes,
+                extra_fields_plain,
+                extra_fields_encrypted,
                 password.category,
                 password.is_favorite as i32,
                 password.created_at,

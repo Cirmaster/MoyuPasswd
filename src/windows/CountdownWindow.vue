@@ -3,6 +3,8 @@
 
   在鼠标位置显示的倒计时，用于剪贴板清除。
   点击数字取消倒计时并关闭窗口。
+  后端命中终端注入黑名单时发 terminal-inject-confirm 事件，
+  本窗口扩成提示条告知用户「再按 Ctrl+V 确认」。
 -->
 
 <script setup lang="ts">
@@ -11,8 +13,60 @@ import { ref, onMounted, onUnmounted } from 'vue'
 /** 剩余秒数 */
 const remaining = ref(10)
 
+/** 终端二次确认提示（命中注入黑名单时后端触发） */
+const confirmHint = ref(false)
+
 /** 计时器 */
 let timer: ReturnType<typeof setInterval> | null = null
+
+/** 提示条自动收起计时器 */
+let hintTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 圆点原始尺寸（提示条收起时恢复） */
+const DOT_SIZE = { width: 16, height: 16 }
+
+/** 提示条尺寸 */
+const HINT_SIZE = { width: 200, height: 24 }
+
+/**
+ * 调整窗口尺寸（圆点 ⇄ 提示条）
+ */
+const resizeWindow = async (size: { width: number; height: number }) => {
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const { LogicalSize } = await import('@tauri-apps/api/dpi')
+    await getCurrentWindow().setSize(new LogicalSize(size.width, size.height))
+  } catch (e) {
+    console.warn('调整窗口尺寸失败:', e)
+  }
+}
+
+/**
+ * 显示终端二次确认提示条，5 秒后自动收起（与后端确认窗口 TTL 一致）
+ */
+const showConfirmHint = async () => {
+  confirmHint.value = true
+  await resizeWindow(HINT_SIZE)
+
+  if (hintTimer) clearTimeout(hintTimer)
+  hintTimer = setTimeout(() => {
+    hideConfirmHint()
+  }, 5000)
+}
+
+/**
+ * 收起提示条并恢复圆点尺寸
+ */
+const hideConfirmHint = async () => {
+  if (hintTimer) {
+    clearTimeout(hintTimer)
+    hintTimer = null
+  }
+  if (confirmHint.value) {
+    confirmHint.value = false
+    await resizeWindow(DOT_SIZE)
+  }
+}
 
 /**
  * 开始倒计时
@@ -25,6 +79,11 @@ const startCountdown = (seconds: number = 10) => {
     clearInterval(timer)
     timer = null
   }
+
+  // 每次显示强制复位为圆点尺寸：治愈任何卡住的窗口尺寸
+  // （提示条扩窗后复位失败等场景；圆点内容钉左上角，尺寸对了就贴着光标）
+  hideConfirmHint()
+  resizeWindow(DOT_SIZE)
 
   remaining.value = seconds
 
@@ -124,7 +183,14 @@ onMounted(async () => {
     // 监听重置倒计时事件
     await listen<{ seconds: number }>('reset-countdown', (event) => {
       console.log('Received reset-countdown event:', event.payload)
+      hideConfirmHint()
       startCountdown(event.payload.seconds || 10)
+    })
+
+    // 监听终端注入二次确认提示（命中黑名单时后端触发）
+    await listen<{ process: string }>('terminal-inject-confirm', (event) => {
+      console.log('Received terminal-inject-confirm event:', event.payload)
+      showConfirmHint()
     })
 
     // 监听取消倒计时事件
@@ -149,12 +215,21 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopCountdown()
+  if (hintTimer) {
+    clearTimeout(hintTimer)
+    hintTimer = null
+  }
 })
 </script>
 
 <template>
   <div class="countdown-container" @click="handleClick">
-    <div class="countdown-circle">
+    <!-- 终端二次确认提示条 -->
+    <div v-if="confirmHint" class="confirm-hint">
+      目标是终端，再按 Ctrl+V 确认
+    </div>
+    <!-- 默认倒计时圆点 -->
+    <div v-else class="countdown-circle">
       <span class="countdown-number">{{ remaining }}</span>
     </div>
   </div>
@@ -168,8 +243,8 @@ onUnmounted(() => {
 }
 
 html, body {
-  width: 16px;
-  height: 16px;
+  width: 100%;
+  height: 100%;
   overflow: hidden;
   background: transparent;
   -webkit-app-region: no-drag;
@@ -178,11 +253,13 @@ html, body {
 
 <style scoped>
 .countdown-container {
-  width: 16px;
-  height: 16px;
+  width: 100%;
+  height: 100%;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  /* 钉在窗口左上角：光标跟随锚定的是窗口左上角（cursor+15px），
+     内容居中会在窗口大于 16×16 时（如提示条复位失败）让圆点飘离光标 */
+  align-items: flex-start;
+  justify-content: flex-start;
   background: transparent;
   cursor: pointer;
   user-select: none;
@@ -209,5 +286,18 @@ html, body {
   font-weight: 700;
   color: #ffffff;
   font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.confirm-hint {
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: rgba(217, 119, 6, 0.95);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 24px;
+  white-space: nowrap;
+  overflow: hidden;
 }
 </style>

@@ -427,7 +427,18 @@ const handleLock = async () => {
 
         <!-- 密码列表表格 -->
         <div class="flex-1 overflow-auto p-4">
-          <Table>
+          <!-- table-fixed 固定列宽分配：内容超长只截断（title 显全文），不再横向撑破表格 -->
+          <Table class="table-fixed">
+            <colgroup>
+              <!-- 名称吃剩余宽度；其余列定宽，总宽适配 900px 窗口下的 ~676px 内容区 -->
+              <col />
+              <col class="w-[22%]" />
+              <col class="w-[104px]" />
+              <col class="w-[84px]" />
+              <col class="w-[88px]" />
+              <!-- 操作列 = 两个 icon 按钮 72px + 间距 4px + 单元格 p-2 内边距 16px，再留 4px 余量 -->
+              <col class="w-[96px]" />
+            </colgroup>
             <TableHeader>
               <TableRow>
                 <TableHead>名称</TableHead>
@@ -435,18 +446,20 @@ const handleLock = async () => {
                 <TableHead>密码</TableHead>
                 <TableHead>分类</TableHead>
                 <TableHead>更新时间</TableHead>
-                <TableHead class="text-right">操作</TableHead>
+                <!-- sticky 列需要不透明背景遮住滚动内容 -->
+                <TableHead class="text-center sticky right-0 bg-background">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               <TableRow
                 v-for="item in filteredPasswords"
                 :key="item.id"
+                class="group"
               >
-                <TableCell class="font-medium">
-                  <div class="flex items-center gap-2">
+                <TableCell class="font-medium overflow-hidden">
+                  <div class="flex items-center gap-2 min-w-0">
                     <button
-                      class="text-muted-foreground hover:text-yellow-500 transition-colors"
+                      class="shrink-0 text-muted-foreground hover:text-yellow-500 transition-colors"
                       @click="toggleFavorite(item.id)"
                     >
                       <svg
@@ -460,14 +473,14 @@ const handleLock = async () => {
                         <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
                       </svg>
                     </button>
-                    {{ item.title }}
+                    <span class="truncate" :title="item.title">{{ item.title }}</span>
                   </div>
                 </TableCell>
-                <TableCell>
-                  <div class="flex items-center gap-2">
-                    <span>{{ item.username }}</span>
+                <TableCell class="overflow-hidden">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="truncate" :title="item.username">{{ item.username }}</span>
                     <button
-                      class="text-muted-foreground hover:text-foreground transition-colors"
+                      class="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                       @click="(e) => copyToClipboard(item.username, e)"
                     >
                       <svg
@@ -484,16 +497,17 @@ const handleLock = async () => {
                     </button>
                   </div>
                 </TableCell>
-                <TableCell>
+                <TableCell class="overflow-hidden">
                   <div class="flex items-center gap-2">
-                    <span>••••••••</span>
+                    <span class="shrink-0 text-muted-foreground">••••</span>
                     <PasswordStrength
                       v-if="item.password_strength"
                       :level="item.password_strength"
-                      class="w-20"
+                      compact
+                      class="w-10 shrink-0"
                     />
                     <button
-                      class="text-muted-foreground hover:text-foreground transition-colors"
+                      class="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                       @click="(e) => copyPasswordViaBackend(item.id, e)"
                     >
                       <svg
@@ -510,16 +524,24 @@ const handleLock = async () => {
                     </button>
                   </div>
                 </TableCell>
-                <TableCell>
-                  <Badge variant="secondary">
+                <TableCell class="overflow-hidden">
+                  <Badge
+                    variant="secondary"
+                    class="block max-w-full truncate"
+                    :title="categories.find(c => c.id === item.category)?.name || item.category"
+                  >
                     {{ categories.find(c => c.id === item.category)?.name || item.category }}
                   </Badge>
                 </TableCell>
-                <TableCell class="text-muted-foreground text-sm">
-                  {{ formatTimestamp(item.updated_at) }}
+                <TableCell class="text-muted-foreground text-sm overflow-hidden">
+                  <span class="truncate block" :title="formatTimestamp(item.updated_at)">
+                    {{ formatTimestamp(item.updated_at) }}
+                  </span>
                 </TableCell>
-                <TableCell class="text-right">
-                  <div class="flex items-center justify-end gap-1">
+                <!-- 操作列钉在右侧：任何情况下编辑/删除都可见；
+                     group-hover 同步行悬停高亮（sticky 的不透明底色会盖住行 hover） -->
+                <TableCell class="sticky right-0 bg-background group-hover:bg-muted/50">
+                  <div class="flex items-center justify-center gap-1">
                     <Button variant="ghost" size="icon" @click="openEditDialog(item)">
                       <svg
                         xmlns="http://www.w3.org/2000/svg"

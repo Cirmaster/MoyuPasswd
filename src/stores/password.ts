@@ -27,6 +27,19 @@ import { ref, computed } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 
 /**
+ * 自定义字段接口定义
+ * 一条密码可携带任意多个附加字段（如数据库连接地址/端口/连接命令）
+ */
+export interface CustomField {
+  /** 字段名，如 "连接地址" */
+  label: string
+  /** 字段值（列表响应中敏感字段为空串，详情解密后回填） */
+  value: string
+  /** 是否敏感（敏感字段值加密存储，仅详情下发明文） */
+  sensitive: boolean
+}
+
+/**
  * 密码项接口定义
  * 描述单条密码记录的数据结构
  */
@@ -45,6 +58,8 @@ export interface PasswordItem {
   notes?: string
   /** 是否有备注（列表用；备注明文按需通过 get_password_detail 获取） */
   has_notes?: boolean
+  /** 自定义字段（列表中敏感字段 value 为空串） */
+  extra_fields?: CustomField[]
   /** 所属分类 ID */
   category: string
   /** 是否收藏 */
@@ -79,6 +94,7 @@ interface NewPassword {
   password: string
   url?: string
   notes?: string
+  extra_fields?: CustomField[]
   category: string
   is_favorite: boolean
 }
@@ -87,6 +103,7 @@ interface NewPassword {
  * 更新密码请求
  *
  * url/notes 三层语义：字段缺失=不修改、null=清空、字符串=赋值
+ * extra_fields 三层语义：字段缺失=不修改、null/[]=清空、数组=整体替换
  */
 interface UpdatePassword {
   title?: string
@@ -94,6 +111,7 @@ interface UpdatePassword {
   password?: string
   url?: string | null
   notes?: string | null
+  extra_fields?: CustomField[] | null
   category?: string
   is_favorite?: boolean
 }
@@ -159,14 +177,18 @@ export const usePasswordStore = defineStore('password', () => {
       list = list.filter((p) => p.category === activeCategory.value)
     }
 
-    // 按搜索关键词过滤
+    // 按搜索关键词过滤（标题/用户名/URL/自定义字段；敏感字段值不参与——列表里本来就是空串）
     if (searchQuery.value) {
       const query = searchQuery.value.toLowerCase()
       list = list.filter(
         (p) =>
           p.title.toLowerCase().includes(query) ||
           p.username.toLowerCase().includes(query) ||
-          p.url?.toLowerCase().includes(query),
+          p.url?.toLowerCase().includes(query) ||
+          p.extra_fields?.some(
+            (f) =>
+              f.label.toLowerCase().includes(query) || f.value.toLowerCase().includes(query),
+          ),
       )
     }
 
