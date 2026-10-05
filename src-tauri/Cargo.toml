@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.2.0"
+version = "0.3.0"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -24,12 +24,12 @@ log = "0.4"
 tauri = { version = "2.11.3", features = ["tray-icon"] }
 tauri-plugin-log = "2"
 
-# Tauri 插件
-tauri-plugin-global-shortcut = "2"
-tauri-plugin-clipboard-manager = "2"
-tauri-plugin-autostart = "2"
-tauri-plugin-notification = "2"
-tauri-plugin-shell = "2"
+# Tauri 插件（版本需与 package.json 中 @tauri-apps/plugin-* 保持一致，否则 tauri build 校验失败）
+tauri-plugin-global-shortcut = "=2.3.2"
+tauri-plugin-clipboard-manager = "=2.3.2"
+tauri-plugin-autostart = "=2.5.1"
+tauri-plugin-notification = "=2.3.3"
+tauri-plugin-shell = "=2.3.5"
 tauri-plugin-biometry = "0.3.0-rc.3"
 
 # 数据库（SQLCipher 加密）
