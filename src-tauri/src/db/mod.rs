@@ -13,7 +13,8 @@
 //!
 //! - `master_password`: 预留（凭证已迁移至独立元数据文件）
 //! - `passwords`: 存储加密的密码数据
-//! - `categories`: 存储密码分类
+//! - `password_tags`: 存储密码标签（明文，含排序号）
+//! - `categories`: 存储密码分类（`parent_id` 支持分类树）
 //! - `settings`: 存储应用设置
 
 use rusqlite::Connection;
@@ -314,6 +315,37 @@ fn get_migrations() -> Vec<Migration> {
                 -- extra_fields_encrypted: 敏感字段 value 的 AES-256-GCM 密文（JSON，仅含 order + value）
                 ALTER TABLE passwords ADD COLUMN extra_fields_plain TEXT;
                 ALTER TABLE passwords ADD COLUMN extra_fields_encrypted TEXT;
+            ",
+        },
+        Migration {
+            version: 8,
+            description: "add_tags_and_usage",
+            sql: "
+                -- 标签表：标签为明文（非机密，仅作分类元数据），随 password_id 关联；
+                -- sort_order 保留用户录入顺序，软删除密码不级联删除标签（保证可恢复性一致）
+                CREATE TABLE IF NOT EXISTS password_tags (
+                    password_id TEXT NOT NULL,
+                    tag TEXT NOT NULL,
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (password_id, tag)
+                );
+                -- 标签按大小写不敏感全局分组/查询
+                CREATE INDEX IF NOT EXISTS idx_password_tags_tag ON password_tags(tag COLLATE NOCASE);
+                CREATE INDEX IF NOT EXISTS idx_password_tags_password ON password_tags(password_id);
+
+                -- 使用记录：复制/注入密码时更新，支撑「最近使用」与「使用频率」
+                ALTER TABLE passwords ADD COLUMN last_used_at INTEGER;
+                ALTER TABLE passwords ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;
+            ",
+        },
+        Migration {
+            version: 9,
+            description: "add_category_tree",
+            sql: "
+                -- 分类树：parent_id 为 NULL 表示顶级分类；
+                -- 不建外键（删除/防环逻辑在命令层兜底，避免影响已有迁移序列）
+                ALTER TABLE categories ADD COLUMN parent_id TEXT;
+                CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id);
             ",
         },
     ]

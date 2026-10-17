@@ -6,12 +6,15 @@
 
   安全设计：
   - 每次显示时实时检查锁定状态
-  - 不缓存密码数据，每次从后端实时获取
+  - 不缓存密码数据，每次按键都直接调用后端 get_passwords 查询当前页
   - 锁定后立即清除本地数据
 
   功能：
-  - 搜索标题/用户名/URL/自定义字段（明文字段）
-  - ↵ 复制密码（注入式，密码不进剪贴板）
+  - 搜索、排序、分页全部由后端完成（get_passwords）：空格分词 AND、原文 + 中文拼音全拼/简拼、
+    匹配标题/用户名/URL/标签/分类名/自定义字段；前端只展示返回的当前页（固定 8 条）
+  - 结果行展示标签小徽章（最多 3 个 +N）与分类名（分类名一次轻量获取，失败降级显示分类 id）
+  - ↵ 复制密码（注入式，密码不进剪贴板；使用记录由后端 copy_password_to_clipboard 自动登记）
+  - 复制用户名后异步调用 touch_password_usage 记录使用（fire-and-forget，失败静默）
   - →/Tab 或「详情」按钮展开字段面板，按字段复制（含敏感字段，按需解密）
 -->
 
@@ -72,8 +75,15 @@ const toast = ref({
   message: '',
 })
 
-/** 搜索结果（不缓存，每次实时查询） */
-const results = ref<Array<{
+/**
+ * 独立小窗的搜索结果类型
+ *
+ * 对应后端 get_passwords 的返回结构，本次新增：
+ * - tags：标签明文列表（不参与加密）
+ * - last_used_at：最近使用时间（毫秒时间戳，从未使用为 null）
+ * - use_count：使用次数
+ */
+interface QuickSearchResult {
   id: string
   title: string
   username: string
@@ -82,7 +92,37 @@ const results = ref<Array<{
   extra_fields?: CustomField[]
   category: string
   is_favorite: boolean
-}>>([])
+  /** 标签列表（明文元数据） */
+  tags: string[]
+  /** 最近使用时间（毫秒时间戳） */
+  last_used_at?: number | null
+  /** 使用次数 */
+  use_count: number
+}
+
+/** 搜索结果（不缓存，每次实时查询） */
+const results = ref<QuickSearchResult[]>([])
+
+/** 每次查询的结果条数（小窗固定 8 条） */
+const PAGE_SIZE = 8
+
+/**
+ * 后端 get_passwords 的分页返回（契约 §11.2 PasswordPage）
+ * 前端只使用 items，其余字段保留以贴合后端结构。
+ */
+interface PasswordPage {
+  /** 当前页数据（列表零解密：password 为空串） */
+  items: QuickSearchResult[]
+  /** 过滤后的总条数 */
+  total: number
+  /** 实际返回页码（越界已由后端钳制） */
+  page: number
+  /** 每页条数 */
+  page_size: number
+}
+
+/** 请求序号：防止慢的旧响应覆盖新响应（每次按键都会发起查询） */
+let requestSeq = 0
 
 /** 当前展开详情面板的条目 ID */
 const expandedId = ref<string | null>(null)
@@ -92,6 +132,53 @@ const detailFields = ref<Record<string, CustomField[]>>({})
 
 /** 详情加载中 */
 const detailLoading = ref(false)
+
+/**
+ * 分类 id → 名称映射
+ *
+ * 仅分类名称这一类元数据（非密码明文），用于结果行展示分类名；
+ * 不缓存任何密码条目数据。
+ */
+const categoryMap = ref<Record<string, string>>({})
+
+/** 分类名是否已成功加载（失败保持 false，下次窗口显示/聚焦时重试） */
+const categoryMapLoaded = ref(false)
+
+/**
+ * 加载分类名称映射
+ *
+ * 轻量元数据查询，失败时静默降级（结果行退回显示分类 id），不影响搜索。
+ */
+const loadCategoryNames = async () => {
+  try {
+    const list = await invoke<Array<{ id: string; name: string }>>('get_categories')
+    const map: Record<string, string> = {}
+    for (const category of list) {
+      map[category.id] = category.name
+    }
+    categoryMap.value = map
+    categoryMapLoaded.value = true
+  } catch (e) {
+    // 分类名只用于展示：失败不阻塞搜索，降级显示分类 id
+    console.warn('加载分类名称失败:', e)
+    categoryMap.value = {}
+    categoryMapLoaded.value = false
+  }
+}
+
+/**
+ * 分类展示名（映射缺失/加载失败时退回分类 id，避免出现空白）
+ * @param category - 分类 ID
+ */
+const categoryLabel = (category: string): string => categoryMap.value[category] ?? category
+
+/**
+ * 标签兜底读取
+ *
+ * 契约中 tags 为必有字段；这里兜底空数组，兼容后端迁移尚未完成时的旧响应。
+ * @param item - 结果条目
+ */
+const tagsOf = (item: QuickSearchResult): string[] => item.tags ?? []
 
 /**
  * 加载设置（剪贴板清除时间等）
@@ -108,31 +195,47 @@ const loadSettings = async () => {
 }
 
 /**
- * 实时查询后端（不缓存数据）
- * 每次都直接查询后端，由后端判断是否允许返回密码
+ * 实时查询后端（不缓存密码数据）
+ *
+ * 搜索、排序、分页全部由后端完成（契约 §11.2）：每次按键都直接请求
+ * get_passwords，取当前页 items 展示，前端不做任何本地过滤/排序。
+ * @param query - 搜索关键词（空串表示「最近使用」）
  */
 const searchPasswords = async (query: string) => {
+  const keyword = query.trim()
+  const seq = ++requestSeq
   loading.value = true
+
   try {
-    // 每次都直接查后端，不缓存
-    const result = await invoke<Array<{
-      id: string
-      title: string
-      username: string
-      password: string
-      url?: string
-      extra_fields?: CustomField[]
-      category: string
-      is_favorite: boolean
-    }>>('get_passwords', {
-      search: query || null,
+    // 每次都直接查后端，不在本地缓存密码数据
+    const page = await invoke<PasswordPage>('get_passwords', {
+      search: keyword || null,
       category: null,
+      tags: null,
+      // 有搜索词按更新时间倒序；空搜索按最近使用倒序（与主窗一致）
+      sortBy: keyword ? 'updated_at' : 'last_used_at',
+      sortOrder: 'desc',
+      page: 1,
+      pageSize: PAGE_SIZE,
     })
 
-    results.value = result.slice(0, 8)
+    // 分类名映射用于结果行展示；首次查询时加载一次（非机密元数据，失败自动降级）
+    if (!categoryMapLoaded.value) {
+      await loadCategoryNames()
+    }
+
+    // 旧请求已被更新的请求取代，丢弃其响应
+    if (seq !== requestSeq) return
+
+    results.value = page?.items ?? []
+    // 结果减少时钳制选中索引，避免键盘操作落在不存在的结果上
+    if (selectedIndex.value > results.value.length - 1) {
+      selectedIndex.value = Math.max(0, results.value.length - 1)
+    }
     // 后端返回成功，说明已解锁
     isUnlocked.value = true
   } catch (e) {
+    if (seq !== requestSeq) return
     console.error('查询密码失败:', e)
     // 后端返回错误，检查是否是未解锁导致的
     const errorMsg = String(e)
@@ -143,7 +246,8 @@ const searchPasswords = async (query: string) => {
       searchQuery.value = ''
     }
   } finally {
-    loading.value = false
+    // 只有最新一次请求负责结束 loading
+    if (seq === requestSeq) loading.value = false
   }
 }
 
@@ -243,9 +347,11 @@ const handleUnlock = async () => {
 }
 
 /**
- * 复制密码并关闭窗口
+ * 复制文本并关闭窗口（用于用户名/单个字段值）
+ * @param text - 要复制的文本
+ * @returns 是否复制成功（用于决定是否记录使用）
  */
-const copyAndClose = async (text: string) => {
+const copyAndClose = async (text: string): Promise<boolean> => {
   try {
     await invoke('copy_text_to_clipboard', { text, clearAfter: clipboardClearTime.value })
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
@@ -263,8 +369,24 @@ const copyAndClose = async (text: string) => {
       const window = getCurrentWindow()
       await window.hide()
     }, 300)
+    return true
   } catch {
     toast.value = { show: true, type: 'error', message: '复制失败' }
+    return false
+  }
+}
+
+/**
+ * 复制用户名并关闭窗口
+ *
+ * 复制成功后异步登记使用记录（fire-and-forget，失败静默，不阻塞窗口关闭）。
+ * 密码复制由后端 copy_password_to_clipboard 自行记录，前端不重复调用。
+ * @param item - 结果条目
+ */
+const copyUsernameByIdAndClose = async (item: QuickSearchResult) => {
+  const copied = await copyAndClose(item.username)
+  if (copied) {
+    void invoke('touch_password_usage', { id: item.id }).catch(() => {})
   }
 }
 
@@ -363,10 +485,10 @@ const handleKeydown = (e: KeyboardEvent) => {
     return
   }
 
-  // 上下导航
+  // 上下导航（无结果时保持 0，避免选中索引悬空）
   if (e.key === 'ArrowDown') {
     e.preventDefault()
-    selectedIndex.value = Math.min(selectedIndex.value + 1, results.value.length - 1)
+    selectedIndex.value = Math.min(selectedIndex.value + 1, Math.max(0, results.value.length - 1))
     scrollToSelected()
   } else if (e.key === 'ArrowUp') {
     e.preventDefault()
@@ -441,12 +563,17 @@ onMounted(async () => {
     masterPassword.value = ''
     expandedId.value = null
     detailFields.value = {}
+    // 分类名映射一并清空，解锁后重新加载
+    categoryMap.value = {}
+    categoryMapLoaded.value = false
   })
 
   // 监听窗口显示事件（每次窗口从隐藏变为显示时触发）
   await listen('window-shown', async () => {
     // 重新检查系统认证状态（可能在设置中刚启用）
     await checkSystemAuth()
+    // 分类可能刚在设置中调整过：下次搜索时重新拉取分类名映射
+    categoryMapLoaded.value = false
     await checkUnlockStatus()
     // 不自动尝试系统认证，让用户主动选择
   })
@@ -564,7 +691,7 @@ onMounted(async () => {
         <input
           v-model="searchQuery"
           type="text"
-          placeholder="搜索密码..."
+          placeholder="搜索名称 / 用户名 / 网址 / 标签 / 拼音…"
           class="flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/50"
           autofocus
         />
@@ -600,11 +727,43 @@ onMounted(async () => {
               @click="copyPasswordByIdAndClose(item.id)"
               @mouseenter="selectedIndex = index"
             >
-              <!-- 左侧：标题/用户名 -->
+              <!-- 左侧：标题/用户名 + 标签徽章 + 分类名 -->
               <div class="flex-1 min-w-0 flex flex-col justify-center px-4 py-2.5">
                 <div class="text-sm font-medium truncate">{{ item.title }}</div>
                 <div class="text-xs truncate mt-0.5" :class="index === selectedIndex ? 'text-action-foreground/70' : 'text-muted-foreground'">
                   {{ item.username }}
+                </div>
+                <!-- 分类名 + 标签小徽章（最多 3 个，超出显示 +N，title 展示全部标签） -->
+                <div class="mt-1 flex items-center gap-1 min-w-0 overflow-hidden">
+                  <span
+                    v-if="categoryLabel(item.category)"
+                    class="shrink-0 rounded px-1 py-px text-[10px] leading-4"
+                    :class="index === selectedIndex
+                      ? 'bg-action-foreground/15 text-action-foreground/90'
+                      : 'bg-primary/10 text-primary'"
+                    :title="categoryLabel(item.category)"
+                  >
+                    {{ categoryLabel(item.category) }}
+                  </span>
+                  <span
+                    v-for="tag in tagsOf(item).slice(0, 3)"
+                    :key="tag"
+                    class="shrink-0 max-w-[96px] truncate rounded px-1 py-px text-[10px] leading-4"
+                    :class="index === selectedIndex
+                      ? 'bg-action-foreground/10 text-action-foreground/80'
+                      : 'bg-muted text-muted-foreground'"
+                    :title="tag"
+                  >
+                    #{{ tag }}
+                  </span>
+                  <span
+                    v-if="tagsOf(item).length > 3"
+                    class="shrink-0 text-[10px] leading-4"
+                    :class="index === selectedIndex ? 'text-action-foreground/70' : 'text-muted-foreground'"
+                    :title="tagsOf(item).join('、')"
+                  >
+                    +{{ tagsOf(item).length - 3 }}
+                  </span>
                 </div>
               </div>
               <!-- 右侧操作：三档强调梯度（安静→中→主操作），选中行自动切换为反相芯片 -->
@@ -620,13 +779,13 @@ onMounted(async () => {
                 >
                   {{ expandedId === item.id ? '收起' : '详情' }}
                 </button>
-                <!-- 复制用户（中等档） -->
+                <!-- 复制用户（中等档；成功后异步记录使用） -->
                 <button
                   class="w-[76px] flex items-center justify-center text-xs font-medium transition-colors"
                   :class="index === selectedIndex
                     ? 'bg-action-foreground/20 text-action-foreground hover:bg-action-foreground/35'
                     : 'bg-primary/10 text-primary hover:bg-primary/25'"
-                  @click.stop="copyAndClose(item.username)"
+                  @click.stop="copyUsernameByIdAndClose(item)"
                 >
                   复制用户
                 </button>

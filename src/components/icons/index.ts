@@ -13,7 +13,11 @@
  */
 
 import IconArrowLeft from '@/assets/svg/arrow-left.svg'
+import IconArrowUp from '@/assets/svg/arrow-up.svg'
+import IconArrowDown from '@/assets/svg/arrow-down.svg'
 import IconCheckCircle from '@/assets/svg/check-circle.svg'
+import IconChevronRight from '@/assets/svg/chevron-right.svg'
+import IconChevronDown from '@/assets/svg/chevron-down.svg'
 import IconClock from '@/assets/svg/clock.svg'
 import IconClose from '@/assets/svg/close.svg'
 import IconCopy from '@/assets/svg/copy.svg'
@@ -32,12 +36,17 @@ import IconSpinner from '@/assets/svg/spinner.svg'
 import IconSquarePen from '@/assets/svg/square-pen.svg'
 import IconStar from '@/assets/svg/star.svg'
 import IconSun from '@/assets/svg/sun.svg'
+import IconTag from '@/assets/svg/tag.svg'
 import IconTrash from '@/assets/svg/trash.svg'
 import IconXCircle from '@/assets/svg/x-circle.svg'
 
 export {
   IconArrowLeft,
+  IconArrowUp,
+  IconArrowDown,
   IconCheckCircle,
+  IconChevronRight,
+  IconChevronDown,
   IconClock,
   IconClose,
   IconCopy,
@@ -56,6 +65,7 @@ export {
   IconSquarePen,
   IconStar,
   IconSun,
+  IconTag,
   IconTrash,
   IconXCircle,
 }

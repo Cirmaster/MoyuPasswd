@@ -285,17 +285,23 @@ pub fn run() {
             commands::unlock_with_system_auth,
             // 密码命令
             commands::get_passwords,
+            commands::get_password_stats,
             commands::get_password_detail,
             commands::add_password,
             commands::update_password,
             commands::delete_password,
             commands::toggle_favorite,
             commands::copy_password_to_clipboard,
+            commands::touch_password_usage,
+            commands::get_tags,
+            commands::rename_tag,
+            commands::delete_tag,
             // 分类命令
             commands::get_categories,
             commands::add_category,
             commands::update_category,
             commands::delete_category,
+            commands::reorder_categories,
             // 设置命令
             commands::get_settings,
             commands::get_setting,

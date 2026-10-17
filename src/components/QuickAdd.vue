@@ -2,7 +2,7 @@
   QuickAdd.vue - 快速添加密码弹窗
 
   全局快捷键 Ctrl+Shift+N 呼出，快速保存当前网站密码。
-  简化版的密码添加表单，只包含必要字段（含可选自定义字段）。
+  简化版的密码添加表单，只包含必要字段（含可选自定义字段、分类与标签）。
 
   @example
   ```vue
@@ -11,8 +11,8 @@
 -->
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { ref, computed, onMounted } from 'vue'
+import { storeToRefs } from 'pinia'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -26,6 +26,7 @@ import {
 } from '@/components/ui/dialog'
 import { usePasswordStore, type CustomField } from '@/stores/password'
 import CustomFieldsEditor from './CustomFieldsEditor.vue'
+import TagInput from './TagInput.vue'
 import Toast from './Toast.vue'
 
 /**
@@ -47,7 +48,29 @@ const emit = defineEmits<{
 
 /** 密码 Store */
 const passwordStore = usePasswordStore()
+const { categories, categoryTree, tags } = storeToRefs(passwordStore)
 const { addPassword } = passwordStore
+
+/** 标签建议列表：来自全局标签（供 TagInput 匹配提示） */
+const tagSuggestions = computed(() => tags.value.map((t) => t.name))
+
+/**
+ * 分类下拉选项
+ * 优先使用分类树（按 depth 缩进展示层级）；分类树尚未加载时退回扁平分类列表
+ */
+const categoryOptions = computed(() => {
+  if (categoryTree.value.length > 0) {
+    return categoryTree.value.map((node) => ({
+      id: node.id,
+      name: node.name,
+      depth: node.depth,
+    }))
+  }
+  // 兼容分类树尚未加载的场景（过滤掉"全部"/"收藏"两个虚拟分类）
+  return categories.value
+    .filter((c) => c.id !== 'all' && c.id !== 'favorite')
+    .map((c) => ({ id: c.id, name: c.name, depth: 0 }))
+})
 
 /** 表单数据 */
 const form = ref({
@@ -56,6 +79,8 @@ const form = ref({
   password: '',
   url: '',
   extra_fields: [] as CustomField[],
+  category: 'other', // 分类，默认为"其他"
+  tags: [] as string[], // 标签（0~20 个）
 })
 
 /** Toast 提示状态 */
@@ -78,6 +103,8 @@ const resetForm = () => {
     password: '',
     url: '',
     extra_fields: [],
+    category: 'other',
+    tags: [],
   }
 }
 
@@ -100,7 +127,8 @@ const handleSave = async () => {
       url: form.value.url || undefined,
       notes: undefined,
       extra_fields: form.value.extra_fields,
-      category: 'other',
+      category: form.value.category,
+      tags: [...form.value.tags],
       is_favorite: false,
     })
 
@@ -178,12 +206,42 @@ onMounted(async () => {
             />
           </div>
 
+          <!-- 网址 + 分类：两列并排 -->
+          <div class="grid grid-cols-2 gap-4">
+            <div class="grid gap-2">
+              <Label for="quick-url">网址</Label>
+              <Input
+                id="quick-url"
+                v-model="form.url"
+                placeholder="https://example.com"
+              />
+            </div>
+            <div class="grid gap-2">
+              <Label for="quick-category">分类</Label>
+              <select
+                id="quick-category"
+                v-model="form.category"
+                class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              >
+                <!-- 分类树按层级缩进（depth 前缀），层级不限 -->
+                <option
+                  v-for="opt in categoryOptions"
+                  :key="opt.id"
+                  :value="opt.id"
+                >
+                  {{ '— '.repeat(opt.depth) }}{{ opt.name }}
+                </option>
+              </select>
+            </div>
+          </div>
+
+          <!-- 标签字段（可选）：可输入新标签，也可从已有标签中选择 -->
           <div class="grid gap-2">
-            <Label for="quick-url">网址</Label>
-            <Input
-              id="quick-url"
-              v-model="form.url"
-              placeholder="https://example.com"
+            <Label>标签</Label>
+            <TagInput
+              v-model="form.tags"
+              :suggestions="tagSuggestions"
+              placeholder="输入标签后回车，可添加多个"
             />
           </div>
 

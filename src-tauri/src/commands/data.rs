@@ -3,6 +3,11 @@
 //! 处理数据的导入导出操作。
 //! 导出使用导出密码加密（AES-256-GCM，密钥由 Argon2id 派生）；
 //! 导入自动识别加密格式与历史明文格式。
+//!
+//! 导出/导入包含标签与分类层级；旧导出文件缺字段时按默认值（空标签/顶级分类）处理，
+//! 保持 `moyu-passwd-encrypted-v1` 格式向后兼容。
+
+use std::collections::HashMap;
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -26,7 +31,7 @@ pub struct ExportData {
 /// 导出密码项
 ///
 /// 导出文件是解密后的全量内容（密码/备注/敏感字段都已解密），
-/// `extra_fields` 对旧版本导出文件向后兼容（缺失视为空）。
+/// `extra_fields`/`tags` 对旧版本导出文件向后兼容（缺失视为空）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportPasswordItem {
     pub id: String,
@@ -37,6 +42,9 @@ pub struct ExportPasswordItem {
     pub notes: Option<String>,
     #[serde(default)]
     pub extra_fields: Vec<CustomField>,
+    /// 标签（明文，按录入顺序；旧导出文件缺失视为空）
+    #[serde(default)]
+    pub tags: Vec<String>,
     pub category: String,
     pub is_favorite: bool,
     pub created_at: i64,
@@ -50,6 +58,9 @@ pub struct ExportCategory {
     pub name: String,
     pub icon: Option<String>,
     pub sort_order: i32,
+    /// 父分类 ID（旧导出文件缺失视为顶级分类）
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 /// 导入数据请求
@@ -194,6 +205,20 @@ pub async fn export_data(
         rows
     };
 
+    // 预取所有标签（按 sort_order、rowid 保序），避免逐条查询
+    let mut tags_map: HashMap<String, Vec<String>> = HashMap::new();
+    {
+        let mut stmt = conn
+            .prepare("SELECT password_id, tag FROM password_tags ORDER BY password_id, sort_order, rowid")
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let password_id: String = row.get(0).map_err(|e| e.to_string())?;
+            let tag: String = row.get(1).map_err(|e| e.to_string())?;
+            tags_map.entry(password_id).or_default().push(tag);
+        }
+    }
+
     // 解密并转换
     let mut export_passwords = Vec::new();
     for (id, title, username, password_encrypted, url, notes_encrypted, extra_plain, extra_enc, category_id, is_favorite, created_at, updated_at) in passwords {
@@ -208,6 +233,8 @@ pub async fn export_data(
             extra_enc.as_deref(),
             Some(&aes_key),
         )?;
+        // 标签：明文随导出（按录入顺序）
+        let tags = tags_map.remove(&id).unwrap_or_default();
 
         export_passwords.push(ExportPasswordItem {
             id,
@@ -217,6 +244,7 @@ pub async fn export_data(
             url,
             notes,
             extra_fields,
+            tags,
             category: category_id,
             is_favorite: is_favorite != 0,
             created_at,
@@ -224,10 +252,10 @@ pub async fn export_data(
         });
     }
 
-    // 查询所有分类
+    // 查询所有分类（含分类树父节点）
     let categories = {
         let mut stmt = conn
-            .prepare("SELECT id, name, icon, sort_order FROM categories ORDER BY sort_order")
+            .prepare("SELECT id, name, icon, sort_order, parent_id FROM categories ORDER BY sort_order")
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map([], |row| {
@@ -236,6 +264,7 @@ pub async fn export_data(
                     name: row.get(1)?,
                     icon: row.get(2)?,
                     sort_order: row.get(3)?,
+                    parent_id: row.get(4)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -333,13 +362,20 @@ pub async fn import_data(
         replaced: 0,
     };
 
-    // 导入分类（id 已存在则跳过）
+    // 导入分类（id 已存在则跳过；parent_id 先按导出值写入，全部插入后统一修正悬空引用）
     for category in &import_data.categories {
         tx.execute(
-            "INSERT OR IGNORE INTO categories (id, name, icon, sort_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![category.id, category.name, category.icon, category.sort_order, now],
+            "INSERT OR IGNORE INTO categories (id, name, icon, sort_order, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![category.id, category.name, category.icon, category.sort_order, now, category.parent_id],
         ).map_err(|e| e.to_string())?;
     }
+
+    // 分类全部插入后，把指向不存在分类的 parent_id 置为 NULL（旧导出文件无该字段时天然为 NULL）
+    tx.execute(
+        "UPDATE categories SET parent_id = NULL
+         WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM categories)",
+        [],
+    ).map_err(|e| e.to_string())?;
 
     // 导入密码（按 id 判重，冲突策略决定跳过或覆盖）
     for password in &import_data.passwords {
@@ -386,6 +422,10 @@ pub async fn import_data(
                 password.updated_at,
             ],
         ).map_err(|e| e.to_string())?;
+
+        // 标签：按后端规则规范化后整体重建（replace 冲突时先删旧标签再插新，旧文件无标签则清空）
+        let tags = password::normalize_tags(&password.tags);
+        password::replace_tags(&tx, &password.id, &tags)?;
 
         if exists {
             result.replaced += 1;

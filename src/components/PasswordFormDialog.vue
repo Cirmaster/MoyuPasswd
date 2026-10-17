@@ -7,7 +7,7 @@
   2. 编辑模式：editItem 有值，表单填充现有数据
 
   功能：
-  - 名称、用户名、密码、网址、分类、备注等字段
+  - 名称、用户名、密码、网址、分类（分类树缩进下拉）、标签、备注等字段
   - 自定义字段（连接地址/端口/连接命令等，支持敏感加密）
   - 密码字段可调用密码生成器
   - 表单验证（必填字段）
@@ -25,6 +25,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
+import { storeToRefs } from 'pinia'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -39,6 +40,7 @@ import {
 import { usePasswordStore, type PasswordItem, type CustomField } from '@/stores/password'
 import PasswordGenerator from './PasswordGenerator.vue'
 import CustomFieldsEditor from './CustomFieldsEditor.vue'
+import TagInput from './TagInput.vue'
 
 /**
  * 组件 Props 接口
@@ -67,7 +69,29 @@ const emit = defineEmits<{
 
 /** 密码 Store */
 const passwordStore = usePasswordStore()
-const { categories, addPassword, updatePassword, getPasswordDetail } = passwordStore
+const { categories, categoryTree, tags } = storeToRefs(passwordStore)
+const { addPassword, updatePassword, getPasswordDetail } = passwordStore
+
+/** 标签建议列表：来自全局标签（供 TagInput 匹配提示） */
+const tagSuggestions = computed(() => tags.value.map((t) => t.name))
+
+/**
+ * 分类下拉选项
+ * 优先使用分类树（按 depth 缩进展示层级）；分类树尚未加载时退回扁平分类列表
+ */
+const categoryOptions = computed(() => {
+  if (categoryTree.value.length > 0) {
+    return categoryTree.value.map((node) => ({
+      id: node.id,
+      name: node.name,
+      depth: node.depth,
+    }))
+  }
+  // 兼容分类树尚未加载的场景（过滤掉"全部"/"收藏"两个虚拟分类）
+  return categories.value
+    .filter((c) => c.id !== 'all' && c.id !== 'favorite')
+    .map((c) => ({ id: c.id, name: c.name, depth: 0 }))
+})
 
 /**
  * 是否为编辑模式
@@ -87,6 +111,7 @@ const form = ref({
   notes: '',       // 备注
   extra_fields: [] as CustomField[], // 自定义字段（连接地址/端口/连接命令等）
   category: 'other', // 分类，默认为"其他"
+  tags: [] as string[], // 标签（0~20 个，明文存储的第二维分类）
   is_favorite: false, // 是否收藏
 })
 
@@ -103,6 +128,7 @@ const resetForm = () => {
     notes: '',
     extra_fields: [],
     category: 'other',
+    tags: [],
     is_favorite: false,
   }
 }
@@ -137,6 +163,8 @@ watch(
         // 敏感字段值不随列表下发，先用列表数据占位（敏感值为空串），详情载入后覆盖
         extra_fields: (item.extra_fields || []).map((f) => ({ ...f })),
         category: item.category,
+        // 标签随列表下发，编辑时直接回填（无需拉取详情）
+        tags: [...(item.tags ?? [])],
         is_favorite: item.is_favorite,
       }
       // 按需拉取备注明文与敏感字段值（列表零解密）
@@ -190,6 +218,8 @@ const handleSubmit = async () => {
       // 备注/自定义字段未载入完成时不携带对应字段（后端视为不修改），防止误清空原数据
       await updatePassword(props.editItem.id, {
         ...form.value,
+        // 标签随列表下发且编辑时始终整体提交（空数组 = 清空标签）
+        tags: [...form.value.tags],
         notes: notesLoaded.value ? (form.value.notes || null) : undefined,
         extra_fields: fieldsLoaded.value ? form.value.extra_fields : undefined,
       })
@@ -259,13 +289,13 @@ const onPasswordGenerated = (pwd: string) => {
                 v-model="form.category"
                 class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               >
-                <!-- 过滤掉"全部"和"收藏"这两个特殊分类 -->
+                <!-- 分类树按层级缩进（depth 前缀），层级不限 -->
                 <option
-                  v-for="cat in categories.filter(c => c.id !== 'all' && c.id !== 'favorite')"
-                  :key="cat.id"
-                  :value="cat.id"
+                  v-for="opt in categoryOptions"
+                  :key="opt.id"
+                  :value="opt.id"
                 >
-                  {{ cat.name }}
+                  {{ '— '.repeat(opt.depth) }}{{ opt.name }}
                 </option>
               </select>
             </div>
@@ -306,6 +336,16 @@ const onPasswordGenerated = (pwd: string) => {
               id="url"
               v-model="form.url"
               placeholder="https://example.com"
+            />
+          </div>
+
+          <!-- 标签字段（可选，整行）：可输入新标签，也可从已有标签中选择 -->
+          <div class="grid gap-2">
+            <Label>标签</Label>
+            <TagInput
+              v-model="form.tags"
+              :suggestions="tagSuggestions"
+              placeholder="输入标签后回车，可添加多个"
             />
           </div>
 
