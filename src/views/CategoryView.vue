@@ -39,6 +39,7 @@ import {
   IconTrash,
 } from '@/components/icons'
 import ContextMenu from '@/components/ContextMenu.vue'
+import WindowControls from '@/components/WindowControls.vue'
 import { useCategoryDragSort } from '@/composables/useCategoryDragSort'
 import {
   usePasswordStore,
@@ -447,12 +448,15 @@ const handleDeleteTag = async (name: string) => {
 
 <template>
   <div class="min-h-screen bg-background">
-    <!-- 顶部导航 -->
-    <header class="px-4 py-3 flex items-center gap-4">
-      <Button variant="ghost" size="icon" @click="router.push('/home')">
-        <IconArrowLeft class="h-5 w-5" />
-      </Button>
-      <h1 class="text-lg font-semibold">分类管理</h1>
+    <!-- 顶部导航 = 自绘标题栏（h-10 压矮）；拖拽区 + 右侧通栏窗口按钮 -->
+    <header class="h-10 pl-3 flex items-stretch justify-between select-none" data-tauri-drag-region>
+      <div class="flex items-center gap-3">
+        <Button variant="ghost" size="icon-sm" @click="router.push('/home')">
+          <IconArrowLeft class="h-4 w-4" />
+        </Button>
+        <h1 class="text-base font-semibold" data-tauri-drag-region>分类管理</h1>
+      </div>
+      <WindowControls />
     </header>
 
     <!-- 内容区 -->

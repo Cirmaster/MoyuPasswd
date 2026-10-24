@@ -24,8 +24,10 @@ import IconCopy from '@/assets/svg/copy.svg'
 import IconEmpty from '@/assets/svg/empty.svg'
 import IconGrid from '@/assets/svg/grid.svg'
 import IconInfoCircle from '@/assets/svg/info-circle.svg'
+import IconKey from '@/assets/svg/key.svg'
 import IconLoader from '@/assets/svg/loader.svg'
 import IconLock from '@/assets/svg/lock.svg'
+import IconLogoLock from '@/assets/svg/logo-lock.svg'
 import IconMinus from '@/assets/svg/minus.svg'
 import IconMoon from '@/assets/svg/moon.svg'
 import IconPencil from '@/assets/svg/pencil.svg'
@@ -38,6 +40,7 @@ import IconStar from '@/assets/svg/star.svg'
 import IconSun from '@/assets/svg/sun.svg'
 import IconTag from '@/assets/svg/tag.svg'
 import IconTrash from '@/assets/svg/trash.svg'
+import IconTray from '@/assets/svg/tray.svg'
 import IconXCircle from '@/assets/svg/x-circle.svg'
 
 export {
@@ -53,8 +56,10 @@ export {
   IconEmpty,
   IconGrid,
   IconInfoCircle,
+  IconKey,
   IconLoader,
   IconLock,
+  IconLogoLock,
   IconMinus,
   IconMoon,
   IconPencil,
@@ -67,5 +72,6 @@ export {
   IconSun,
   IconTag,
   IconTrash,
+  IconTray,
   IconXCircle,
 }

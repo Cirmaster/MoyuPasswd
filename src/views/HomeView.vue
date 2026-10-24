@@ -61,6 +61,7 @@ import PasswordStrength from '@/components/PasswordStrength.vue'
 import QuickSearch from '@/components/QuickSearch.vue'
 import QuickAdd from '@/components/QuickAdd.vue'
 import ContextMenu from '@/components/ContextMenu.vue'
+import WindowControls from '@/components/WindowControls.vue'
 import Toast from '@/components/Toast.vue'
 import {
   IconArrowDown,
@@ -72,8 +73,10 @@ import {
   IconCopy,
   IconEmpty,
   IconGrid,
+  IconKey,
   IconLock,
-  IconMinus,
+  IconLogoLock,
+  IconTray,
   IconMoon,
   IconPencil,
   IconPlus,
@@ -809,31 +812,35 @@ onMounted(async () => {
 
 <template>
   <div class="h-screen flex flex-col bg-background">
-    <!-- 顶部导航栏（框架层，Islands 风格不与岛面硬分割） -->
-    <header class="px-4 py-3 flex items-center justify-between">
-      <div class="flex items-center gap-2">
-        <IconLock class="h-6 w-6 text-primary-ink" stroke-linecap="round" stroke-linejoin="round" />
-        <h1 class="text-lg font-semibold">MoyuPasswd</h1>
+    <!-- 顶部导航栏 = 自绘标题栏（h-10 压矮，原生标题栏已关闭）；
+         data-tauri-drag-region 区域可拖动窗口，右侧 WindowControls 通栏贴窗边 -->
+    <header class="h-10 pl-3 flex items-stretch justify-between select-none" data-tauri-drag-region>
+      <div class="flex items-center gap-2" data-tauri-drag-region>
+        <IconLogoLock class="h-5 w-5 text-primary-ink" data-tauri-drag-region />
+        <h1 class="text-base font-semibold" data-tauri-drag-region>MoyuPasswd</h1>
       </div>
 
-      <div class="flex items-center gap-2">
-        <Button variant="ghost" size="icon" title="密码生成器" @click="showGenerator = true">
-          <IconGrid class="h-5 w-5" />
-        </Button>
-        <Button variant="ghost" size="icon" title="设置" @click="router.push('/settings')">
-          <IconSettings class="h-5 w-5" />
-        </Button>
-        <Button variant="ghost" size="icon" title="切换主题" @click="toggleTheme">
-          <IconSun v-if="isDark" class="h-5 w-5" />
-          <IconMoon v-else class="h-5 w-5" />
-        </Button>
-        <!-- 最小化到托盘按钮 -->
-        <Button variant="ghost" size="icon" title="最小化到托盘" @click="handleMinimizeToTray">
-          <IconMinus class="h-5 w-5" />
-        </Button>
-        <Button variant="ghost" size="icon" title="锁定" @click="handleLock">
-          <IconLock class="h-5 w-5" />
-        </Button>
+      <div class="flex items-stretch">
+        <div class="flex items-center gap-1">
+          <Button variant="ghost" size="icon-sm" title="密码生成器" @click="showGenerator = true">
+            <IconKey class="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="icon-sm" title="设置" @click="router.push('/settings')">
+            <IconSettings class="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="icon-sm" title="切换主题" @click="toggleTheme">
+            <IconSun v-if="isDark" class="h-4 w-4" />
+            <IconMoon v-else class="h-4 w-4" />
+          </Button>
+          <!-- 最小化到托盘按钮 -->
+          <Button variant="ghost" size="icon-sm" title="最小化到托盘" @click="handleMinimizeToTray">
+            <IconTray class="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="icon-sm" title="锁定" @click="handleLock">
+            <IconLock class="h-4 w-4" />
+          </Button>
+        </div>
+        <WindowControls />
       </div>
     </header>
 

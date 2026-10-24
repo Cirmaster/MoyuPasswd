@@ -21,6 +21,7 @@ import { Input } from '@/components/ui/input'
 import { IconSun, IconMoon, IconLock, IconSpinner, IconLoader } from '@/components/icons'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
+import WindowControls from '@/components/WindowControls.vue'
 import { useTheme } from '@/composables/useTheme'
 
 /** 路由实例，用于页面跳转 */
@@ -268,18 +269,26 @@ const handleSetup = async () => {
   <!-- 全屏居中布局，relative 用于定位主题切换按钮 -->
   <div class="min-h-screen flex items-center justify-center bg-background p-4 relative">
 
-    <!-- 主题切换按钮，固定在右上角 -->
-    <Button
-      variant="ghost"
-      size="icon"
-      class="absolute top-4 right-4"
-      @click="toggleTheme"
-    >
-      <!-- 太阳图标：当处于暗色模式时显示，点击切换到亮色 -->
-      <IconSun v-if="isDark" class="h-5 w-5" stroke-linecap="round" stroke-linejoin="round" />
-      <!-- 月亮图标：当处于亮色模式时显示，点击切换到暗色 -->
-      <IconMoon v-else class="h-5 w-5" stroke-linecap="round" stroke-linejoin="round" />
-    </Button>
+    <!-- 顶部窗口拖拽区（自绘标题栏模式下拖动窗口） -->
+    <div class="absolute top-0 left-0 right-0 h-10" data-tauri-drag-region></div>
+
+    <!-- 右上角：主题切换 + 自绘窗口控制条（通栏按钮贴窗边） -->
+    <div class="absolute top-0 right-0 h-10 flex items-stretch">
+      <div class="flex items-center">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="切换主题"
+          @click="toggleTheme"
+        >
+          <!-- 太阳图标：当处于暗色模式时显示，点击切换到亮色 -->
+          <IconSun v-if="isDark" class="h-4 w-4" stroke-linecap="round" stroke-linejoin="round" />
+          <!-- 月亮图标：当处于亮色模式时显示，点击切换到暗色 -->
+          <IconMoon v-else class="h-4 w-4" stroke-linecap="round" stroke-linejoin="round" />
+        </Button>
+      </div>
+      <WindowControls />
+    </div>
 
     <!-- 主卡片容器 -->
     <Card class="w-full max-w-md">
