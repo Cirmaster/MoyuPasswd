@@ -300,8 +300,16 @@ pub async fn save_settings(
 /// await invoke('set_auto_start', { enable: true });
 /// ```
 #[tauri::command]
-pub async fn set_auto_start(enable: bool, app: tauri::AppHandle) -> ApiResult<()> {
+pub async fn set_auto_start(
+    enable: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
+        // 解锁门禁：开机自启是持久化的系统级行为（写注册表 Run 键），
+        // 锁定状态下不允许修改（防被注入的代码静默开启自启做持久化）
+        crate::commands::auth::require_unlocked(&state)?;
+
         let autostart_manager = app.autolaunch();
 
         if enable {
@@ -330,8 +338,13 @@ pub async fn set_auto_start(enable: bool, app: tauri::AppHandle) -> ApiResult<()
 /// const enabled = await invoke('is_auto_start_enabled');
 /// ```
 #[tauri::command]
-pub async fn is_auto_start_enabled(app: tauri::AppHandle) -> ApiResult<bool> {
+pub async fn is_auto_start_enabled(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> ApiResult<bool> {
     respond(|| -> Result<bool, String> {
+        // 解锁门禁：与 set_auto_start 保持一致（状态查询同样不给锁定态留口子）
+        crate::commands::auth::require_unlocked(&state)?;
         let autostart_manager = app.autolaunch();
         autostart_manager.is_enabled().map_err(|e| e.to_string())
 

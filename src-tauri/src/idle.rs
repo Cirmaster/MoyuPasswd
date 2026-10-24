@@ -18,6 +18,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// 前端通过 `report_activity` 命令更新
 static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 
+/// 上次接受活动上报的时间（Unix 毫秒时间戳），用于限流
+static LAST_REPORT_ACCEPTED: AtomicU64 = AtomicU64::new(0);
+
+/// 活动上报限流间隔（毫秒）
+///
+/// 前端按事件流上报（鼠标移动等高频事件），1 秒的分辨率对「分钟级」的
+/// 锁定阈值足够；限流把伪造/刷上报的 IPC 压力压到最低。
+/// 注意：限流不能根除伪造上报（webview 属信任边界），真正的兜底是
+/// `get_idle_seconds` 的取先到语义——伪造的应用内活动压制不了系统空闲条件。
+const ACTIVITY_REPORT_INTERVAL_MS: u64 = 1000;
+
 /// 初始化空闲检测模块
 ///
 /// 在应用启动时调用，设置初始活动时间
@@ -31,14 +42,27 @@ pub fn init() {
 
 /// 报告用户活动
 ///
-/// 前端每次用户操作时调用此命令
+/// 前端每次用户操作时调用此命令。
+/// 带限流（`ACTIVITY_REPORT_INTERVAL_MS`）：间隔内的重复上报直接丢弃。
 #[tauri::command]
 pub async fn report_activity() -> crate::response::ApiResult<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    LAST_ACTIVITY.store(now, Ordering::SeqCst);
+
+    // 限流：间隔内重复上报直接丢弃（早退不回写，刷上报换不来额外收益）
+    let last = LAST_REPORT_ACCEPTED.load(Ordering::SeqCst);
+    if now.saturating_sub(last) < ACTIVITY_REPORT_INTERVAL_MS {
+        return Ok(crate::response::ApiResponse::ok(()));
+    }
+    // CAS 抢占，防并发调用同时通过限流
+    if LAST_REPORT_ACCEPTED
+        .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        LAST_ACTIVITY.store(now, Ordering::SeqCst);
+    }
     Ok(crate::response::ApiResponse::ok(()))
 }
 
@@ -48,11 +72,21 @@ pub async fn report_activity() -> crate::response::ApiResult<()> {
 /// - 系统空闲：用户离开电脑（全局键鼠无输入）
 /// - 应用内无操作：用户在电脑前但长时间不使用本应用（含只用其他应用的情况）
 ///
-/// 返回两者的较小值；两者都「无法判定」时返回 `u64::MAX`，调用方不应据此锁定。
+/// 取先到 = 取两者「已空闲时长」的**较大值**：较大值先过阈值 ⟺ 任一条件先过阈值。
+/// （此前误用较小值，导致必须两个条件同时过阈值才锁定——
+/// 人在电脑前用其他软件时系统空闲恒为小值，应用内无操作条件被完全压制。）
+///
+/// 某条件「无法判定」（`u64::MAX`）时不参与取值：两者都无法判定时返回
+/// `u64::MAX`，调用方不应据此锁定（fail open，避免误锁）。
 pub fn get_idle_seconds() -> u64 {
     let system_idle = get_system_idle_seconds();
     let app_idle = get_app_idle_seconds();
-    system_idle.min(app_idle)
+    match (system_idle == u64::MAX, app_idle == u64::MAX) {
+        (true, true) => u64::MAX,
+        (true, false) => app_idle,
+        (false, true) => system_idle,
+        (false, false) => system_idle.max(app_idle),
+    }
 }
 
 /// 获取应用内空闲时间（秒）（应用内活动由前端 `report_activity` 上报）

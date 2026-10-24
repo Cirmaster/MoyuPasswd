@@ -267,8 +267,13 @@ pub async fn hide_countdown(app: tauri::AppHandle) -> ApiResult<()> {
 /// await invoke('clear_clipboard');
 /// ```
 #[tauri::command]
-pub async fn clear_clipboard(app: tauri::AppHandle) -> ApiResult<()> {
+pub async fn clear_clipboard(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, crate::state::AppState>,
+) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
+        // 解锁门禁：锁定状态下不允许清空用户剪贴板（防骚扰/破坏）
+        crate::commands::auth::require_unlocked(&state)?;
         crate::clipboard::clear_now(&app)?;
         log::info!("Clipboard cleared");
         Ok(())
