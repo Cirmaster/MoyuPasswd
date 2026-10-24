@@ -228,14 +228,27 @@ impl Database {
             .map_err(|e| format!("读取迁移版本失败: {e}"))?;
 
         // 执行迁移
+        // 每条 migration 的 SQL 与其版本记录包进同一事务：
+        // execute_batch 内多条语句若中途失败（磁盘满/锁冲突），不在事务里
+        // 就会留下半执行状态且版本不记录 → 下次启动重跑整条 migration，
+        // 撞上已执行的 ALTER TABLE 报 duplicate column，应用永久无法启动。
+        // 事务化后：SQL 与版本记录要么同时生效、要么同时回滚，可安全重试。
         let migrations = get_migrations();
         for migration in migrations {
             if migration.version > current_version {
-                conn.execute_batch(migration.sql).map_err(|e| format!("迁移 {} 失败: {}", migration.version, e))?;
-                conn.execute(
+                let tx = conn
+                    .unchecked_transaction()
+                    .map_err(|e| format!("迁移 {} 开启事务失败: {}", migration.version, e))?;
+                tx.execute_batch(migration.sql)
+                    .map_err(|e| format!("迁移 {} 失败: {}", migration.version, e))?;
+                tx.execute(
                     "INSERT INTO _migrations (version, description) VALUES (?1, ?2)",
                     rusqlite::params![migration.version, migration.description],
-                ).map_err(|e| e.to_string())?;
+                )
+                .map_err(|e| format!("迁移 {} 记录版本失败: {}", migration.version, e))?;
+                // 提交点：整条迁移原子生效
+                tx.commit()
+                    .map_err(|e| format!("迁移 {} 提交失败: {}", migration.version, e))?;
             }
         }
 

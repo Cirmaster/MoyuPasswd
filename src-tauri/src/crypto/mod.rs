@@ -275,11 +275,28 @@ pub fn encrypt_aes256gcm(key: &[u8; 32], plaintext: &[u8]) -> Result<EncryptedDa
 ///
 /// 如果解密过程失败，返回 `CryptoError::DecryptError`
 pub fn decrypt_aes256gcm(key: &[u8; 32], encrypted_data: &EncryptedData) -> Result<Vec<u8>, CryptoError> {
+    // 长度校验必须在 Nonce::from_slice 之前：
+    // aes-gcm 的 from_slice 对长度不等于 12 的输入直接 panic，
+    // 而 nonce 可能来自导入文件、DB 损坏行等不可信来源，
+    // 必须归一为错误返回，绝不能让 panic 逸出（会崩溃整个进程）。
+    if encrypted_data.nonce.len() != 12 {
+        return Err(CryptoError::DecryptError(format!(
+            "nonce 长度非法: {}（期望 12 字节）",
+            encrypted_data.nonce.len()
+        )));
+    }
+    // GCM 密文最短为 16 字节认证标签，短于此必然认证失败，提前拒绝
+    if encrypted_data.ciphertext.len() < 16 {
+        return Err(CryptoError::DecryptError(
+            "密文过短（缺少 GCM 认证标签）".to_string(),
+        ));
+    }
+
     // 创建 AES-256-GCM 解密器
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|e| CryptoError::DecryptError(e.to_string()))?;
 
-    // 解密数据
+    // 解密数据（nonce 长度已在上方校验为 12 字节）
     let nonce = Nonce::from_slice(&encrypted_data.nonce);
     let plaintext = cipher
         .decrypt(nonce, encrypted_data.ciphertext.as_ref())

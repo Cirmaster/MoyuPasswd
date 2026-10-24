@@ -374,6 +374,12 @@ export const usePasswordStore = defineStore('password', () => {
   /** 统计请求序号：避免旧响应覆盖新统计 */
   let statsSeq = 0
 
+  /** 分类列表请求序号：避免旧响应覆盖；锁屏清空后旧响应直接失效 */
+  let categoriesSeq = 0
+
+  /** 标签列表请求序号：同上 */
+  let tagsSeq = 0
+
   /** 后端回写页码时抑制 currentPage watch 的重复请求 */
   let suppressPageFetch = false
 
@@ -636,8 +642,11 @@ export const usePasswordStore = defineStore('password', () => {
    * 虚拟分类（全部/收藏）始终固定在最前；分类的 password_count/total_count 由后端返回。
    */
   async function loadCategories(): Promise<void> {
+    const seq = ++categoriesSeq
     try {
       const result = await invoke<Category[]>('get_categories')
+      // 旧响应（含锁屏清空后的迟到响应）：丢弃
+      if (seq !== categoriesSeq) return
       const backend = (result ?? [])
         .filter((category) => !VIRTUAL_CATEGORY_IDS.has(category.id))
         .map(normalizeCategory)
@@ -651,8 +660,11 @@ export const usePasswordStore = defineStore('password', () => {
    * 从后端加载全局标签列表（`get_tags` 已按 count DESC、name 排序）
    */
   async function loadTags(): Promise<void> {
+    const seq = ++tagsSeq
     try {
       const result = await invoke<TagInfo[]>('get_tags')
+      // 旧响应（含锁屏清空后的迟到响应）：丢弃
+      if (seq !== tagsSeq) return
       tags.value = result ?? []
     } catch (e) {
       console.error('加载标签失败:', e)
@@ -664,6 +676,49 @@ export const usePasswordStore = defineStore('password', () => {
    */
   async function refreshPageAndStats(): Promise<void> {
     await Promise.all([loadPasswords(), loadStats()])
+  }
+
+  /**
+   * 锁屏时清空全部库内容与筛选痕迹（App.vue 在 app-locked 事件中统一调用）
+   *
+   * - 清空密码列表 / 标签 / 分类 / 统计，以及搜索词与标签筛选
+   *   （搜索词可能含敏感意图，标签/分类名属库内容）；
+   * - 自增四个请求序号：让在途的 get_passwords / get_password_stats /
+   *   get_categories / get_tags 响应全部失效，防止锁屏后旧响应把数据写回内存；
+   * - 清空筛选状态会触发 watch 自动重查，用 suppressFilterFetch 抑制——
+   *   锁屏后不应再发起任何后端请求；
+   * - 排序方式 / 每页条数 / 当前分类是纯 UI 偏好且不含库内容，保留。
+   */
+  function clearSensitive(): void {
+    // 使在途请求的响应失效（各 loader 以 seq 判定新旧）
+    requestSeq++
+    statsSeq++
+    categoriesSeq++
+    tagsSeq++
+    cancelPendingSearch()
+
+    // 抑制筛选 watch 的自动请求，清空会变动的筛选状态
+    suppressFilterFetch = true
+    try {
+      searchQuery.value = ''
+      activeTags.value = []
+    } finally {
+      suppressFilterFetch = false
+    }
+
+    // 页码回 1（首页无内容时避免残留到旧页码）；watch 用 suppressPageFetch 吞掉本次
+    if (currentPage.value !== 1) {
+      suppressPageFetch = true
+      currentPage.value = 1
+    }
+
+    passwords.value = []
+    totalFiltered.value = 0
+    tags.value = []
+    categories.value = createVirtualCategories()
+    stats.value = { all: 0, favorite: 0, recent: 0 }
+    error.value = null
+    loading.value = false
   }
 
   // ==================== 筛选 / 排序 / 分页状态操作 ====================
@@ -1109,6 +1164,8 @@ export const usePasswordStore = defineStore('password', () => {
   watch(
     searchQuery,
     () => {
+      // 批量赋值（锁屏清空等）期间不触发自动请求，与另两个 watch 一致
+      if (suppressFilterFetch) return
       cancelPendingSearch()
       searchTimer = setTimeout(() => {
         searchTimer = null
@@ -1153,6 +1210,8 @@ export const usePasswordStore = defineStore('password', () => {
     loadStats,
     loadCategories,
     loadTags,
+    // 锁屏清理
+    clearSensitive,
     // 筛选 / 排序 / 分页状态
     setActiveCategory,
     setSearchQuery,

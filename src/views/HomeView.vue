@@ -478,6 +478,23 @@ const handleDeleteCategory = async (node: CategoryTreeNode) => {
 }
 
 /**
+ * 删除密码（二次确认 + 成功/失败提示）
+ *
+ * 直接绑定模板点击事件会把 store 抛出的错误变成 unhandled rejection，
+ * 用户对删除是否成功毫无感知；这里确认后再删，并统一提示结果。
+ * @param item - 目标密码条目
+ */
+const handleDeletePassword = async (item: PasswordItem) => {
+  if (!confirm(`确定删除「${item.title}」？`)) return
+  try {
+    await deletePassword(item.id)
+    showToast('success', '已删除')
+  } catch (e) {
+    showToast('error', '删除失败: ' + String(e))
+  }
+}
+
+/**
  * 处理分类右键菜单动作
  * @param key - 菜单项 key
  */
@@ -774,15 +791,7 @@ onMounted(async () => {
     }),
   )
 
-  // 监听后端锁定事件（由 lock_app 命令或系统托盘触发）
-  unlisteners.push(
-    await listen('app-locked', () => {
-      // 清除本地密码数据
-      passwords.value = []
-      // 跳转到解锁页面
-      router.push('/')
-    }),
-  )
+  // app-locked 锁定清理与跳转由 App.vue 全局统一处理（clearSensitive + 跳解锁页），此处不再重复监听
 
   // 监听快速添加快捷键事件
   unlisteners.push(
@@ -1260,7 +1269,7 @@ onMounted(async () => {
                       size="icon"
                       class="text-destructive hover:text-destructive"
                       title="删除"
-                      @click="deletePassword(item.id)"
+                      @click="handleDeletePassword(item)"
                     >
                       <IconTrash class="h-4 w-4" />
                     </Button>

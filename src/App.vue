@@ -19,6 +19,7 @@ import { invoke } from '@/lib/api'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTheme } from '@/composables/useTheme'
 import { useAutoLock } from '@/composables/useAutoLock'
+import { usePasswordStore } from '@/stores/password'
 import { disableContextMenu } from '@/lib/windowSetup'
 
 /** 主题管理 */
@@ -29,8 +30,14 @@ useAutoLock()
 
 const router = useRouter()
 
+/** 密码 Store（锁屏清理用） */
+const passwordStore = usePasswordStore()
+
 /** 窗口焦点监听的清理函数 */
 let unlistenFocus: (() => void) | null = null
+
+/** 锁定事件监听的清理函数 */
+let unlistenLocked: (() => void) | null = null
 
 /**
  * 组件挂载时初始化主题，并注册窗口焦点复核
@@ -40,6 +47,17 @@ onMounted(async () => {
   // 禁用浏览器默认右键菜单（入口已拦一道；组件内再拦，保证热替换后也生效）
   disableContextMenu()
 
+  // 锁定事件统一在此处理（无论当前停在哪个页面）：
+  // 清空 Store 中的库内容与筛选痕迹，再跳转解锁页。
+  // 各页面不再各自监听 app-locked，清理逻辑只保留这一处。
+  const { listen } = await import('@tauri-apps/api/event')
+  unlistenLocked = await listen('app-locked', () => {
+    passwordStore.clearSensitive()
+    if (router.currentRoute.value.path !== '/') {
+      void router.push('/')
+    }
+  })
+
   // 窗口重新获得焦点（含从托盘恢复、切回本应用）时复核解锁状态：
   // 防止 app-locked 事件丢失后主界面停留在旧页面、看起来「没锁」
   unlistenFocus = await getCurrentWindow().onFocusChanged(async ({ payload: focused }) => {
@@ -47,6 +65,7 @@ onMounted(async () => {
     try {
       const unlocked = await invoke<boolean>('is_unlocked')
       if (!unlocked && router.currentRoute.value.path !== '/') {
+        passwordStore.clearSensitive()
         await router.push('/')
       }
     } catch {
@@ -58,6 +77,8 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenFocus?.()
   unlistenFocus = null
+  unlistenLocked?.()
+  unlistenLocked = null
 })
 </script>
 

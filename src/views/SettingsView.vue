@@ -17,7 +17,6 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { invoke } from '@/lib/api'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { IconArrowLeft, IconLoader, IconPencil } from '@/components/icons'
@@ -355,15 +354,7 @@ watch(editingShortcut, (newValue) => {
   }
 })
 
-/** app-locked 事件监听清理函数 */
-let appLockedUnlisten: UnlistenFn | null = null
-
-// 锁定后跳转解锁页（防止停留在设置页无响应）
-onMounted(async () => {
-  appLockedUnlisten = await listen('app-locked', () => {
-    router.push('/')
-  })
-})
+// app-locked 锁定清理与跳转由 App.vue 全局统一处理，此处不再重复监听
 
 /**
  * 组件卸载时确保移除拦截器
@@ -372,9 +363,6 @@ onUnmounted(() => {
   document.removeEventListener('keydown', globalKeydownInterceptor, { capture: true })
   // 离开页面时若仍处于编辑态，恢复全局快捷键（兜底）
   exitEditMode()
-  // 清理事件监听
-  appLockedUnlisten?.()
-  appLockedUnlisten = null
 })
 
 /**

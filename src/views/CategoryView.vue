@@ -13,10 +13,9 @@
 -->
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, type Component } from 'vue'
+import { ref, computed, onMounted, type Component } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -87,20 +86,7 @@ onMounted(async () => {
   ])
 })
 
-/** app-locked 事件监听清理函数 */
-let appLockedUnlisten: UnlistenFn | null = null
-
-// 锁定后跳转解锁页（防止停留在分类页无响应）
-onMounted(async () => {
-  appLockedUnlisten = await listen('app-locked', () => {
-    router.push('/')
-  })
-})
-
-onUnmounted(() => {
-  appLockedUnlisten?.()
-  appLockedUnlisten = null
-})
+// app-locked 锁定清理与跳转由 App.vue 全局统一处理，此处不再重复监听
 
 /**
  * 智能视图（全部 / 收藏）概览

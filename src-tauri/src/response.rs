@@ -79,8 +79,23 @@ pub type ApiResult<T> = Result<ApiResponse<T>, ApiResponse<()>>;
 /// }
 /// ```
 pub fn respond<T: Serialize, F: FnOnce() -> Result<T, String>>(f: F) -> ApiResult<T> {
-    match f() {
-        Ok(data) => Ok(ApiResponse::ok(data)),
-        Err(e) => Err(ApiResponse::err(e)),
+    // catch_unwind 兜底：命令体若 panic（如解密路径遇到非法输入），
+    // 统一归一为普通错误响应，不让 panic 逸出命令层——
+    // 否则会崩溃整个进程（sync 命令）或让 IPC 永不响应（async 命令）。
+    // AssertUnwindSafe：闭包捕获的 State 引用等跨 unwind 不做自动检查，
+    // 这里兜的是崩溃面；panic 后应用状态由 lockdown/重新解锁流程恢复。
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(data)) => Ok(ApiResponse::ok(data)),
+        Ok(Err(e)) => Err(ApiResponse::err(e)),
+        Err(panic) => {
+            // 记录 panic 载荷便于排查；对外只给稳定文案，不泄漏内部细节
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown".to_string());
+            log::error!("命令执行 panic（已兜底）: {msg}");
+            Err(ApiResponse::err("内部错误：命令执行异常"))
+        }
     }
 }
