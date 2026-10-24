@@ -47,6 +47,9 @@ pub mod system_auth;
 /// 应用状态模块
 pub mod state;
 
+/// webview 心跳看门狗（崩溃/卡死自动重载；见 watchdog.rs）
+pub mod watchdog;
+
 /// 统一响应格式模块（所有命令返回 { code, message, data } 包裹）
 pub mod response;
 
@@ -132,6 +135,10 @@ pub fn run() {
 
             // 初始化空闲检测模块
             idle::init();
+
+            // 启动 webview 心跳看门狗：网页崩溃/卡死时自动重载（自绘标题栏模式下
+            // 界面按钮会随网页一起失效，自愈是第一道保命线）
+            watchdog::spawn(app.handle().clone());
 
             // 初始化审计模块
             {
@@ -338,6 +345,8 @@ pub fn run() {
             clipboard::copy_text_to_clipboard,
             // 窗口管理命令
             commands::minimize_to_tray,
+            // webview 心跳（watchdog 自愈链路的输入端）
+            commands::webview_heartbeat,
             // 空闲检测命令
             idle::report_activity,
         ])
@@ -362,7 +371,10 @@ pub fn run() {
                     };
 
                     if window.label() == "main" {
-                        if close_to_tray {
+                        // 网页被判定异常（心跳停止且自动恢复失败）时关闭必须真正退出：
+                        // 网页已无法交互，藏进托盘用户也点不出主窗口
+                        let webview_unhealthy = state.is_webview_unhealthy();
+                        if close_to_tray && !webview_unhealthy {
                             api.prevent_close();
                             let _ = window.hide();
                             log::info!("窗口关闭，最小化到托盘");

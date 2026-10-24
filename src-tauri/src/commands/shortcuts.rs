@@ -303,12 +303,62 @@ pub fn register_all(app: &tauri::AppHandle, config: &ShortcutConfig) -> Result<V
         failed.push(format!("密码生成器（{}）", password_generator));
     }
 
+    // 紧急逃生热键（固定组合）：网页崩溃/卡死时的最后通道，见 register_emergency_shortcuts
+    register_emergency_shortcuts(app);
+
     if failed.is_empty() {
         log::info!("全局快捷键注册完成");
     } else {
         log::warn!("以下快捷键注册失败（可能被占用）: {:?}", failed);
     }
     Ok(failed)
+}
+
+/// 注册紧急逃生热键（固定组合，不随用户配置）
+///
+/// 自绘标题栏模式下网页崩溃/卡死后界面按钮全部失效，这两个组合在 Rust 层响应，
+/// 是最后的逃生通道：
+/// - Ctrl+Alt+Shift+R：重载主窗口网页（自愈兜底；窗口隐藏时先唤起）
+/// - Ctrl+Alt+Shift+E：强制退出（先尽力清剪贴板）
+///
+/// 必须在 `register_all` 的 `unregister_all()` **之后**调用，
+/// 否则用户改配置整体重注册时会把它们抹掉。
+fn register_emergency_shortcuts(app: &tauri::AppHandle) {
+    let global_shortcut = app.global_shortcut();
+
+    if let Err(e) = global_shortcut.on_shortcut("Ctrl+Alt+Shift+R", |app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+                match win.reload() {
+                    Ok(()) => {
+                        app.state::<AppState>().mark_webview_alive();
+                        log::info!("紧急热键：已重载主窗口网页");
+                    }
+                    Err(err) => {
+                        app.state::<AppState>().set_webview_unhealthy(true);
+                        log::error!("紧急热键：重载失败 {err}");
+                    }
+                }
+            }
+        }
+    }) {
+        log::warn!("注册紧急重载热键 Ctrl+Alt+Shift+R 失败: {e}");
+    }
+
+    if let Err(e) = global_shortcut.on_shortcut("Ctrl+Alt+Shift+E", |app, _shortcut, event| {
+        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+            log::warn!("紧急热键：强制退出应用");
+            if let Err(err) = crate::clipboard::clear_now(app) {
+                log::warn!("退出前清空剪贴板失败: {err}");
+            }
+            app.exit(0);
+        }
+    }) {
+        log::warn!("注册紧急退出热键 Ctrl+Alt+Shift+E 失败: {e}");
+    }
 }
 
 /// 解锁后按用户配置重新注册全局快捷键

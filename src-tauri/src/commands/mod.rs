@@ -14,6 +14,7 @@ pub mod settings;
 pub mod data;
 pub mod shortcuts;
 pub mod countdown;
+pub mod heartbeat;
 
 // 重新导出所有命令
 pub use auth::*;
@@ -23,3 +24,4 @@ pub use settings::*;
 pub use data::*;
 pub use shortcuts::*;
 pub use countdown::*;
+pub use heartbeat::*;

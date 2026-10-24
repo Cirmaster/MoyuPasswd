@@ -19,6 +19,7 @@ import { invoke } from '@/lib/api'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTheme } from '@/composables/useTheme'
 import { useAutoLock } from '@/composables/useAutoLock'
+import { startWebviewHeartbeat } from '@/composables/useWebviewHeartbeat'
 import { usePasswordStore } from '@/stores/password'
 import { disableContextMenu } from '@/lib/windowSetup'
 
@@ -44,6 +45,8 @@ let unlistenLocked: (() => void) | null = null
  */
 onMounted(async () => {
   initTheme()
+  // 启动 webview 心跳（watchdog 自愈链路：崩溃/卡死超时自动重载）
+  startWebviewHeartbeat()
   // 禁用浏览器默认右键菜单（入口已拦一道；组件内再拦，保证热替换后也生效）
   disableContextMenu()
 

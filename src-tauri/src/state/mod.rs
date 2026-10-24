@@ -86,6 +86,14 @@ pub struct AppState {
 
     /// 锁定截止时间（Unix 毫秒；达到失败阈值后设置，到期前拒绝验证）
     locked_until_ms: Mutex<Option<u64>>,
+
+    /// 最近一次 webview 心跳（前端主线程周期性上报；watchdog 据此判断网页是否存活）
+    last_heartbeat: Mutex<std::time::Instant>,
+
+    /// 网页是否被判定异常（心跳停止且自动重载失败/超限）。
+    /// 为 true 时「关闭到托盘」失效——网页已无法交互，藏进托盘也点不出主窗口，
+    /// 关闭必须真正退出
+    webview_unhealthy: std::sync::atomic::AtomicBool,
 }
 
 impl AppState {
@@ -100,6 +108,8 @@ impl AppState {
             is_unlocked: Mutex::new(false),
             failed_attempts: Mutex::new(failed_attempts),
             locked_until_ms: Mutex::new(locked_until_ms),
+            last_heartbeat: Mutex::new(std::time::Instant::now()),
+            webview_unhealthy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -114,6 +124,8 @@ impl AppState {
             is_unlocked: Mutex::new(false),
             failed_attempts: Mutex::new(failed_attempts),
             locked_until_ms: Mutex::new(locked_until_ms),
+            last_heartbeat: Mutex::new(std::time::Instant::now()),
+            webview_unhealthy: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -121,6 +133,30 @@ impl AppState {
     pub fn set_database(&self, database: Database) {
         let mut db = self.db.lock();
         *db = Some(database);
+    }
+
+    /// 记录 webview 心跳：网页脚本仍存活的证明，同时清除异常标记
+    pub fn mark_webview_alive(&self) {
+        *self.last_heartbeat.lock() = std::time::Instant::now();
+        self.webview_unhealthy
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 距最近一次心跳的时长（启动后从未心跳则为进程启动以来）
+    pub fn heartbeat_age(&self) -> std::time::Duration {
+        self.last_heartbeat.lock().elapsed()
+    }
+
+    /// 标记网页异常状态（watchdog 自动恢复失败时置 true）
+    pub fn set_webview_unhealthy(&self, value: bool) {
+        self.webview_unhealthy
+            .store(value, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// 网页是否被判定异常
+    pub fn is_webview_unhealthy(&self) -> bool {
+        self.webview_unhealthy
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 获取数据库引用
