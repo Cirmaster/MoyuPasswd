@@ -1226,6 +1226,44 @@ const handleImport = async () => {
               </div>
             </CardContent>
           </Card>
+
+          <!-- 系统固定快捷键：不可修改，网页崩溃/卡死时的逃生通道（Rust 层响应） -->
+          <Card class="mt-6">
+            <CardHeader>
+              <CardTitle>系统固定快捷键</CardTitle>
+              <CardDescription>不可修改。网页崩溃/卡死、界面按钮失效时的逃生通道，在系统层响应</CardDescription>
+            </CardHeader>
+            <CardContent class="space-y-4">
+              <div class="p-4 border rounded-lg flex items-center justify-between gap-4">
+                <div>
+                  <h3 class="font-medium">紧急重载网页</h3>
+                  <p class="text-sm text-muted-foreground">
+                    界面卡死 / 显示异常时强制重载主窗口；窗口隐藏在托盘时会先唤起再重载
+                  </p>
+                </div>
+                <div class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded shrink-0">
+                  <template v-for="(part, i) in ['Ctrl', 'Alt', 'Shift', 'R']" :key="i">
+                    <kbd class="px-1.5 py-0.5 text-xs font-mono bg-muted rounded border">{{ part }}</kbd>
+                    <span v-if="i < 3" class="text-muted-foreground">+</span>
+                  </template>
+                </div>
+              </div>
+              <div class="p-4 border rounded-lg flex items-center justify-between gap-4">
+                <div>
+                  <h3 class="font-medium">强制退出</h3>
+                  <p class="text-sm text-muted-foreground">
+                    界面完全无响应时退出应用；退出前会自动清空剪贴板
+                  </p>
+                </div>
+                <div class="flex items-center gap-1 px-3 py-1.5 bg-muted rounded shrink-0">
+                  <template v-for="(part, i) in ['Ctrl', 'Alt', 'Shift', 'E']" :key="i">
+                    <kbd class="px-1.5 py-0.5 text-xs font-mono bg-muted rounded border">{{ part }}</kbd>
+                    <span v-if="i < 3" class="text-muted-foreground">+</span>
+                  </template>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <!-- 数据管理 -->
