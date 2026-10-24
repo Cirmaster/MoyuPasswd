@@ -452,9 +452,9 @@ const handleSaveCategoryDialog = async () => {
       await addCategory(name, categoryDialogParentId.value || null)
     }
     // 清空输入框并关闭弹窗（Store 内部已刷新分类/当前页/统计）
-    newCategoryName.value = ''
-    editingCategory.value = null
-    parentId.value = ''
+    categoryDialogName.value = ''
+    categoryEditingId.value = null
+    categoryDialogParentId.value = ''
     showCategoryDialog.value = false
   } catch (e) {
     showToast('error', '保存失败: ' + String(e))

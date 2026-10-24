@@ -94,6 +94,18 @@ fn show_fatal_error(message: &str) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例守卫：必须注册在所有插件之前，避免与其他插件产生启动竞态。
+        // 效果：全局只允许一个进程运行；用户再次启动（开始菜单/快捷方式/开机自启）
+        // 不会开出第二个实例，而是走下面的回调——把已运行实例的主窗口拉到前台，
+        // 随后本进程由插件自动退出。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                // 窗口可能处于「最小化到托盘」（隐藏）或最小化状态，逐一恢复
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         // 注册全局快捷键插件
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         // 注册剪贴板管理插件
