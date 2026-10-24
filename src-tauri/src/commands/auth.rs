@@ -686,13 +686,30 @@ pub async fn unlock_with_system_auth(state: State<'_, AppState>, app: tauri::App
     let database = match db::Database::new(&state.app_dir, &db_key) {
         Ok(d) => d,
         Err(e) => {
-            // 存储的密钥已失效（例如改密后残留的旧密钥）：自动作废，避免永久报错
-            if let Err(de) = crate::system_auth::delete_key(&state.app_dir, &app) {
-                log::warn!("作废失效的系统快速解锁密钥失败: {de}");
+            // 区分「存储的密钥真的失效」与「临时故障」，只有确认密钥不匹配才作废：
+            // - Ok(false)：SQLCipher 校验密钥不匹配（如改密后残留的旧密钥）→ 作废旧密钥
+            // - Ok(true) / Err(_)：密钥没问题，只是打开时遇到临时故障
+            //   （锁冲突、迁移瞬时失败等）→ 绝不能删密钥，提示重试即可
+            match db::verify_key(&state.app_dir, &db_key) {
+                Ok(false) => {
+                    if let Err(de) = crate::system_auth::delete_key(&state.app_dir, &app) {
+                        log::warn!("作废失效的系统快速解锁密钥失败: {de}");
+                    }
+                    return Err(format!(
+                        "系统快速解锁已失效，请使用主密码解锁（可在设置中重新启用）: {e}"
+                    ));
+                }
+                Ok(true) => {
+                    return Err(format!(
+                        "解锁遇到临时故障，系统快速解锁仍有效，请稍后重试: {e}"
+                    ));
+                }
+                Err(probe_err) => {
+                    return Err(format!(
+                        "解锁遇到临时故障，系统快速解锁仍有效，请稍后重试: {e}（{probe_err}）"
+                    ));
+                }
             }
-            return Err(format!(
-                "系统快速解锁已失效，请使用主密码解锁（可在设置中重新启用）: {e}"
-            ));
         }
     };
 

@@ -31,6 +31,12 @@ pub const DB_NAME: &str = "moyu_passwd.db";
 /// 32 字节，硬编码在代码中（不保密，仅用于初始创建阶段）。
 pub const DEFAULT_DB_KEY: &[u8; 32] = b"moyu-passwd-default-key-00000000";
 
+/// 忙等待超时（秒）
+///
+/// 跨进程/跨连接锁竞争时让 SQLite 自动重试，而不是立刻报 "database is locked"。
+/// rusqlite 默认 0 = 不等待，任何瞬时锁冲突都会变成硬错误。
+const BUSY_TIMEOUT_SECS: u64 = 5;
+
 /// 尝试用指定密钥打开数据库并触发一次实际读取
 ///
 /// 密钥错误时 SQLCipher 要到第一次读取才报错，`PRAGMA user_version` 会触发读取。
@@ -43,6 +49,10 @@ fn can_open_with_key(db_path: &Path, key: &[u8; 32]) -> bool {
             return false;
         }
     };
+    // 忙等待超时：避免锁竞争把「能打开」误判成「打不开」（误判会导致旧库被隔离）
+    if let Err(e) = conn.busy_timeout(std::time::Duration::from_secs(BUSY_TIMEOUT_SECS)) {
+        log::warn!("探测旧数据库设置忙等待超时失败: {e}");
+    }
     let key_hex = hex::encode(key);
     if let Err(e) = conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key_hex)) {
         log::warn!("探测旧数据库设置密钥失败: {e}");
@@ -54,6 +64,42 @@ fn can_open_with_key(db_path: &Path, key: &[u8; 32]) -> bool {
             log::warn!("探测旧数据库密钥不匹配或文件损坏: {e}");
             false
         }
+    }
+}
+
+/// 探测密钥是否与现有数据库匹配（不迁移、不改动任何数据）
+///
+/// SQLCipher 的密钥校验发生在第一次实际读取时，因此用 `sqlite_master` 触发一次读取。
+/// 用于区分「密钥真的不匹配」与「临时故障」，调用方**绝不能**把临时故障当成密钥失效：
+///
+/// - `Ok(true)`：密钥匹配
+/// - `Ok(false)`：密钥不匹配（SQLCipher 读取报 NOTADB）
+/// - `Err(_)`：无法判定（文件被锁、读取瞬时失败等），调用方应原样上抛、不做破坏性动作
+pub fn verify_key(app_dir: &Path, key: &[u8; 32]) -> Result<bool, String> {
+    let db_path = app_dir.join(DB_NAME);
+    if !db_path.exists() {
+        return Err("数据库文件不存在，无法判定密钥".to_string());
+    }
+
+    let conn = Connection::open(&db_path).map_err(|e| format!("打开数据库失败: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(BUSY_TIMEOUT_SECS))
+        .map_err(|e| format!("设置忙等待超时失败: {e}"))?;
+
+    let key_hex = hex::encode(key);
+    conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key_hex))
+        .map_err(|e| format!("设置数据库密钥失败: {e}"))?;
+
+    // 触发第一次读取：密钥错误时此处报 NOTADB（file is not a database）
+    match conn.query_row("SELECT count(*) FROM sqlite_master;", [], |row| {
+        row.get::<_, i32>(0)
+    }) {
+        Ok(_) => Ok(true),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::NotADatabase =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(format!("探测密钥失败: {e}")),
     }
 }
 
@@ -113,6 +159,11 @@ impl Database {
         // 打开数据库连接
         let conn = Connection::open(&db_path).map_err(|e| e.to_string())?;
 
+        // 忙等待超时：跨进程锁竞争（如另一实例残留连接/杀软扫描）时自动重试，
+        // 避免任何瞬时锁冲突直接变成 "database is locked" 硬错误
+        conn.busy_timeout(std::time::Duration::from_secs(BUSY_TIMEOUT_SECS))
+            .map_err(|e| format!("设置忙等待超时失败: {e}"))?;
+
         // 设置加密密钥
         let key_hex = hex::encode(key);
         conn.execute_batch(&format!("PRAGMA key = \"x'{}'\";", key_hex))
@@ -165,14 +216,16 @@ impl Database {
             );"
         ).map_err(|e| e.to_string())?;
 
-        // 获取当前版本
+        // 获取当前版本。
+        // 注意：读取失败必须上抛，绝不能吞掉错误当「全新库」处理——
+        // 否则瞬时锁冲突会让迁移序列整体重跑，撞上 ALTER TABLE 直接失败。
         let current_version: i32 = conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM _migrations",
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or(0);
+            .map_err(|e| format!("读取迁移版本失败: {e}"))?;
 
         // 执行迁移
         let migrations = get_migrations();
