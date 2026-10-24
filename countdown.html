@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>倒计时</title>
+    <!-- 主题防闪：首帧前按 localStorage 写好 data-theme 与 .dark，避免默认色一闪 -->
+    <script>
+      (function () {
+        try {
+          var root = document.documentElement;
+          var scheme = localStorage.getItem('colorScheme');
+          root.dataset.theme = (scheme === 'aurora' || scheme === 'dusk' || scheme === 'islands') ? scheme : 'islands';
+          var mode = localStorage.getItem('theme') || 'dark';
+          var dark = mode === 'dark' || (mode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          root.classList.toggle('dark', dark);
+        } catch (e) {}
+      })();
+    </script>
     <style>
       * {
         margin: 0;

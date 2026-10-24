@@ -261,22 +261,23 @@ html, body {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: rgba(37, 99, 235, 0.9);
+  /* 颜色走主题键帽令牌，跟随色系主题与明暗模式（原来是硬编码蓝） */
+  background: var(--keycap);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.15s ease, background 0.15s ease;
+  transition: transform 0.15s ease, filter 0.15s ease;
 }
 
 .countdown-circle:hover {
   transform: scale(1.2);
-  background: rgba(59, 130, 246, 0.95);
+  filter: brightness(1.15);
 }
 
 .countdown-number {
   font-size: 10px;
   font-weight: 700;
-  color: #ffffff;
+  color: var(--keycap-foreground);
   font-family: 'SF Mono', 'Fira Code', monospace;
 }
 

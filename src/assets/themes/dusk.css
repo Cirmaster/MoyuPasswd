@@ -1,0 +1,89 @@
+/* ==================== 主题：暮光黄昏 ====================
+ * 派生自 IntelliJ 启动图的暮色配色：深蓝紫（山与夜空）做底与填充，
+ * 云霞紫红做文字/描边强调，暖金（气球的光）做点睛——只给「复制密码」按钮和焦点环。
+ * 主按钮走紫→品红的暮色渐变（见文件末尾），呼应气球的渐变。
+ */
+
+[data-theme="dusk"] {
+  /* 晨雾微光页面底（薰衣草雾白，避免大面积纯白） */
+  --background: oklch(0.955 0.018 296.63);
+  --foreground: oklch(0.273 0.082 284.52);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.273 0.082 284.52);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.273 0.082 284.52);
+  /* 暮紫填充，配白字 */
+  --primary: oklch(0.462 0.202 279.62);
+  --primary-foreground: oklch(1 0 0);
+  /* 云霞紫红：文字 / 链接 / 描边强调 */
+  --primary-ink: oklch(0.506 0.179 315.95);
+  /* 选中态与填充档同色（Islands 主题才单独用官方选区色） */
+  --select: oklch(0.462 0.202 279.62);
+  --select-foreground: oklch(1 0 0);
+  --secondary: oklch(0.921 0.029 298.87);
+  --secondary-foreground: oklch(0.273 0.082 284.52);
+  --muted: oklch(0.921 0.029 298.87);
+  --muted-foreground: oklch(0.524 0.057 293.26);
+  --accent: oklch(0.934 0.020 292.13);
+  --accent-foreground: oklch(0.273 0.082 284.52);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.878 0.040 296.62);
+  --input: oklch(0.878 0.040 296.62);
+  /* 焦点环 = 点睛金，像气球上那束暖光 */
+  --ring: oklch(0.832 0.126 82.76);
+  --action: oklch(0.462 0.202 279.62);
+  --action-foreground: oklch(1 0 0);
+  /* 键帽 = 点睛金，配深墨紫字 */
+  --keycap: oklch(0.832 0.126 82.76);
+  --keycap-foreground: oklch(0.266 0.101 295.35);
+  /* 暮色渐变主按钮（呼应气球），选中 chip / 行高亮仍是纯色保持列表安静。
+     经 main.css 的变量通道生效，主题预览卡不会串色 */
+  --primary-bg-image: linear-gradient(
+    135deg,
+    oklch(0.462 0.202 279.62),
+    oklch(0.59 0.182 340.41)
+  );
+  --primary-hover-filter: brightness(1.08);
+}
+
+[data-theme="dusk"].dark {
+  /* 夜空蓝紫页面底 */
+  --background: oklch(0.229 0.092 272.36);
+  --foreground: oklch(0.942 0.024 293.58);
+  --card: oklch(0.287 0.111 273.05);
+  --card-foreground: oklch(0.942 0.024 293.58);
+  --popover: oklch(0.287 0.111 273.05);
+  --popover-foreground: oklch(0.942 0.024 293.58);
+  /* 山体暮紫填充，配雾白字 */
+  --primary: oklch(0.434 0.168 283.48);
+  --primary-foreground: oklch(0.959 0.022 294.6);
+  /* 暮光粉紫点缀 */
+  --primary-ink: oklch(0.786 0.124 316.7);
+  --select: oklch(0.434 0.168 283.48);
+  --select-foreground: oklch(0.959 0.022 294.6);
+  --secondary: oklch(0.357 0.122 277.11);
+  --secondary-foreground: oklch(0.942 0.024 293.58);
+  --muted: oklch(0.357 0.122 277.11);
+  --muted-foreground: oklch(0.689 0.070 290.16);
+  --accent: oklch(0.351 0.134 278.54);
+  --accent-foreground: oklch(0.942 0.024 293.58);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(0.350 0.115 275.57);
+  --input: oklch(0.357 0.122 277.11);
+  --ring: oklch(0.832 0.126 82.76);
+  --action: oklch(0.434 0.168 283.48);
+  --action-foreground: oklch(0.959 0.022 294.6);
+  --keycap: oklch(0.832 0.126 82.76);
+  --keycap-foreground: oklch(0.266 0.101 295.35);
+  --primary-bg-image: linear-gradient(
+    135deg,
+    oklch(0.434 0.168 283.48),
+    oklch(0.579 0.176 337.71)
+  );
+  --primary-hover-filter: brightness(1.08);
+}
+
+/* ==================== 暮色渐变说明 ====================
+ * 渐变与悬停提亮经 --primary-bg-image / --primary-hover-filter 两个变量生效
+ * （规则在 main.css 的 base 层），不再用后代选择器直接命中按钮——
+ * 后代选择器会把渐变漏给全页按钮和其他主题的预览卡。 */

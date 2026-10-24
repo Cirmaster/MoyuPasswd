@@ -1,0 +1,93 @@
+/* ==================== 主题：经典中性 ====================
+ * 最初的一套灰紫配色，作为默认主题与兜底（html 上没有 data-theme 时也走这里）。
+ * 明色：近黑藏青主色 + 纯白底；暗色：近白主色 + 中性深灰底。
+ * 「复制密码」按钮与行高亮同色（靠 hover 提亮区分），保持原样。
+ *
+ * 令牌含义（所有主题一致，共 23 个）：
+ *   background/foreground       页面底 / 正文
+ *   card(-foreground)           卡片 / 弹层
+ *   popover(-foreground)        浮层
+ *   primary(-foreground)        主色填充档 + 其上的字
+ *   primary-ink                 主色文字档（链接/图标/细描边）
+ *   secondary / muted / accent  次级块 / 弱化块 / hover 块
+ *   destructive                 危险操作红
+ *   border / input / ring       边框 / 输入框 / 焦点环
+ *   action(-foreground)         快捷弹窗选中行高亮
+ *   keycap(-foreground)         快捷弹窗「复制密码」按钮
+ */
+
+[data-theme="classic"],
+html:not([data-theme]) {
+  /* 页面底用柔灰（参考 WorkBuddy 亮色的灰框架），岛面提纯白做层次——
+     灰底 + 白岛，岛面边界靠色差不用描边 */
+  --background: oklch(0.976 0 0);
+  /* 黑色整体降档为深灰阶（参考图正文 #161616 / 菜单 #585858），不与柔灰底打架 */
+  --foreground: oklch(0.26 0.015 285.32);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.26 0.015 285.32);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.26 0.015 285.32);
+  /* 填充档用中深灰（选中块/按钮不再纯黑），配近白字，对比度 9:1 */
+  --primary: oklch(0.394 0.015 285.69);
+  --primary-foreground: oklch(0.985 0 0);
+  /* 文字档再浅一档（链接/图标/细线），对页底 7.2:1 */
+  --primary-ink: oklch(0.442 0.015 285.79);
+  /* 选中态与填充档同色（Islands 主题才单独用官方选区色） */
+  --select: oklch(0.394 0.015 285.69);
+  --select-foreground: oklch(0.985 0 0);
+  /* 灰块比页底深一档，chip / hover 才看得出来 */
+  --secondary: oklch(0.95 0.004 286.32);
+  --secondary-foreground: oklch(0.26 0.015 285.32);
+  --muted: oklch(0.95 0.004 286.32);
+  --muted-foreground: oklch(0.552 0.016 285.938);
+  --accent: oklch(0.941 0.004 286.32);
+  --accent-foreground: oklch(0.26 0.015 285.32);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.917 0.004 286.32);
+  --input: oklch(0.917 0.004 286.32);
+  --ring: oklch(0.705 0.015 286.067);
+  --action: oklch(0.394 0.015 285.69);
+  --action-foreground: oklch(0.985 0 0);
+  --keycap: oklch(0.394 0.015 285.69);
+  --keycap-foreground: oklch(0.985 0 0);
+  /* 主按钮不吃渐变/悬停滤镜（显式 none，防预览卡从激活主题继承到暮光渐变） */
+  --primary-bg-image: none;
+  --primary-hover-filter: none;
+}
+
+[data-theme="classic"].dark,
+html:not([data-theme]).dark {
+  /* 同亮色的思路：去纯黑（#09090b→深灰 #131316）、去刺眼白（填充近白→浅灰 #cfcfd6），
+     面板比页底亮一档做层次 */
+  --background: oklch(0.188 0.006 285.81);
+  --foreground: oklch(0.926 0.005 286.29);
+  --card: oklch(0.229 0.01 285.62);
+  --card-foreground: oklch(0.926 0.005 286.29);
+  --popover: oklch(0.229 0.01 285.62);
+  --popover-foreground: oklch(0.926 0.005 286.29);
+  /* 填充档浅灰块配深字（选中 chip / 按钮），对比度 10.7:1 */
+  --primary: oklch(0.857 0.01 286.2);
+  --primary-foreground: oklch(0.238 0.011 285.5);
+  --primary-ink: oklch(0.839 0.012 286.13);
+  --select: oklch(0.857 0.01 286.2);
+  --select-foreground: oklch(0.238 0.011 285.5);
+  --secondary: oklch(0.296 0.014 285.49);
+  --secondary-foreground: oklch(0.926 0.005 286.29);
+  --muted: oklch(0.296 0.014 285.49);
+  --muted-foreground: oklch(0.705 0.015 285.938);
+  --accent: oklch(0.321 0.018 285.36);
+  --accent-foreground: oklch(0.926 0.005 286.29);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(0.324 0.014 285.59);
+  --input: oklch(0.324 0.014 285.59);
+  --ring: oklch(0.637 0.015 285.97);
+  /* 暗色动作/高亮色：深板岩蓝——在深底上清晰可辨，但绝不刺眼。
+     注意暗色的 primary 是浅灰（用作填充上的反白字/浅色块），
+     行高亮若直接用 primary 会整行发白，所以单独给深色值 */
+  --action: oklch(0.32 0.03 286);
+  --action-foreground: oklch(0.97 0 0);
+  --keycap: oklch(0.32 0.03 286);
+  --keycap-foreground: oklch(0.97 0 0);
+  --primary-bg-image: none;
+  --primary-hover-filter: none;
+}

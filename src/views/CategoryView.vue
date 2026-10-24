@@ -448,7 +448,7 @@ const handleDeleteTag = async (name: string) => {
 <template>
   <div class="min-h-screen bg-background">
     <!-- 顶部导航 -->
-    <header class="border-b px-4 py-3 flex items-center gap-4">
+    <header class="px-4 py-3 flex items-center gap-4">
       <Button variant="ghost" size="icon" @click="router.push('/home')">
         <IconArrowLeft class="h-5 w-5" />
       </Button>
@@ -502,7 +502,7 @@ const handleDeleteTag = async (name: string) => {
           :class="[
             'relative',
             isCategoryDragging(node.id) ? 'opacity-50' : '',
-            categoryDropIndicator(node.id) === 'into' ? 'ring-2 ring-primary ring-inset' : '',
+            categoryDropIndicator(node.id) === 'into' ? 'ring-2 ring-primary-ink ring-inset' : '',
           ]"
           :data-category-id="node.id"
           @contextmenu.prevent.stop="openCategoryMenu($event, node.id)"
@@ -510,11 +510,11 @@ const handleDeleteTag = async (name: string) => {
           <!-- 拖拽插入指示线（上/下边缘） -->
           <span
             v-if="categoryDropIndicator(node.id) === 'before'"
-            class="pointer-events-none absolute left-0 right-0 top-0 h-0.5 rounded bg-primary"
+            class="pointer-events-none absolute left-0 right-0 top-0 h-0.5 rounded bg-primary-ink"
           />
           <span
             v-if="categoryDropIndicator(node.id) === 'after'"
-            class="pointer-events-none absolute left-0 right-0 bottom-0 h-0.5 rounded bg-primary"
+            class="pointer-events-none absolute left-0 right-0 bottom-0 h-0.5 rounded bg-primary-ink"
           />
           <CardContent
             class="p-4 flex items-center justify-between"
@@ -629,7 +629,7 @@ const handleDeleteTag = async (name: string) => {
             <select
               id="category-parent"
               v-model="parentId"
-              class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">无（顶级分类）</option>
               <option

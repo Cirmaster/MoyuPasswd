@@ -1,0 +1,87 @@
+/* ==================== 主题：Islands（IntelliJ IDEA） ====================
+ * 忠实移植 IDEA 2025.3+ 默认 UI 主题「Islands」的界面色：
+ * 取自 intellij-community 官方主题文件 themes/islands/ManyIslandsLight.theme.json
+ * 与 ManyIslandsDark.theme.json 的 UI 键（非编辑器语法色）。
+ *
+ * 设计特征（照搬官方三层背景体系）：
+ * - 亮色：工作层浅灰 #F7F8F9 + 白面板，选区浅蓝 #D0DFFE，品牌蓝 #3871E1 做主按钮/焦点环
+ * - 暗色：框架比内容亮（#26282C 框架、#191A1C 内容岛），选区深蓝 #2A4371，同一支品牌蓝
+ * - 品牌蓝白字对比度 4.55:1（官方值，刚好达标）；次要文字用 text-muted #5F6269
+ *   （官方 text-secondary #73767C 在浅底上只有 4.28:1，未达标故上移一档）
+ */
+
+[data-theme="islands"] {
+  /* 框架底 = main-window-bg #E9EAEE；岛面（内容面板）= tool-window-bg 白。
+     岛与岛之间靠间隙 + 色差分开，不靠描边 */
+  --background: oklch(0.937 0.005 274.96);
+  --foreground: oklch(0.134 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.134 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.134 0 0);
+  /* 品牌蓝 blue-80 = control-brand-bg（官方主按钮 / focusColor / underlineColor），
+     只用于主按钮、焦点环这类小面积 */
+  --primary: oklch(0.572 0.181 262.08);
+  --primary-foreground: oklch(1 0 0);
+  /* 选中态走官方选区色，不用品牌蓝铺大色块 */
+  --select: oklch(0.902 0.046 264.92);
+  --select-foreground: oklch(0.134 0 0);
+  /* 链接蓝 blue-70 = text-link */
+  --primary-ink: oklch(0.5 0.153 261.95);
+  --secondary: oklch(0.937 0.005 274.96);
+  --secondary-foreground: oklch(0.134 0 0);
+  --muted: oklch(0.937 0.005 274.96);
+  --muted-foreground: oklch(0.496 0.012 267.27);
+  --accent: oklch(0.945 0.005 258.32);
+  --accent-foreground: oklch(0.134 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.867 0.009 271.32);
+  --input: oklch(0.867 0.009 271.32);
+  --ring: oklch(0.572 0.181 262.08);
+  /* 选区浅蓝 blue-140 = selection-bg-active，配深字 */
+  --action: oklch(0.902 0.046 264.92);
+  --action-foreground: oklch(0.134 0 0);
+  /* 键帽 = 品牌蓝按钮（官方 Button.default） */
+  --keycap: oklch(0.572 0.181 262.08);
+  --keycap-foreground: oklch(1 0 0);
+  /* 主按钮不吃渐变/悬停滤镜（显式 none，防预览卡从激活主题继承到暮光渐变） */
+  --primary-bg-image: none;
+  --primary-hover-filter: none;
+}
+
+[data-theme="islands"].dark {
+  /* 招牌层次：框架底 #26282C（MainWindow）亮一档，内容岛 #191A1C（ToolWindow/Editor）
+     暗一档，浮层（Popup/Menu）回到框架色 #26282C。岛间靠间隙+色差分开，不靠描边 */
+  --background: oklch(0.276 0.008 264.44);
+  --foreground: oklch(0.867 0.009 271.32);
+  --card: oklch(0.218 0.004 264.48);
+  --card-foreground: oklch(0.867 0.009 271.32);
+  --popover: oklch(0.276 0.008 264.44);
+  --popover-foreground: oklch(0.867 0.009 271.32);
+  /* 亮暗同支品牌蓝（官方 accent-brand-bg 两模式同值） */
+  --primary: oklch(0.572 0.181 262.08);
+  --primary-foreground: oklch(1 0 0);
+  /* 选中态 = 选区深蓝 blue-50，品牌蓝仍只给主按钮/焦点环 */
+  --select: oklch(0.387 0.085 261.67);
+  --select-foreground: oklch(1 0 0);
+  /* 链接蓝 blue-100 = text-link */
+  --primary-ink: oklch(0.716 0.146 262.58);
+  --secondary: oklch(0.329 0.011 271.07);
+  --secondary-foreground: oklch(0.867 0.009 271.32);
+  --muted: oklch(0.255 0.006 258.36);
+  --muted-foreground: oklch(0.712 0.009 264.51);
+  --accent: oklch(0.329 0.011 271.07);
+  --accent-foreground: oklch(0.867 0.009 271.32);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(0.329 0.011 271.07);
+  --input: oklch(0.329 0.011 271.07);
+  --ring: oklch(0.572 0.181 262.08);
+  /* 选区深蓝 blue-50 = selection-bg-active */
+  --action: oklch(0.387 0.085 261.67);
+  --action-foreground: oklch(1 0 0);
+  --keycap: oklch(0.572 0.181 262.08);
+  --keycap-foreground: oklch(1 0 0);
+  /* 主按钮不吃渐变/悬停滤镜（显式 none，防预览卡从激活主题继承到暮光渐变） */
+  --primary-bg-image: none;
+  --primary-hover-filter: none;
+}

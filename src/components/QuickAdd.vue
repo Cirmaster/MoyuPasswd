@@ -211,7 +211,7 @@ const handleOpenChange = (open: boolean) => {
               <select
                 id="quick-category"
                 v-model="form.category"
-                class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               >
                 <!-- 分类树按层级缩进（depth 前缀），层级不限 -->
                 <option

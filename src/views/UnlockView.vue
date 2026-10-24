@@ -286,8 +286,8 @@ const handleSetup = async () => {
       <!-- 卡片头部：Logo + 标题 + 描述 -->
       <CardHeader class="text-center">
         <!-- 锁图标容器 -->
-        <div class="mx-auto mb-4 w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center">
-          <IconLock class="h-8 w-8 text-primary" stroke-linecap="round" stroke-linejoin="round" />
+        <div class="mx-auto mb-4 w-16 h-16 rounded-full bg-primary-ink/10 flex items-center justify-center">
+          <IconLock class="h-8 w-8 text-primary-ink" stroke-linecap="round" stroke-linejoin="round" />
         </div>
         <CardTitle class="text-2xl">MoyuPasswd</CardTitle>
         <CardDescription>
@@ -302,7 +302,7 @@ const handleSetup = async () => {
       <CardContent v-if="attemptingSystemAuth" class="text-center py-8">
         <div class="flex flex-col items-center gap-4">
           <!-- 加载动画 -->
-          <IconSpinner class="h-12 w-12 animate-spin text-primary" />
+          <IconSpinner class="h-12 w-12 animate-spin text-primary-ink" />
           <p class="text-sm text-muted-foreground">请在弹出的窗口中选择解锁方式</p>
           <Button variant="outline" size="sm" @click="showPasswordInput = true; attemptingSystemAuth = false">
             使用主密码解锁

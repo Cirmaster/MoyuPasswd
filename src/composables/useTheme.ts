@@ -1,36 +1,45 @@
 /**
  * useTheme.ts - 主题管理 Composable
  *
- * 提供全局的主题管理功能，支持：
- * 1. 亮色模式 (light)
- * 2. 暗色模式 (dark)
- * 3. 跟随系统 (system)
+ * 主题分两个正交维度：
+ * 1. 明暗模式 (theme)：light / dark / system，切换 <html> 上的 .dark 类
+ * 2. 色系主题 (colorScheme)：classic / aurora / dusk，切换 <html> 上的 data-theme 属性
  *
- * 主题设置会自动保存到 localStorage，下次打开应用时恢复。
- * 同时会监听系统主题变化，当选择"跟随系统"时自动切换。
+ * 两者的值分别持久化到 localStorage（'theme' / 'colorScheme'），
+ * 各窗口（主窗口 / 快捷搜索 / 倒计时）启动时读取恢复；
+ * 并监听 storage 事件，一个窗口改主题，其他已打开的窗口实时跟随。
  *
  * @example
  * ```ts
- * const { theme, isDark, toggleTheme, setTheme } = useTheme()
+ * const { theme, isDark, colorScheme, toggleTheme, setColorScheme } = useTheme()
  *
- * // 切换亮暗
- * toggleTheme()
- *
- * // 设置特定主题
- * setTheme('dark')
+ * toggleTheme()              // 切换明暗
+ * setColorScheme('dusk')     // 切换色系
  * ```
  */
 
 import { ref, watch } from 'vue'
 
-/** 主题类型：亮色、暗色、跟随系统 */
+/** 明暗模式：亮色、暗色、跟随系统 */
 type Theme = 'light' | 'dark' | 'system'
 
-/** 当前主题设置，默认跟随系统 */
-const theme = ref<Theme>('system')
+/** 色系主题 id，与 src/assets/themes/ 下的文件一一对应 */
+export type ColorScheme = 'classic' | 'aurora' | 'dusk' | 'islands'
+
+/** 当前明暗模式，默认暗色（初次运行即 Islands 暗色） */
+const theme = ref<Theme>('dark')
+
+/** 当前色系主题，默认 Islands */
+const colorScheme = ref<ColorScheme>('islands')
 
 /** 是否处于暗色模式（响应式） */
 const isDark = ref(false)
+
+/** localStorage 存储键：明暗模式 */
+const STORAGE_KEY_THEME = 'theme'
+
+/** localStorage 存储键：色系主题 */
+const STORAGE_KEY_SCHEME = 'colorScheme'
 
 /**
  * 获取系统主题偏好
@@ -42,7 +51,7 @@ function getSystemTheme(): 'light' | 'dark' {
 }
 
 /**
- * 将主题应用到 DOM
+ * 将明暗模式应用到 DOM
  * 通过在 <html> 元素上添加/移除 'dark' 类名来切换主题
  * Tailwind CSS 的暗色模式通过这个类名生效
  *
@@ -59,6 +68,16 @@ function applyTheme(value: Theme) {
   document.documentElement.classList.toggle('dark', isDark.value)
 }
 
+/**
+ * 将色系主题应用到 DOM
+ * 在 <html> 元素上写 data-theme 属性，主题 CSS 按属性选择器换整套令牌值
+ *
+ * @param value - 色系主题 id
+ */
+function applyColorScheme(value: ColorScheme) {
+  document.documentElement.dataset.theme = value
+}
+
 // 监听系统主题变化
 // 当用户在系统设置中切换主题时，自动更新应用主题
 if (typeof window !== 'undefined') {
@@ -68,47 +87,81 @@ if (typeof window !== 'undefined') {
       applyTheme('system')
     }
   })
+
+  // 跨窗口同步：设置页改主题后，快捷搜索 / 倒计时等已打开的窗口实时跟随
+  window.addEventListener('storage', (e) => {
+    if (e.key === STORAGE_KEY_THEME && e.newValue) {
+      theme.value = e.newValue as Theme
+      applyTheme(theme.value)
+    } else if (e.key === STORAGE_KEY_SCHEME && e.newValue) {
+      colorScheme.value = e.newValue as ColorScheme
+      applyColorScheme(colorScheme.value)
+    }
+  })
 }
 
 /**
  * 主题管理 Hook
  *
  * @returns 包含以下属性和方法的对象：
- * - theme: 当前主题设置（响应式）
+ * - theme: 当前明暗模式（响应式）
  * - isDark: 是否暗色模式（响应式）
+ * - colorScheme: 当前色系主题（响应式）
  * - initTheme: 初始化主题（应用启动时调用）
- * - setTheme: 设置主题
- * - toggleTheme: 切换亮暗模式
+ * - setTheme: 设置明暗模式
+ * - toggleTheme: 切换明暗模式
+ * - setColorScheme: 设置色系主题
  */
 export function useTheme() {
   /**
    * 初始化主题
-   * 从 localStorage 读取保存的主题设置，如果没有则默认使用"跟随系统"
-   * 应用启动时调用一次即可
+   * 从 localStorage 读取保存的明暗模式与色系主题，应用启动时调用一次即可。
+   * HTML 入口里的防闪脚本已提前写过一遍属性，这里再调用保证 Vue 状态同步。
    */
   function initTheme() {
-    const saved = localStorage.getItem('theme') as Theme | null
-    theme.value = saved || 'system'
+    const savedTheme = localStorage.getItem(STORAGE_KEY_THEME) as Theme | null
+    theme.value = savedTheme || 'dark'
     applyTheme(theme.value)
+
+    const savedScheme = localStorage.getItem(STORAGE_KEY_SCHEME) as ColorScheme | null
+    if (
+      savedScheme === 'classic' ||
+      savedScheme === 'aurora' ||
+      savedScheme === 'dusk' ||
+      savedScheme === 'islands'
+    ) {
+      colorScheme.value = savedScheme
+    }
+    applyColorScheme(colorScheme.value)
   }
 
   /**
-   * 设置主题并保存到 localStorage
+   * 设置明暗模式并保存到 localStorage
    * @param value - 要设置的主题类型
    */
   function setTheme(value: Theme) {
     theme.value = value
-    localStorage.setItem('theme', value)
+    localStorage.setItem(STORAGE_KEY_THEME, value)
     applyTheme(value)
   }
 
   /**
-   * 切换亮暗模式
+   * 切换明暗模式
    * 如果当前是暗色则切换到亮色，反之亦然
    */
   function toggleTheme() {
     const next = isDark.value ? 'light' : 'dark'
     setTheme(next)
+  }
+
+  /**
+   * 设置色系主题并保存到 localStorage
+   * @param value - 色系主题 id
+   */
+  function setColorScheme(value: ColorScheme) {
+    colorScheme.value = value
+    localStorage.setItem(STORAGE_KEY_SCHEME, value)
+    applyColorScheme(value)
   }
 
   // 监听 theme 变化，自动应用
@@ -117,8 +170,10 @@ export function useTheme() {
   return {
     theme,
     isDark,
+    colorScheme,
     initTheme,
     setTheme,
     toggleTheme,
+    setColorScheme,
   }
 }

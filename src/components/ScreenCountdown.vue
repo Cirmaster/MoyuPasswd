@@ -107,7 +107,7 @@ onUnmounted(() => {
     >
       <div
         v-if="show"
-        class="fixed bottom-6 right-6 z-[99999] flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border backdrop-blur-md bg-background/95"
+        class="fixed bottom-6 right-6 z-[99999] flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl border backdrop-blur-md bg-popover/95"
       >
         <!-- 动画图标 -->
         <div class="relative">

@@ -809,10 +809,10 @@ onMounted(async () => {
 
 <template>
   <div class="h-screen flex flex-col bg-background">
-    <!-- 顶部导航栏 -->
-    <header class="border-b px-4 py-3 flex items-center justify-between">
+    <!-- 顶部导航栏（框架层，Islands 风格不与岛面硬分割） -->
+    <header class="px-4 py-3 flex items-center justify-between">
       <div class="flex items-center gap-2">
-        <IconLock class="h-6 w-6 text-primary" stroke-linecap="round" stroke-linejoin="round" />
+        <IconLock class="h-6 w-6 text-primary-ink" stroke-linecap="round" stroke-linejoin="round" />
         <h1 class="text-lg font-semibold">MoyuPasswd</h1>
       </div>
 
@@ -837,9 +837,10 @@ onMounted(async () => {
       </div>
     </header>
 
-    <div class="flex flex-1 overflow-hidden">
-      <!-- 左侧栏：本地筛选 / 智能视图 / 分类树 / 标签 -->
-      <aside class="w-56 shrink-0 border-r flex flex-col overflow-hidden">
+    <!-- 岛屿布局：侧栏岛 + 内容岛浮在框架底上，岛间留隙、圆角、无描边分割 -->
+    <div class="flex flex-1 gap-2 px-2 pb-2 overflow-hidden">
+      <!-- 左侧栏岛：本地筛选 / 智能视图 / 分类树 / 标签 -->
+      <aside class="w-56 shrink-0 rounded-[10px] bg-card flex flex-col overflow-hidden">
         <!-- 侧栏本地筛选：只过滤分类/标签的展示，不影响列表搜索 -->
         <div class="p-2.5 border-b shrink-0">
           <div class="relative">
@@ -859,14 +860,14 @@ onMounted(async () => {
             <button
               type="button"
               class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors"
-              :class="activeCategory === 'all' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
+              :class="activeCategory === 'all' ? 'bg-select text-select-foreground' : 'hover:bg-muted'"
               @click="selectSmartView('all')"
             >
               <IconGrid class="h-4 w-4 shrink-0" />
               <span class="flex-1 text-left">全部</span>
               <span
                 class="text-xs tabular-nums"
-                :class="activeCategory === 'all' ? 'text-primary-foreground/70' : 'text-muted-foreground'"
+                :class="activeCategory === 'all' ? 'text-select-foreground/70' : 'text-muted-foreground'"
               >
                 {{ allCount }}
               </span>
@@ -875,14 +876,14 @@ onMounted(async () => {
             <button
               type="button"
               class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors"
-              :class="activeCategory === 'favorite' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
+              :class="activeCategory === 'favorite' ? 'bg-select text-select-foreground' : 'hover:bg-muted'"
               @click="selectSmartView('favorite')"
             >
               <IconStar class="h-4 w-4 shrink-0" />
               <span class="flex-1 text-left">收藏</span>
               <span
                 class="text-xs tabular-nums"
-                :class="activeCategory === 'favorite' ? 'text-primary-foreground/70' : 'text-muted-foreground'"
+                :class="activeCategory === 'favorite' ? 'text-select-foreground/70' : 'text-muted-foreground'"
               >
                 {{ favoriteCount }}
               </span>
@@ -891,14 +892,14 @@ onMounted(async () => {
             <button
               type="button"
               class="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm transition-colors"
-              :class="activeCategory === 'recent' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
+              :class="activeCategory === 'recent' ? 'bg-select text-select-foreground' : 'hover:bg-muted'"
               @click="selectSmartView('recent')"
             >
               <IconClock class="h-4 w-4 shrink-0" />
               <span class="flex-1 text-left">最近使用</span>
               <span
                 class="text-xs tabular-nums"
-                :class="activeCategory === 'recent' ? 'text-primary-foreground/70' : 'text-muted-foreground'"
+                :class="activeCategory === 'recent' ? 'text-select-foreground/70' : 'text-muted-foreground'"
               >
                 {{ recentCount }}
               </span>
@@ -936,9 +937,9 @@ onMounted(async () => {
                 :key="node.id"
                 class="relative flex items-center gap-1 rounded-md text-sm cursor-pointer select-none transition-colors"
                 :class="[
-                  activeCategory === node.id ? 'bg-primary text-primary-foreground' : 'hover:bg-muted',
+                  activeCategory === node.id ? 'bg-select text-select-foreground' : 'hover:bg-muted',
                   isCategoryDragging(node.id) ? 'opacity-50' : '',
-                  categoryDropIndicator(node.id) === 'into' ? 'ring-2 ring-primary ring-inset bg-primary/10' : '',
+                  categoryDropIndicator(node.id) === 'into' ? 'ring-2 ring-primary-ink ring-inset bg-primary-ink/10' : '',
                 ]"
                 :style="categoryIndentStyle(node.depth)"
                 :data-category-id="node.id"
@@ -948,11 +949,11 @@ onMounted(async () => {
                 <!-- 拖拽插入指示线（上/下边缘） -->
                 <span
                   v-if="categoryDropIndicator(node.id) === 'before'"
-                  class="pointer-events-none absolute left-0 right-0 -top-px h-0.5 rounded bg-primary"
+                  class="pointer-events-none absolute left-0 right-0 -top-px h-0.5 rounded bg-primary-ink"
                 />
                 <span
                   v-if="categoryDropIndicator(node.id) === 'after'"
-                  class="pointer-events-none absolute left-0 right-0 -bottom-px h-0.5 rounded bg-primary"
+                  class="pointer-events-none absolute left-0 right-0 -bottom-px h-0.5 rounded bg-primary-ink"
                 />
                 <!-- 有子节点时显示折叠箭头（本地 Set 记录折叠状态，默认展开） -->
                 <button
@@ -978,7 +979,7 @@ onMounted(async () => {
                 >{{ node.name }}</span>
                 <span
                   class="shrink-0 pr-2 text-xs tabular-nums"
-                  :class="activeCategory === node.id ? 'text-primary-foreground/70' : 'text-muted-foreground'"
+                  :class="activeCategory === node.id ? 'text-select-foreground/70' : 'text-muted-foreground'"
                 >
                   {{ node.totalCount }}
                 </span>
@@ -1003,7 +1004,7 @@ onMounted(async () => {
               <button
                 v-if="activeTags.length > 0"
                 type="button"
-                class="text-xs text-primary hover:underline"
+                class="text-xs text-primary-ink hover:underline"
                 title="清除已选标签"
                 @click="clearTags"
               >
@@ -1016,13 +1017,13 @@ onMounted(async () => {
                 v-for="tag in visibleSidebarTags"
                 :key="tag.name"
                 class="flex items-center gap-2 px-2 py-1 rounded-md text-sm cursor-pointer select-none transition-colors"
-                :class="isTagActive(tag.name) ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
+                :class="isTagActive(tag.name) ? 'bg-select text-select-foreground' : 'hover:bg-muted'"
                 @click="toggleTag(tag.name)"
               >
                 <span class="flex-1 min-w-0 truncate">{{ tag.name }}</span>
                 <span
                   class="shrink-0 text-xs tabular-nums"
-                  :class="isTagActive(tag.name) ? 'text-primary-foreground/70' : 'text-muted-foreground'"
+                  :class="isTagActive(tag.name) ? 'text-select-foreground/70' : 'text-muted-foreground'"
                 >
                   {{ tag.count }}
                 </span>
@@ -1050,7 +1051,7 @@ onMounted(async () => {
       </aside>
 
       <!-- 右侧内容区 -->
-      <main class="flex-1 flex flex-col overflow-hidden min-w-0">
+      <main class="flex-1 rounded-[10px] bg-card flex flex-col overflow-hidden min-w-0">
         <!-- 工具栏：搜索 / 排序 / 添加 -->
         <div class="p-4 border-b space-y-3">
           <div class="flex items-center gap-3">
@@ -1067,7 +1068,7 @@ onMounted(async () => {
             <!-- 排序方式：更新时间 / 创建时间 / 名称 / 最近使用 / 使用频率 -->
             <select
               :value="sortBy"
-              class="h-9 shrink-0 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-ring/50 focus-visible:ring-3"
+              class="h-9 shrink-0 rounded-md border border-input bg-card px-2 text-sm outline-none focus-visible:ring-ring/50 focus-visible:ring-3"
               title="排序方式"
               @change="handleSortKeyChange"
             >
@@ -1107,12 +1108,12 @@ onMounted(async () => {
             <span
               v-for="tag in activeTags"
               :key="tag"
-              class="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-primary/10 text-primary text-xs"
+              class="inline-flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full bg-primary-ink/10 text-primary-ink text-xs"
             >
               {{ tag }}
               <button
                 type="button"
-                class="rounded-full p-0.5 hover:bg-primary/20 transition-colors"
+                class="rounded-full p-0.5 hover:bg-primary-ink/20 transition-colors"
                 :title="`移除标签 ${tag}`"
                 @click="toggleTag(tag)"
               >
@@ -1151,7 +1152,7 @@ onMounted(async () => {
                 <TableHead>分类</TableHead>
                 <TableHead>更新时间</TableHead>
                 <!-- sticky 列需要不透明背景遮住滚动内容 -->
-                <TableHead class="text-center sticky right-0 bg-background">操作</TableHead>
+                <TableHead class="text-center sticky right-0 bg-card">操作</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1257,7 +1258,7 @@ onMounted(async () => {
 
                 <!-- 操作列钉在右侧：任何情况下编辑/删除都可见；
                      group-hover 同步行悬停高亮（sticky 的不透明底色会盖住行 hover） -->
-                <TableCell class="sticky right-0 bg-background group-hover:bg-muted/50">
+                <TableCell class="sticky right-0 bg-card group-hover:bg-muted/50">
                   <div class="flex items-center justify-center gap-1">
                     <Button variant="ghost" size="icon" title="编辑" @click="openEditDialog(item)">
                       <IconPencil class="h-4 w-4" />
@@ -1310,7 +1311,7 @@ onMounted(async () => {
               每页
               <select
                 :value="pageSize"
-                class="h-8 rounded-md border border-input bg-background px-1.5 text-sm outline-none focus-visible:ring-ring/50 focus-visible:ring-3"
+                class="h-8 rounded-md border border-input bg-card px-1.5 text-sm outline-none focus-visible:ring-ring/50 focus-visible:ring-3"
                 @change="handlePageSizeChange"
               >
                 <option
@@ -1397,7 +1398,7 @@ onMounted(async () => {
             <select
               id="home-category-parent"
               v-model="categoryDialogParentId"
-              class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
             >
               <option value="">无（顶级分类）</option>
               <option

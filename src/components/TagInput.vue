@@ -252,7 +252,7 @@ const focusInput = (event: MouseEvent) => {
   <div ref="rootRef" class="relative">
     <!-- 标签容器：徽章 + 输入框 -->
     <div
-      class="flex min-h-10 w-full flex-wrap items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1.5 text-sm ring-offset-background transition-colors focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2"
+      class="flex min-h-10 w-full flex-wrap items-center gap-1.5 rounded-md border border-input bg-card px-2 py-1.5 text-sm ring-offset-background transition-colors focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2"
       :class="{ 'opacity-60': disabled }"
       @click="focusInput"
     >

@@ -472,7 +472,7 @@ onUnmounted(() => {
                   class="shrink-0 rounded px-1 py-px text-[10px] leading-4"
                   :class="index === selectedIndex
                     ? 'bg-action-foreground/15 text-action-foreground/90'
-                    : 'bg-primary/10 text-primary'"
+                    : 'bg-primary-ink/10 text-primary-ink'"
                 >
                   {{ categoryLabel(item.category) }}
                 </span>
@@ -515,14 +515,14 @@ onUnmounted(() => {
                 class="w-[76px] flex items-center justify-center text-xs font-medium transition-colors"
                 :class="index === selectedIndex
                   ? 'bg-action-foreground/20 text-action-foreground hover:bg-action-foreground/35'
-                  : 'bg-primary/10 text-primary hover:bg-primary/25'"
+                  : 'bg-primary-ink/10 text-primary-ink hover:bg-primary-ink/25'"
                 @click.stop="copyUsername(item)"
               >
                 复制用户
               </button>
-              <!-- 复制密码（主操作档）：底色与行高亮严格同色（bg-action），hover 用提亮表达高亮态（不动行高亮色） -->
+              <!-- 复制密码（主操作档）：走 keycap 键帽令牌，各主题可给反差色（经典=同行动作色、暮光=点睛金），hover 用提亮表达 -->
               <button
-                class="w-[76px] flex items-center justify-center text-xs font-medium transition bg-action text-action-foreground hover:brightness-125 active:brightness-110"
+                class="w-[76px] flex items-center justify-center text-xs font-medium transition bg-keycap text-keycap-foreground hover:brightness-125 active:brightness-110"
                 @click.stop="copyPasswordById(item.id)"
               >
                 复制密码

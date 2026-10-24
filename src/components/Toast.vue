@@ -98,7 +98,7 @@ const getIconClass = () => {
     >
       <div
         v-if="visible"
-        class="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border bg-background"
+        class="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] flex items-center gap-3 px-4 py-3 rounded-lg shadow-lg border bg-popover"
         @click="close"
       >
         <!-- 图标 -->

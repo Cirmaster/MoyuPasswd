@@ -1,0 +1,76 @@
+/* ==================== 主题：电光青 ====================
+ * 科技感路线：高明度电光青做填充、深墨青做填充上的字（键帽式高对比）；
+ * 暗色填充压成深青蓝避免大面积发光，电光青降级为文字/描边点缀。
+ * 「复制密码」按钮走反差键帽：亮色=墨底青字，暗色=青底墨字。
+ * 派生自 IntelliJ 启动图配色讨论中的"科技感修正版"样例。
+ */
+
+[data-theme="aurora"] {
+  /* 冰白页面底（带青调，避免大面积纯白） */
+  --background: oklch(0.968 0.011 225.98);
+  --foreground: oklch(0.302 0.048 234.79);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.302 0.048 234.79);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.302 0.048 234.79);
+  /* 电光青填充，配深墨青字 */
+  --primary: oklch(0.724 0.134 226.15);
+  --primary-foreground: oklch(0.252 0.048 237.16);
+  /* 文字档加深，保证小字在浅底上 ≥4.5:1 */
+  --primary-ink: oklch(0.525 0.109 235.26);
+  /* 选中态与填充档同色（Islands 主题才单独用官方选区色） */
+  --select: oklch(0.724 0.134 226.15);
+  --select-foreground: oklch(0.252 0.048 237.16);
+  --secondary: oklch(0.944 0.017 230.91);
+  --secondary-foreground: oklch(0.302 0.048 234.79);
+  --muted: oklch(0.944 0.017 230.91);
+  --muted-foreground: oklch(0.554 0.040 234.45);
+  --accent: oklch(0.956 0.025 218.79);
+  --accent-foreground: oklch(0.302 0.048 234.79);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.906 0.026 227.92);
+  --input: oklch(0.906 0.026 227.92);
+  --ring: oklch(0.724 0.134 226.15);
+  --action: oklch(0.724 0.134 226.15);
+  --action-foreground: oklch(0.252 0.048 237.16);
+  /* 反差键帽：墨底青字 */
+  --keycap: oklch(0.252 0.048 237.16);
+  --keycap-foreground: oklch(0.863 0.099 215.15);
+  /* 主按钮不吃渐变/悬停滤镜（显式 none，防预览卡从激活主题继承到暮光渐变） */
+  --primary-bg-image: none;
+  --primary-hover-filter: none;
+}
+
+[data-theme="aurora"].dark {
+  /* 深空蓝页面底（带青调，避免大面积纯黑） */
+  --background: oklch(0.199 0.030 247.73);
+  --foreground: oklch(0.930 0.025 225.32);
+  --card: oklch(0.243 0.035 241.5);
+  --card-foreground: oklch(0.930 0.025 225.32);
+  --popover: oklch(0.243 0.035 241.5);
+  --popover-foreground: oklch(0.930 0.025 225.32);
+  /* 深青蓝填充：暗色底上不发光，配近白字 */
+  --primary: oklch(0.459 0.094 238.75);
+  --primary-foreground: oklch(0.966 0.014 224.49);
+  /* 文字/描边点缀才用电光青 */
+  --primary-ink: oklch(0.811 0.122 217.58);
+  --select: oklch(0.459 0.094 238.75);
+  --select-foreground: oklch(0.966 0.014 224.49);
+  --secondary: oklch(0.306 0.046 243.04);
+  --secondary-foreground: oklch(0.930 0.025 225.32);
+  --muted: oklch(0.296 0.036 241.4);
+  --muted-foreground: oklch(0.739 0.044 231.99);
+  --accent: oklch(0.333 0.061 238.97);
+  --accent-foreground: oklch(0.930 0.025 225.32);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(0.315 0.035 241.18);
+  --input: oklch(0.333 0.061 238.97);
+  --ring: oklch(0.759 0.133 221.15);
+  --action: oklch(0.459 0.094 238.75);
+  --action-foreground: oklch(0.966 0.014 224.49);
+  /* 反差键帽：青底墨字 */
+  --keycap: oklch(0.724 0.134 226.15);
+  --keycap-foreground: oklch(0.252 0.048 237.16);
+  --primary-bg-image: none;
+  --primary-hover-filter: none;
+}

@@ -5,10 +5,11 @@
   使用 Tabs 组件实现选项卡切换。
 
   设置分类：
-  1. 通用设置：主题、语言、开机自启、最小化到托盘
-  2. 安全设置：自动锁定时间、剪贴板清除时间、密码强度显示
-  3. 修改主密码：验证旧密码、设置新密码
-  4. 数据管理：导入导出数据、关于信息
+  1. 外观设置：明暗模式、主题风格
+  2. 通用设置：语言、开机自启、最小化到托盘
+  3. 安全设置：自动锁定时间、剪贴板清除时间、密码强度显示
+  4. 修改主密码：验证旧密码、设置新密码
+  5. 数据管理：导入导出数据、关于信息
 
   路由路径：/settings
 -->
@@ -19,19 +20,34 @@ import { useRouter } from 'vue-router'
 import { invoke } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { IconArrowLeft, IconLoader, IconPencil } from '@/components/icons'
+import { IconArrowLeft, IconCheckCircle, IconLoader, IconPencil } from '@/components/icons'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTheme } from '@/composables/useTheme'
+import { themes } from '@/themes/registry'
+import ThemePreview from '@/components/ThemePreview.vue'
 import { useShortcutStore } from '@/stores/shortcuts'
 import Toast from '@/components/Toast.vue'
 
 /** 路由实例 */
 const router = useRouter()
 
-/** 主题管理 */
-const { theme, setTheme } = useTheme()
+/** 主题管理（theme=明暗模式，colorScheme=色系主题） */
+const { theme, setTheme, colorScheme, setColorScheme } = useTheme()
+
+/**
+ * 设置明暗模式：本地立即生效，并即时同步一份到后端设置表。
+ * 后端不做实时消费，只为持久化兜底（重装/清存储后恢复）；
+ * 不即时同步的话，后端停在旧值，设置页重进时会被误当用户偏好盖回来。
+ */
+const handleSetTheme = (value: 'light' | 'dark' | 'system') => {
+  setTheme(value)
+  invoke('save_setting', { key: 'theme', value }).catch((e) => {
+    // 同步失败不影响本地生效，静默降级（后端仅兜底用途）
+    console.warn('同步主题到后端设置失败:', e)
+  })
+}
 
 /** 快捷键配置 */
 const shortcutStore = useShortcutStore()
@@ -75,8 +91,10 @@ onMounted(async () => {
     security.value.showPasswordStrength = savedSettings.show_password_strength
     security.value.allowTerminalInject = savedSettings.allow_terminal_inject ?? false
 
-    // 应用主题
-    if (savedSettings.theme && savedSettings.theme !== theme.value) {
+    // 应用主题：localStorage 是明暗模式的实时真源（快捷弹窗等窗口都读它），
+    // 只有本地还没有值（首次运行/清过存储）才用后端值兜底；
+    // 不能无条件用后端值覆盖，否则会出现「改成浅色后重进设置被盖回跟随系统」的回归
+    if (!localStorage.getItem('theme') && savedSettings.theme) {
       setTheme(savedSettings.theme as 'light' | 'dark' | 'system')
     }
 
@@ -712,8 +730,8 @@ const handleImport = async () => {
 
 <template>
   <div class="min-h-screen bg-background">
-    <!-- 顶部导航 -->
-    <header class="border-b px-4 py-3 flex items-center gap-4">
+    <!-- 顶部导航（框架层，不与内容硬分割） -->
+    <header class="px-4 py-3 flex items-center gap-4">
       <Button variant="ghost" size="icon" @click="router.push('/home')">
         <IconArrowLeft class="h-5 w-5" />
       </Button>
@@ -723,13 +741,84 @@ const handleImport = async () => {
     <!-- 内容区 -->
     <div class="max-w-3xl mx-auto p-6">
       <Tabs default-value="general">
-        <TabsList class="grid w-full grid-cols-5">
+        <TabsList class="grid w-full grid-cols-6">
           <TabsTrigger value="general">通用</TabsTrigger>
+          <TabsTrigger value="appearance">外观</TabsTrigger>
           <TabsTrigger value="security">安全</TabsTrigger>
           <TabsTrigger value="password">密码</TabsTrigger>
           <TabsTrigger value="shortcuts">快捷键</TabsTrigger>
           <TabsTrigger value="data">数据</TabsTrigger>
         </TabsList>
+
+        <!-- 外观设置 -->
+        <TabsContent value="appearance">
+          <Card>
+            <CardHeader>
+              <CardTitle>外观设置</CardTitle>
+              <CardDescription>明暗模式与主题风格</CardDescription>
+            </CardHeader>
+            <CardContent class="space-y-6">
+              <!-- 明暗模式 -->
+              <div class="space-y-2">
+                <Label>明暗模式</Label>
+                <div class="flex gap-2">
+                  <Button
+                    :variant="theme === 'light' ? 'default' : 'outline'"
+                    @click="handleSetTheme('light')"
+                  >
+                    浅色
+                  </Button>
+                  <Button
+                    :variant="theme === 'dark' ? 'default' : 'outline'"
+                    @click="handleSetTheme('dark')"
+                  >
+                    深色
+                  </Button>
+                  <Button
+                    :variant="theme === 'system' ? 'default' : 'outline'"
+                    @click="handleSetTheme('system')"
+                  >
+                    跟随系统
+                  </Button>
+                </div>
+              </div>
+
+              <!-- 主题风格：每张卡内是该主题明/暗两套的假界面预览 -->
+              <div class="space-y-2">
+                <Label>主题风格</Label>
+                <div class="grid grid-cols-3 gap-3">
+                  <button
+                    v-for="t in themes"
+                    :key="t.id"
+                    type="button"
+                    class="rounded-lg border p-2 text-left transition-colors"
+                    :class="
+                      colorScheme === t.id
+                        ? 'border-primary-ink ring-2 ring-ring'
+                        : 'border-border hover:bg-muted'
+                    "
+                    @click="setColorScheme(t.id)"
+                  >
+                    <div class="space-y-1.5">
+                      <ThemePreview :theme="t.id" />
+                      <ThemePreview :theme="t.id" dark />
+                    </div>
+                    <div class="mt-2 flex items-center justify-between">
+                      <div>
+                        <div class="text-sm font-medium">{{ t.name }}</div>
+                        <div class="text-xs text-muted-foreground">{{ t.desc }}</div>
+                      </div>
+                      <IconCheckCircle
+                        v-if="colorScheme === t.id"
+                        class="h-4 w-4 shrink-0 text-primary-ink"
+                      />
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         <!-- 通用设置 -->
         <TabsContent value="general">
@@ -739,37 +828,12 @@ const handleImport = async () => {
               <CardDescription>应用的基本配置</CardDescription>
             </CardHeader>
             <CardContent class="space-y-6">
-              <!-- 主题 -->
-              <div class="space-y-2">
-                <Label>主题</Label>
-                <div class="flex gap-2">
-                  <Button
-                    :variant="theme === 'light' ? 'default' : 'outline'"
-                    @click="setTheme('light')"
-                  >
-                    浅色
-                  </Button>
-                  <Button
-                    :variant="theme === 'dark' ? 'default' : 'outline'"
-                    @click="setTheme('dark')"
-                  >
-                    深色
-                  </Button>
-                  <Button
-                    :variant="theme === 'system' ? 'default' : 'outline'"
-                    @click="setTheme('system')"
-                  >
-                    跟随系统
-                  </Button>
-                </div>
-              </div>
-
               <!-- 语言 -->
               <div class="space-y-2">
                 <Label>语言</Label>
                 <select
                   v-model="settings.language"
-                  class="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm"
                 >
                   <option value="zh-CN">简体中文</option>
                   <option value="en-US">English</option>
@@ -971,7 +1035,7 @@ const handleImport = async () => {
                       @click="startEditShortcut('quickSearch')"
                     >
                       <template v-for="(part, i) in formatShortcut(shortcuts.quickSearch).split(' + ')" :key="i">
-                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
+                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-muted rounded border">{{ part }}</kbd>
                         <span v-if="i < formatShortcut(shortcuts.quickSearch).split(' + ').length - 1" class="text-muted-foreground">+</span>
                       </template>
                       <IconPencil class="h-3 w-3 ml-1 text-muted-foreground" />
@@ -1007,7 +1071,7 @@ const handleImport = async () => {
                           size="sm"
                           variant="outline"
                           class="h-7 text-xs"
-                          :class="{ 'border-primary': shortcutInput === preset.value }"
+                          :class="{ 'border-primary-ink': shortcutInput === preset.value }"
                           @click="selectPresetShortcut(preset.value)"
                         >
                           {{ preset.label }}
@@ -1034,7 +1098,7 @@ const handleImport = async () => {
                       @click="startEditShortcut('quickAdd')"
                     >
                       <template v-for="(part, i) in formatShortcut(shortcuts.quickAdd).split(' + ')" :key="i">
-                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
+                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-muted rounded border">{{ part }}</kbd>
                         <span v-if="i < formatShortcut(shortcuts.quickAdd).split(' + ').length - 1" class="text-muted-foreground">+</span>
                       </template>
                       <IconPencil class="h-3 w-3 ml-1 text-muted-foreground" />
@@ -1070,7 +1134,7 @@ const handleImport = async () => {
                           size="sm"
                           variant="outline"
                           class="h-7 text-xs"
-                          :class="{ 'border-primary': shortcutInput === preset.value }"
+                          :class="{ 'border-primary-ink': shortcutInput === preset.value }"
                           @click="selectPresetShortcut(preset.value)"
                         >
                           {{ preset.label }}
@@ -1097,7 +1161,7 @@ const handleImport = async () => {
                       @click="startEditShortcut('passwordGenerator')"
                     >
                       <template v-for="(part, i) in formatShortcut(shortcuts.passwordGenerator).split(' + ')" :key="i">
-                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-background rounded border">{{ part }}</kbd>
+                        <kbd class="px-1.5 py-0.5 text-xs font-mono bg-muted rounded border">{{ part }}</kbd>
                         <span v-if="i < formatShortcut(shortcuts.passwordGenerator).split(' + ').length - 1" class="text-muted-foreground">+</span>
                       </template>
                       <IconPencil class="h-3 w-3 ml-1 text-muted-foreground" />
@@ -1133,7 +1197,7 @@ const handleImport = async () => {
                           size="sm"
                           variant="outline"
                           class="h-7 text-xs"
-                          :class="{ 'border-primary': shortcutInput === preset.value }"
+                          :class="{ 'border-primary-ink': shortcutInput === preset.value }"
                           @click="selectPresetShortcut(preset.value)"
                         >
                           {{ preset.label }}
@@ -1199,7 +1263,7 @@ const handleImport = async () => {
                   <!-- id 冲突策略：默认跳过已存在条目，绝不静默覆盖 -->
                   <select
                     v-model="importConflictPolicy"
-                    class="text-sm border rounded-md px-2 py-1.5 bg-background"
+                    class="text-sm border rounded-md px-2 py-1.5 bg-card"
                     title="与现有条目 id 冲突时的处理方式"
                   >
                     <option value="skip">跳过已存在</option>

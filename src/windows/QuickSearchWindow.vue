@@ -643,8 +643,8 @@ onMounted(async () => {
       <div class="w-full max-w-sm bg-card border shadow-lg">
         <!-- 系统认证进行中 -->
         <div v-if="attemptingSystemAuth" class="p-6 text-center">
-          <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 mb-4">
-            <IconSpinner class="h-7 w-7 animate-spin text-primary" />
+          <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary-ink/10 mb-4">
+            <IconSpinner class="h-7 w-7 animate-spin text-primary-ink" />
           </div>
           <h2 class="text-lg font-semibold mb-1">正在认证</h2>
           <p class="text-sm text-muted-foreground mb-4">请在弹出的窗口中选择解锁方式</p>
@@ -655,8 +655,8 @@ onMounted(async () => {
 
         <!-- 系统认证已启用：只显示认证按钮 -->
         <div v-else-if="systemAuthReady && !showPasswordInput" class="p-6 text-center">
-          <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 mb-4">
-            <IconLock class="h-7 w-7 text-primary" />
+          <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary-ink/10 mb-4">
+            <IconLock class="h-7 w-7 text-primary-ink" />
           </div>
           <h2 class="text-lg font-semibold mb-1">密码库已锁定</h2>
           <p class="text-sm text-muted-foreground mb-5">点击下方按钮解锁</p>
@@ -672,8 +672,8 @@ onMounted(async () => {
 
         <!-- 主密码输入（系统认证未启用或用户选择主密码） -->
         <div v-else class="p-6 text-center">
-          <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary/10 mb-4">
-            <IconLock class="h-7 w-7 text-primary" />
+          <div class="inline-flex items-center justify-center w-14 h-14 rounded-xl bg-primary-ink/10 mb-4">
+            <IconLock class="h-7 w-7 text-primary-ink" />
           </div>
           <h2 class="text-lg font-semibold mb-1">密码库已锁定</h2>
           <p class="text-sm text-muted-foreground mb-5">输入主密码解锁</p>
@@ -737,7 +737,7 @@ onMounted(async () => {
             :data-index="index"
             class="mb-1"
           >
-            <!-- 结果行（选中高亮 = action 色，与复制密码按钮严格同色；暗色主题为深板岩蓝而非近白） -->
+            <!-- 结果行（选中高亮 = action 色；复制密码按钮走 keycap 键帽色，两者可同可异，由主题决定） -->
             <div
               class="flex items-stretch cursor-pointer transition-colors"
               :class="{
@@ -759,8 +759,8 @@ onMounted(async () => {
                     v-if="categoryLabel(item.category)"
                     class="shrink-0 rounded px-1 py-px text-[10px] leading-4"
                     :class="index === selectedIndex
-                      ? 'bg-action-foreground/15 text-action-foreground/90'
-                      : 'bg-primary/10 text-primary'"
+                    ? 'bg-action-foreground/15 text-action-foreground/90'
+                    : 'bg-primary-ink/10 text-primary-ink'"
                     :title="categoryLabel(item.category)"
                   >
                     {{ categoryLabel(item.category) }}
@@ -804,14 +804,14 @@ onMounted(async () => {
                   class="w-[76px] flex items-center justify-center text-xs font-medium transition-colors"
                   :class="index === selectedIndex
                     ? 'bg-action-foreground/20 text-action-foreground hover:bg-action-foreground/35'
-                    : 'bg-primary/10 text-primary hover:bg-primary/25'"
+                    : 'bg-primary-ink/10 text-primary-ink hover:bg-primary-ink/25'"
                   @click.stop="copyUsernameByIdAndClose(item)"
                 >
                   复制用户
                 </button>
-                <!-- 复制密码（主操作档）：底色与行高亮严格同色（bg-action），hover 用提亮表达高亮态（不动行高亮色） -->
+                <!-- 复制密码（主操作档）：走 keycap 键帽令牌，各主题可给反差色（经典=同行动作色、暮光=点睛金），hover 用提亮表达 -->
                 <button
-                  class="w-[76px] flex items-center justify-center text-xs font-medium transition bg-action text-action-foreground hover:brightness-125 active:brightness-110"
+                  class="w-[76px] flex items-center justify-center text-xs font-medium transition bg-keycap text-keycap-foreground hover:brightness-125 active:brightness-110"
                   @click.stop="copyPasswordByIdAndClose(item.id)"
                 >
                   复制密码
