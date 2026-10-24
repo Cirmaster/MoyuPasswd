@@ -118,10 +118,6 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        // 注册通知插件
-        .plugin(tauri_plugin_notification::init())
-        // 注册 Shell 插件
-        .plugin(tauri_plugin_shell::init())
         // 注册生物识别插件（Windows Hello / Touch ID）
         .plugin(tauri_plugin_biometry::init())
         .setup(|app| {

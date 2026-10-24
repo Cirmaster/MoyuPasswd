@@ -31,9 +31,9 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "=2.3.2"
 tauri-plugin-clipboard-manager = "=2.3.2"
 tauri-plugin-autostart = "=2.5.1"
-tauri-plugin-notification = "=2.3.3"
-tauri-plugin-shell = "=2.3.5"
 tauri-plugin-biometry = "0.3.0-rc.3"
+# 注：notification / shell 插件已移除——前端无任何引用，注册即多余攻击面
+#（shell 一旦误授权限就是 RCE 口子）；需要时再按官方文档加回
 
 # 数据库（SQLCipher 加密）
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }

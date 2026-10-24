@@ -131,8 +131,14 @@ pub async fn set_master_password(
     password: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
 ) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
+        // 仅主窗口可调用：设置主密码是初始化级操作，小窗不得触达
+        if window.label() != "main" {
+            return Err("该操作仅允许在主窗口执行".to_string());
+        }
+
         // 检查元数据状态（三态）：读取失败绝不当作「未设置」，避免覆盖已有配置
         match db_meta::meta_status(&state.app_dir) {
             db_meta::MetaStatus::Present => {
@@ -326,8 +332,14 @@ pub async fn change_master_password(
     new_password: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
 ) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
+        // 仅主窗口可调用：改主密码会重加密全库，小窗不得触达
+        if window.label() != "main" {
+            return Err("该操作仅允许在主窗口执行".to_string());
+        }
+
         // ---- 前置检查 ----
         // 暴力破解防护（与 verify_master_password 共用失败计数/锁定）
         state.clear_expired_lockout();
@@ -622,8 +634,8 @@ pub async fn enable_system_auth(state: State<'_, AppState>, app: tauri::AppHandl
         // 将两个密钥合并存储（64 字节）
         // 插件的 set_data 会自动触发 Windows Hello 认证
         let mut combined_key = [0u8; 64];
-        combined_key[..32].copy_from_slice(&aes_key);
-        combined_key[32..].copy_from_slice(&db_key);
+        combined_key[..32].copy_from_slice(&*aes_key);
+        combined_key[32..].copy_from_slice(&*db_key);
 
         // 存入系统安全存储
         crate::system_auth::store_key(&combined_key, &state.app_dir, &app)?;

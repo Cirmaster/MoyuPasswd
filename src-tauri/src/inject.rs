@@ -97,10 +97,11 @@ mod win_impl {
     /// # Arguments
     /// * `text` - 要注入的文本
     /// * `target_hwnd` - 目标窗口句柄
+    /// * `target_pid` - 归因时的目标进程 ID（注入前复核，防句柄复用）
     ///
     /// # Returns
     /// 是否注入成功
-    pub fn inject_text(text: &str, target_hwnd: HWND) -> bool {
+    pub fn inject_text(text: &str, target_hwnd: HWND, target_pid: u32) -> bool {
         log::info!("[INJECT] 开始注入文本: 长度={}, 目标窗口={:?}", text.len(), target_hwnd);
 
         unsafe {
@@ -110,16 +111,30 @@ mod win_impl {
                 return false;
             }
 
+            // 复核 hwnd 归属进程：归因后目标窗口可能已销毁、句柄被复用给其他进程，
+            // 只比对句柄会把密码打进「顶着同一个 hwnd 的陌生进程」
+            let mut current_pid: u32 = 0;
+            GetWindowThreadProcessId(target_hwnd, Some(&mut current_pid));
+            if target_pid == 0 || current_pid != target_pid {
+                log::warn!(
+                    "[INJECT] 目标窗口已易主（pid {} -> {}），放弃注入",
+                    target_pid,
+                    current_pid
+                );
+                return false;
+            }
+
             // 释放修饰键，避免注入字符被目标应用当成组合键
             release_modifiers();
 
-            // 注入文本
-            let chars: Vec<u16> = text.encode_utf16().collect();
+            // 注入文本（Zeroizing 包装：UTF-16 缓冲用完自动清零，不在内存里留密码）
+            let chars: zeroize::Zeroizing<Vec<u16>> =
+                zeroize::Zeroizing::new(text.encode_utf16().collect());
             log::info!("[INJECT] UTF-16 字符数: {}", chars.len());
 
             // 一次性把全部按键事件插入输入流，避免中途混入用户的物理按键
             let mut inputs: Vec<INPUT> = Vec::with_capacity(chars.len() * 2);
-            for &ch in &chars {
+            for &ch in chars.iter() {
                 log::debug!("[INJECT] 构造字符 U+{:04X}", ch);
 
                 // 按下键
@@ -152,6 +167,10 @@ mod win_impl {
             }
 
             let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            // 按键事件里含密码的 UTF-16 码点，发完就地清零缓冲
+            for item in inputs.iter_mut() {
+                *item = std::mem::zeroed();
+            }
             if sent != inputs.len() as u32 {
                 log::error!("[INJECT] SendInput 失败: 发送={}/{}, 错误={}",
                     sent, inputs.len(), std::io::Error::last_os_error());
@@ -342,7 +361,7 @@ pub fn trigger_inject() {
 
     // 5. 注入密码（SendInput 模拟键盘输入，不动焦点）
     log::info!("[INJECT] 步骤 5：SendInput 注入");
-    let success = inject_text(&plaintext, target_hwnd);
+    let success = inject_text(&plaintext, target_hwnd, target_pid.unwrap_or(0));
     log::info!("[INJECT] SendInput 结果: {}", success);
     let _ = target_path;
 
@@ -368,6 +387,8 @@ pub fn trigger_inject() {
     });
 
     if success {
+        // 注入成功后压缩 pending 剩余有效期（见 pending::shorten_after_inject）
+        crate::pending::shorten_after_inject();
         log::info!("[INJECT] ========== 注入完成 ==========");
     } else {
         log::error!("[INJECT] ========== 注入失败 ==========");
@@ -469,16 +490,20 @@ const TERMINAL_GRANT_TTL: std::time::Duration = std::time::Duration::from_secs(5
 
 /// 登记终端二次确认窗口
 fn arm_terminal_grant(process_name: &str) {
-    if let Ok(mut guard) = TERMINAL_GRANT.lock() {
-        *guard = Some((process_name.to_string(), std::time::Instant::now()));
-    }
+    let mut guard = TERMINAL_GRANT.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some((process_name.to_string(), std::time::Instant::now()));
 }
 
 /// 消费确认窗口：同一进程且未过期则放行一次（窗口一次性用掉）
+///
+/// **先判后取**：进程名不匹配或已过期时不能消耗窗口——
+/// 否则一次过期/串台的查询会吃掉合法用户的第二次确认，让他确认失效。
 fn consume_terminal_grant(process_name: &str) -> bool {
-    if let Ok(mut guard) = TERMINAL_GRANT.lock() {
-        if let Some((name, at)) = guard.take() {
-            return name.eq_ignore_ascii_case(process_name) && at.elapsed() <= TERMINAL_GRANT_TTL;
+    let mut guard = TERMINAL_GRANT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((name, at)) = guard.as_ref() {
+        if name.eq_ignore_ascii_case(process_name) && at.elapsed() <= TERMINAL_GRANT_TTL {
+            *guard = None;
+            return true;
         }
     }
     false
@@ -503,12 +528,12 @@ static INJECT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// 注入应用句柄（启动时调用一次）
 pub fn set_app_handle(app: tauri::AppHandle) {
-    *APP_HANDLE.lock().unwrap() = Some(app);
+    *APP_HANDLE.lock().unwrap_or_else(|e| e.into_inner()) = Some(app);
 }
 
 /// 获取应用句柄
 fn get_app_handle() -> Option<tauri::AppHandle> {
-    APP_HANDLE.lock().unwrap().clone()
+    APP_HANDLE.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// zeroize 明文（安全清零）

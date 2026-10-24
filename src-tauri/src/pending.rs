@@ -81,7 +81,7 @@ pub fn register_with_decrypt(entry_id: &str, ttl_seconds: u32, decrypt_fn: Decry
     let seq = SEQ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let deadline = Instant::now() + Duration::from_secs(ttl_seconds.max(1) as u64);
 
-    let mut pending = PENDING.lock().unwrap();
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     // 再次复制：旧 pending 作废（沿用「再次复制后作废」语义，记 Revoked 审计）
     if let Some(old) = pending.take() {
         log::info!("[PENDING] 再次复制，作废旧 pending: seq={}", old.seq);
@@ -122,7 +122,7 @@ pub fn register_with_decrypt(entry_id: &str, ttl_seconds: u32, decrypt_fn: Decry
 /// # Returns
 /// Some((entry_id, seq)) 如果存在且未过期
 pub fn get_active() -> Option<(String, u64)> {
-    let mut pending = PENDING.lock().unwrap();
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     expire_if_stale_locked(&mut pending);
     if let Some(ref p) = *pending {
         let now = Instant::now();
@@ -136,7 +136,7 @@ pub fn get_active() -> Option<(String, u64)> {
 
 /// 静默检查是否存在有效的待粘贴密码（供钩子高频路径使用，不刷日志）
 pub fn has_active() -> bool {
-    let mut pending = PENDING.lock().unwrap();
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     expire_if_stale_locked(&mut pending);
     pending.is_some()
 }
@@ -149,7 +149,7 @@ pub fn has_active() -> bool {
 /// # Returns
 /// Some((entry_id, seq, decrypt_fn)) 如果存在且未过期
 pub fn get_for_inject() -> Option<(String, u64, DecryptFn)> {
-    let mut pending = PENDING.lock().unwrap();
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     expire_if_stale_locked(&mut pending);
     if let Some(ref p) = *pending {
         let now = Instant::now();
@@ -157,6 +157,22 @@ pub fn get_for_inject() -> Option<(String, u64, DecryptFn)> {
         Some((p.entry_id.clone(), p.seq, Arc::clone(&p.decrypt_fn)))
     } else {
         None
+    }
+}
+
+/// 注入成功后调用：把剩余有效期压缩到 5 秒
+///
+/// 倒计时内可多次粘贴是既有能力，但注入后长期存活的 pending 会在用户改用
+/// 右键粘贴/复制时劫持随后的 Ctrl+V（粘出来的是旧密码）。压缩窗口：
+/// 需要连按的场景 5 秒内仍可完成，之后自动作废。
+pub fn shorten_after_inject() {
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref mut p) = *pending {
+        let short = Instant::now() + Duration::from_secs(5);
+        if p.deadline > short {
+            p.deadline = short;
+            log::info!("[PENDING] 注入后压缩有效期至 5 秒: seq={}", p.seq);
+        }
     }
 }
 
@@ -192,7 +208,7 @@ fn expire_if_stale_locked(pending: &mut Option<PendingClip>) -> bool {
 
 /// 作废待粘贴密码
 pub fn revoke(reason: &str) {
-    let mut pending = PENDING.lock().unwrap();
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(p) = pending.take() {
         record_audit(InjectAuditEvent {
             ts: SystemTime::now(),
@@ -209,21 +225,21 @@ pub fn revoke(reason: &str) {
 
 /// 检查是否过期并清理
 pub fn cleanup_expired() {
-    let mut pending = PENDING.lock().unwrap();
+    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     expire_if_stale_locked(&mut pending);
 }
 
 /// 记录审计事件
 pub fn record_audit(event: InjectAuditEvent) {
-    let mut buffer = AUDIT_BUFFER.lock().unwrap();
-
-    // 环形缓冲：满了就丢弃最旧的
-    if buffer.len() >= AUDIT_BUFFER_SIZE {
-        buffer.remove(0);
+    {
+        let mut buffer = AUDIT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+        // 环形缓冲：满了就丢弃最旧的
+        if buffer.len() >= AUDIT_BUFFER_SIZE {
+            buffer.remove(0);
+        }
+        buffer.push(event.clone());
     }
-    buffer.push(event.clone());
-
-    // 持久化到审计日志文件
+    // 持久化到审计日志文件（在锁外做文件 IO，避免持锁 panic 毒化后连环炸）
     crate::audit::write_to_file(&event);
 
     // 输出到日志
@@ -234,13 +250,13 @@ pub fn record_audit(event: InjectAuditEvent) {
 
 /// 获取审计事件列表（供前端查询）
 pub fn get_audit_events(limit: usize) -> Vec<InjectAuditEvent> {
-    let buffer = AUDIT_BUFFER.lock().unwrap();
+    let buffer = AUDIT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
     let start = if buffer.len() > limit { buffer.len() - limit } else { 0 };
     buffer[start..].to_vec()
 }
 
 /// 清空审计缓冲
 pub fn clear_audit() {
-    let mut buffer = AUDIT_BUFFER.lock().unwrap();
+    let mut buffer = AUDIT_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
     buffer.clear();
 }

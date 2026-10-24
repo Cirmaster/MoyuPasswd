@@ -199,7 +199,8 @@ const loadSettings = async () => {
     const savedSettings = await invoke<{
       clipboard_clear_time: number
     }>('get_settings')
-    clipboardClearTime.value = savedSettings.clipboard_clear_time || 30
+    // 0 = 明确不自动清除，不能用 || 兜底（0 会被折算成 30）
+    clipboardClearTime.value = savedSettings.clipboard_clear_time ?? 30
   } catch (e) {
     console.warn('加载设置失败:', e)
   }
@@ -248,12 +249,16 @@ const searchPasswords = async (query: string) => {
   } catch (e) {
     if (seq !== requestSeq) return
     console.error('查询密码失败:', e)
-    // 后端返回错误，区分「未解锁」与其他错误：
-    // 只有明确未解锁才显示锁定界面，其他错误（如数据库瞬时锁冲突）保持
-    // 现有解锁状态不变并提示重试，避免误显示「密码库已锁定」
-    const errorMsg = String(e)
-    if (errorMsg.includes('未解锁') || errorMsg.includes('not unlocked')) {
-      // 后端未解锁，显示解锁界面
+    // 不用后端错误文案判断锁定态（文案会改/会本地化，把文案当状态信号会失灵）：
+    // 显式复核 is_unlocked，只有确认未解锁才显示锁定界面
+    let unlocked = true
+    try {
+      unlocked = await invoke<boolean>('is_unlocked')
+    } catch {
+      // 复核失败按未解锁处理（fail closed，宁可多要求一次解锁）
+      unlocked = false
+    }
+    if (!unlocked) {
       isUnlocked.value = false
       results.value = []
       searchQuery.value = ''

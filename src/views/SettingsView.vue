@@ -215,15 +215,29 @@ const forceFocusInput = () => {
 /**
  * 输入框失去焦点时，如果还在编辑模式，强制重新聚焦
  */
+let blurTimer: ReturnType<typeof setTimeout> | null = null
 const handleInputBlur = () => {
   if (editingShortcut.value) {
     // 延迟一下，避免和其他点击事件冲突
-    setTimeout(() => {
+    blurTimer = setTimeout(() => {
+      blurTimer = null
       if (editingShortcut.value) {
         forceFocusInput()
       }
     }, 10)
   }
+}
+
+/**
+ * 数值设置钳制（0 = 禁用/不自动清除，放行；其余按区间截断）
+ * min/max 属性只是提示，手动输入 0/负数/9999 都能提交，提交前必须钳制
+ */
+const clampSettingNumber = (value: number, min: number, max: number): number => {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return min
+  const v = Math.trunc(n)
+  if (v === 0) return 0
+  return Math.min(Math.max(v, min), max)
 }
 
 /**
@@ -262,7 +276,6 @@ const saveShortcut = async (key: 'quickSearch' | 'quickAdd' | 'passwordGenerator
   }
 
   try {
-    console.log(`保存快捷键: ${key} = ${normalizedShortcut}`)
     // 直接调用 store 的 updateShortcut 方法（会自动重新注册全局快捷键）
     const failed = await shortcutStore.updateShortcut(key, normalizedShortcut)
     // 退出编辑模式
@@ -363,6 +376,11 @@ onUnmounted(() => {
   document.removeEventListener('keydown', globalKeydownInterceptor, { capture: true })
   // 离开页面时若仍处于编辑态，恢复全局快捷键（兜底）
   exitEditMode()
+  // 清理 blur 重聚焦定时器（防止卸载后仍触发 forceFocusInput）
+  if (blurTimer !== null) {
+    clearTimeout(blurTimer)
+    blurTimer = null
+  }
 })
 
 /**
@@ -414,8 +432,6 @@ const isReservedShortcut = (shortcut: string): boolean => {
  * @param e - 键盘事件
  */
 const handleShortcutKeydown = (e: KeyboardEvent) => {
-  console.log('键盘事件:', e.key, e.ctrlKey, e.shiftKey, e.altKey, e.metaKey)
-  
   // 阻止事件冒泡和默认行为，防止触发系统/应用快捷键
   e.preventDefault()
   e.stopPropagation()
@@ -467,7 +483,6 @@ const handleShortcutKeydown = (e: KeyboardEvent) => {
   parts.push(keyName)
 
   const newShortcut = parts.join('+')
-  console.log('生成的快捷键:', newShortcut)
   shortcutInput.value = newShortcut
   
   // 检查是否为保留快捷键
@@ -498,8 +513,8 @@ const handleSaveGeneral = async () => {
       settings: {
         theme: theme.value,
         language: settings.value.language,
-        auto_lock_time: security.value.autoLockTime,
-        clipboard_clear_time: security.value.clipboardClearTime,
+        auto_lock_time: clampSettingNumber(security.value.autoLockTime, 1, 60),
+        clipboard_clear_time: clampSettingNumber(security.value.clipboardClearTime, 10, 300),
         auto_start: settings.value.autoStart,
         close_to_tray: settings.value.closeToTray,
         show_password_strength: security.value.showPasswordStrength,
@@ -554,8 +569,8 @@ const handleSaveSecurity = async () => {
       settings: {
         theme: theme.value,
         language: settings.value.language,
-        auto_lock_time: security.value.autoLockTime,
-        clipboard_clear_time: security.value.clipboardClearTime,
+        auto_lock_time: clampSettingNumber(security.value.autoLockTime, 1, 60),
+        clipboard_clear_time: clampSettingNumber(security.value.clipboardClearTime, 10, 300),
         auto_start: settings.value.autoStart,
         close_to_tray: settings.value.closeToTray,
         show_password_strength: security.value.showPasswordStrength,

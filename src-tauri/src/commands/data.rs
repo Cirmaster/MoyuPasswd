@@ -50,6 +50,15 @@ pub struct ExportPasswordItem {
     pub is_favorite: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 密码强度（旧导出文件缺失视为未计算；导入时按明文重算，此字段仅作留档）
+    #[serde(default)]
+    pub password_strength: Option<i32>,
+    /// 最近使用时间（旧导出文件缺失视为从未使用）
+    #[serde(default)]
+    pub last_used_at: Option<i64>,
+    /// 使用次数（旧导出文件缺失视为 0）
+    #[serde(default)]
+    pub use_count: i64,
 }
 
 /// 导出分类
@@ -73,6 +82,106 @@ pub struct ImportData {
 
 /// 加密导出包裹的格式标识
 const ENCRYPTED_FORMAT: &str = "moyu-passwd-encrypted-v1";
+
+// ==================== 导入规模与字段上限（防御超大/垃圾数据） ====================
+
+/// 导入 JSON 上限（50 MB）：超大文件会撑爆内存并在解密/Argon2 上耗尽 CPU
+const MAX_IMPORT_JSON_BYTES: usize = 50 * 1024 * 1024;
+/// 单次导入密码条目上限
+const MAX_IMPORT_PASSWORDS: usize = 10_000;
+/// 单次导入分类条目上限
+const MAX_IMPORT_CATEGORIES: usize = 1_000;
+
+/// 校验导入数据的规模与字段上限
+///
+/// 导入文件是唯一的外部数据入口，必须当成不可信输入：
+/// id 要能安全作主键、文本要有长度上限、时间戳要有合理范围，
+/// 否则垃圾数据会永久污染数据库（列表/搜索/导出全被拖垮）。
+fn validate_import(data: &ImportData) -> Result<(), String> {
+    if data.passwords.len() > MAX_IMPORT_PASSWORDS {
+        return Err(format!(
+            "导入条目过多（{} 条，上限 {} 条）",
+            data.passwords.len(),
+            MAX_IMPORT_PASSWORDS
+        ));
+    }
+    if data.categories.len() > MAX_IMPORT_CATEGORIES {
+        return Err(format!(
+            "导入分类过多（{} 个，上限 {} 个）",
+            data.categories.len(),
+            MAX_IMPORT_CATEGORIES
+        ));
+    }
+
+    for category in &data.categories {
+        validate_import_id(&category.id, "分类 id")?;
+        if category.name.trim().is_empty() {
+            return Err("分类名不能为空".to_string());
+        }
+        if category.name.chars().count() > 100 {
+            return Err(format!("分类名过长（最长 100 字符）: {:?}", category.name));
+        }
+    }
+
+    // 时间戳合理范围：1970-01-01 ~ 2100-01-01（毫秒）
+    const MIN_TS: i64 = 0;
+    const MAX_TS: i64 = 4_102_444_800_000;
+
+    for p in &data.passwords {
+        validate_import_id(&p.id, "密码 id")?;
+        if p.title.trim().is_empty() {
+            return Err("密码标题不能为空".to_string());
+        }
+        if p.title.chars().count() > 200 {
+            return Err(format!("密码标题过长（最长 200 字符）: {:?}", p.title));
+        }
+        if p.username.chars().count() > 200 {
+            return Err("用户名过长（最长 200 字符）".to_string());
+        }
+        if p.password.chars().count() > 4096 {
+            return Err("密码过长（最长 4096 字符）".to_string());
+        }
+        if p.url.as_ref().map(|u| u.chars().count() > 2048).unwrap_or(false) {
+            return Err("URL 过长（最长 2048 字符）".to_string());
+        }
+        if p.notes.as_ref().map(|n| n.chars().count() > 65536).unwrap_or(false) {
+            return Err("备注过长（最长 65536 字符）".to_string());
+        }
+        if p.extra_fields.len() > 50 {
+            return Err(format!("自定义字段过多（{} 个，上限 50 个）", p.extra_fields.len()));
+        }
+        for f in &p.extra_fields {
+            if f.label.trim().is_empty() || f.label.chars().count() > 64 {
+                return Err("自定义字段名非法（非空且最长 64 字符）".to_string());
+            }
+            if f.value.chars().count() > 4096 {
+                return Err("自定义字段值过长（最长 4096 字符）".to_string());
+            }
+        }
+        if p.tags.len() > 20 {
+            return Err(format!("标签过多（{} 个，上限 20 个）", p.tags.len()));
+        }
+        if p.created_at < MIN_TS || p.created_at > MAX_TS {
+            return Err(format!("创建时间戳非法: {}", p.created_at));
+        }
+        if p.updated_at < MIN_TS || p.updated_at > MAX_TS {
+            return Err(format!("更新时间戳非法: {}", p.updated_at));
+        }
+    }
+    Ok(())
+}
+
+/// 校验导入 id：非空、≤64 字符、仅字母数字与 `-`/`_`（可安全作主键与文件内引用）
+fn validate_import_id(id: &str, what: &str) -> Result<(), String> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("{what} 非法（应为 ≤64 位字母/数字/-/_）: {id:?}"))
+    }
+}
 
 /// 加密导出包裹结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,8 +267,14 @@ fn decrypt_export(wrapper: &EncryptedExport, export_password: &str) -> Result<St
 pub async fn export_data(
     export_password: String,
     state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
 ) -> ApiResult<String> {
     respond(|| -> Result<String, String> {
+        // 仅主窗口可调用：导出是全量明文数据的出口，小窗（快速搜索/倒计时）不得触达
+        if window.label() != "main" {
+            return Err("导出数据仅允许在主窗口执行".to_string());
+        }
+
         if export_password.is_empty() {
             return Err("请输入导出密码".to_string());
         }
@@ -175,11 +290,11 @@ pub async fn export_data(
         let db = state.get_db()?;
         let conn = db.conn();
 
-        // 查询所有密码（含加密备注与自定义字段两列）
+        // 查询所有密码（含加密备注/自定义字段/使用统计列）
         let passwords = {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at
+                    "SELECT id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at, strength, last_used_at, use_count
                      FROM passwords WHERE deleted_at IS NULL",
                 )
                 .map_err(|e| e.to_string())?;
@@ -198,6 +313,9 @@ pub async fn export_data(
                         row.get::<_, i32>(9)?,
                         row.get::<_, i64>(10)?,
                         row.get::<_, i64>(11)?,
+                        row.get::<_, Option<i32>>(12)?,
+                        row.get::<_, Option<i64>>(13)?,
+                        row.get::<_, i64>(14)?,
                     ))
                 })
                 .map_err(|e| e.to_string())?
@@ -221,37 +339,56 @@ pub async fn export_data(
             }
         }
 
-        // 解密并转换
+        // 解密并转换。
+        // 单行解密失败不挡全量备份：跳过该行并记日志——此前一条损坏行
+        // 会让整个导出失败，用户连其余好数据都备份不出来。
         let mut export_passwords = Vec::new();
-        for (id, title, username, password_encrypted, url, notes_encrypted, extra_plain, extra_enc, category_id, is_favorite, created_at, updated_at) in passwords {
-            let password = decrypt_password(&aes_key, &password_encrypted)?;
-            let notes = match notes_encrypted {
-                Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
-                None => None,
-            };
-            // 自定义字段：敏感值随导出一并解密（导出文件整体由导出密码加密保护）
-            let extra_fields = password::merge_extra_fields(
-                extra_plain.as_deref(),
-                extra_enc.as_deref(),
-                Some(&aes_key),
-            )?;
-            // 标签：明文随导出（按录入顺序）
-            let tags = tags_map.remove(&id).unwrap_or_default();
+        let mut skipped_rows = 0usize;
+        for (id, title, username, password_encrypted, url, notes_encrypted, extra_plain, extra_enc, category_id, is_favorite, created_at, updated_at, strength, last_used_at, use_count) in passwords {
+            let log_id = id.clone();
+            let decrypted = (|| -> Result<ExportPasswordItem, String> {
+                let password = decrypt_password(&aes_key, &password_encrypted)?;
+                let notes = match notes_encrypted {
+                    Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
+                    None => None,
+                };
+                // 自定义字段：敏感值随导出一并解密（导出文件整体由导出密码加密保护）
+                let extra_fields = password::merge_extra_fields(
+                    extra_plain.as_deref(),
+                    extra_enc.as_deref(),
+                    Some(&aes_key),
+                )?;
+                // 标签：明文随导出（按录入顺序）
+                let tags = tags_map.remove(&id).unwrap_or_default();
 
-            export_passwords.push(ExportPasswordItem {
-                id,
-                title,
-                username,
-                password,
-                url,
-                notes,
-                extra_fields,
-                tags,
-                category: category_id,
-                is_favorite: is_favorite != 0,
-                created_at,
-                updated_at,
-            });
+                Ok(ExportPasswordItem {
+                    id,
+                    title,
+                    username,
+                    password,
+                    url,
+                    notes,
+                    extra_fields,
+                    tags,
+                    category: category_id,
+                    is_favorite: is_favorite != 0,
+                    created_at,
+                    updated_at,
+                    password_strength: strength,
+                    last_used_at,
+                    use_count,
+                })
+            })();
+            match decrypted {
+                Ok(item) => export_passwords.push(item),
+                Err(e) => {
+                    skipped_rows += 1;
+                    log::warn!("导出跳过损坏条目 {log_id}: {e}");
+                }
+            }
+        }
+        if skipped_rows > 0 {
+            log::warn!("导出完成，但有 {skipped_rows} 条数据因解密失败被跳过");
         }
 
         // 查询所有分类（含分类树父节点）
@@ -283,7 +420,9 @@ pub async fn export_data(
             categories,
         };
 
-        let plaintext_json = serde_json::to_string(&export_data).map_err(|e| e.to_string())?;
+        // 明文 JSON 用 Zeroizing 承载：加密完成后立即随作用域清零，不在内存里留全量明文
+        let plaintext_json =
+            zeroize::Zeroizing::new(serde_json::to_string(&export_data).map_err(|e| e.to_string())?);
 
         encrypt_export(&plaintext_json, &export_password)
 
@@ -321,8 +460,14 @@ pub async fn import_data(
     import_password: String,
     on_conflict: Option<String>,
     state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
 ) -> ApiResult<ImportResult> {
     respond(|| -> Result<ImportResult, String> {
+        // 仅主窗口可调用：导入会批量改写库数据，小窗不得触达
+        if window.label() != "main" {
+            return Err("导入数据仅允许在主窗口执行".to_string());
+        }
+
         // 检查是否已解锁
         if !state.is_unlocked() {
             return Err("应用未解锁".to_string());
@@ -334,6 +479,15 @@ pub async fn import_data(
             Some("replace") => true,
             Some(other) => return Err(format!("未知的冲突策略: {other}")),
         };
+
+        // 规模上限：超大文件直接拒绝（防内存/CPU 撑爆）
+        if json.len() > MAX_IMPORT_JSON_BYTES {
+            return Err(format!(
+                "导入文件过大（{} 字节，上限 {} 字节）",
+                json.len(),
+                MAX_IMPORT_JSON_BYTES
+            ));
+        }
 
         // 获取 AES 密钥
         let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
@@ -354,6 +508,9 @@ pub async fn import_data(
                 return Err("不支持明文导入，请使用加密导出文件".to_string());
             }
         };
+
+        // 导入文件是唯一外部数据入口：解析后先做规模/字段校验，垃圾数据不得入库
+        validate_import(&import_data)?;
 
         let db = state.get_db()?;
         let conn = db.conn();
@@ -383,17 +540,27 @@ pub async fn import_data(
 
         // 导入密码（按 id 判重，冲突策略决定跳过或覆盖）
         for password in &import_data.passwords {
-            let exists: bool = tx
+            // 判重含软删除行（同 id 即占用主键）：
+            // - skip：保留现状（含保留其删除状态），与「绝不静默覆盖」一致
+            // - replace：用导入内容覆盖并复活（备份里有此条目 = 用户想恢复它），
+            //   但保留本地使用统计——last_used_at/use_count 是本地元数据、不是导出内容，
+            //   此前 INSERT OR REPLACE 会把它们连同 strength/删除状态一起静默清掉
+            let existing: Option<(Option<i64>, i64)> = tx
                 .query_row(
-                    "SELECT 1 FROM passwords WHERE id = ?1",
+                    "SELECT last_used_at, use_count FROM passwords WHERE id = ?1",
                     params![password.id],
-                    |_| Ok(true),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .unwrap_or(false);
-            if exists && !replace_on_conflict {
+                .ok();
+            if existing.is_some() && !replace_on_conflict {
                 result.skipped += 1;
                 continue;
             }
+            let had_existing = existing.is_some();
+            let (last_used_at, use_count) = match existing {
+                Some((lu, uc)) => (lu, uc),        // 覆盖：保留本地使用统计
+                None => (password.last_used_at, password.use_count), // 新增：采用导出值
+            };
 
             // 加密密码
             let encrypted_password = encrypt_password(&aes_key, &password.password)?;
@@ -408,9 +575,12 @@ pub async fn import_data(
             let (extra_fields_plain, extra_fields_encrypted) =
                 password::split_extra_fields(&aes_key, &password.extra_fields)?;
 
+            // 强度按导入的明文重算，不信导出文件里的留档值
+            let strength = crypto::password_strength_level(&password.password);
+
             tx.execute(
-                "INSERT OR REPLACE INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT OR REPLACE INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at, deleted_at, strength, last_used_at, use_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL, ?13, ?14, ?15)",
                 params![
                     password.id,
                     password.title,
@@ -424,6 +594,9 @@ pub async fn import_data(
                     password.is_favorite as i32,
                     password.created_at,
                     password.updated_at,
+                    strength,
+                    last_used_at,
+                    use_count,
                 ],
             ).map_err(|e| e.to_string())?;
 
@@ -431,12 +604,25 @@ pub async fn import_data(
             let tags = password::normalize_tags(&password.tags);
             password::replace_tags(&tx, &password.id, &tags)?;
 
-            if exists {
+            if had_existing {
                 result.replaced += 1;
             } else {
                 result.imported += 1;
             }
         }
+
+        // 兜底：导入条目引用的分类可能不存在（旧导出文件/手改文件），
+        // 统一归入内置「其他」分类，杜绝悬空引用（与 delete_category 的兜底一致）。
+        // 「其他」不存在时先重建（防导出文件里恰好没有内置分类）。
+        tx.execute(
+            "INSERT OR IGNORE INTO categories (id, name, sort_order, created_at) VALUES ('other', '其他', 4, ?1)",
+            params![now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE passwords SET category_id = 'other'
+             WHERE category_id IS NULL OR category_id NOT IN (SELECT id FROM categories)",
+            [],
+        ).map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())?;
         log::info!(

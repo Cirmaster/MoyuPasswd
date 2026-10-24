@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 /// 审计日志文件
 static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
 
+/// 审计日志轮转阈值（1 MB）：超过后把当前日志归档为 `audit.log.1`（只保留一代），
+/// 防止无限追加增长
+const LOG_MAX_BYTES: u64 = 1024 * 1024;
+
 /// 初始化审计模块
 ///
 /// # Arguments
@@ -37,23 +41,43 @@ pub fn init(app_dir: &PathBuf) {
 /// # Arguments
 /// * `event` - 审计事件
 pub fn write_to_file(event: &crate::pending::InjectAuditEvent) {
-    if let Some(path) = LOG_FILE.get() {
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let ts = event.ts.duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+    let Some(path) = LOG_FILE.get() else {
+        return;
+    };
 
-            let line = format!(
-                "{} seq={} entry={} action={:?} target_pid={:?} target_name={:?}\n",
-                ts,
-                event.seq,
-                event.entry_id,
-                event.action,
-                event.target_pid,
-                event.target_name
-            );
+    // 轮转：超限先把当前日志归档为 .1，再开新文件
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() >= LOG_MAX_BYTES {
+            let rotated = path.with_extension("log.1");
+            let _ = std::fs::remove_file(&rotated);
+            if std::fs::rename(path, &rotated).is_ok() {
+                log::info!("审计日志已轮转: {:?}", rotated);
+            }
+        }
+    }
 
-            let _ = file.write_all(line.as_bytes());
+    // 文件可能已被删除，重建后是默认 ACL——记下存在性，重建时重新加固
+    let existed = path.exists();
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let ts = event.ts.duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let line = format!(
+            "{} seq={} entry={} action={:?} target_pid={:?} target_name={:?}\n",
+            ts,
+            event.seq,
+            event.entry_id,
+            event.action,
+            event.target_pid,
+            event.target_name
+        );
+
+        let _ = file.write_all(line.as_bytes());
+    }
+    if !existed {
+        if let Err(e) = crate::acl::harden_file_acl(path) {
+            log::warn!("审计日志重建后 ACL 加固失败: {e}");
         }
     }
 }

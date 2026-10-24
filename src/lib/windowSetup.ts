@@ -9,7 +9,12 @@
  *
  * WebView2 会弹出「后退/刷新/复制」等浏览器菜单，桌面应用不需要，
  * 全局拦截 contextmenu 事件屏蔽。输入框内同样禁用（复制粘贴用快捷键）。
+ *
+ * 幂等：入口与组件都可能调用（HMR 后会重复），只挂一次监听。
  */
+let contextMenuDisabled = false
 export function disableContextMenu() {
+  if (contextMenuDisabled) return
+  contextMenuDisabled = true
   document.addEventListener('contextmenu', (e) => e.preventDefault())
 }

@@ -266,8 +266,9 @@ const handleSave = async () => {
  * @param id - 要删除的分类 ID
  */
 const handleDelete = async (id: string) => {
-  // 智能视图（虚拟分类）不可删除
-  if (id === 'all' || id === 'favorite') return
+  // 智能视图（虚拟分类）与内置「其他」不可删除
+  //（「其他」是删除分类时的兜底归入目标，删除入口与 HomeView 右键菜单保持一致）
+  if (id === 'all' || id === 'favorite' || id === 'other') return
   // 确认删除
   if (!confirm('确定删除此分类？该分类下的密码将移到“其他”，子分类将上移一级')) return
   try {
@@ -544,6 +545,7 @@ const handleDeleteTag = async (name: string) => {
                 size="icon"
                 class="text-destructive hover:text-destructive"
                 title="删除分类"
+                :disabled="node.id === 'other'"
                 @click="handleDelete(node.id)"
               >
                 <IconTrash class="h-4 w-4" />

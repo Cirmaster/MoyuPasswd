@@ -26,6 +26,15 @@ mod win_impl {
     static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
     /// 主应用句柄（钩子回调里用于取消倒计时窗口等 UI 操作）
     static HOOK_APP: std::sync::Mutex<Option<tauri::AppHandle>> = std::sync::Mutex::new(None);
+    /// 激活互斥：把「检查 IS_ACTIVE + 置位 + 启动线程」包成整体。
+    /// 并发两次 activate 都通过检查时会起两个钩子线程，句柄/线程 ID 互相覆盖，
+    /// deactivate 只收一个 → 全局键盘钩子永久驻留（keylogger 面常开）。
+    static ACTIVATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 取激活锁（毒化降级恢复，不连环 panic）
+    fn lock_activate() -> std::sync::MutexGuard<'static, ()> {
+        ACTIVATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     /// 激活 Ctrl+V 钩子（一次性）
     ///
@@ -35,9 +44,13 @@ mod win_impl {
     /// * `app` - 应用句柄（钩子线程里销毁粘贴状态时要用）
     pub fn activate(app: tauri::AppHandle) {
         // 保存应用句柄，供钩子回调取消倒计时/作废 pending 使用
-        if let Ok(mut guard) = HOOK_APP.lock() {
+        {
+            let mut guard = HOOK_APP.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(app);
         }
+
+        // 全程持锁：检查 + 置位 + 启动不可分割
+        let _guard = lock_activate();
 
         // 若上一个钩子正在卸载，等它清理完成再启动，避免新旧钩子交叠
         for _ in 0..20 {
@@ -50,6 +63,9 @@ mod win_impl {
             log::warn!("钩子已激活，忽略重复激活");
             return;
         }
+        // 同步置位「激活中/已激活」，让并发的第二次 activate 走「已激活」分支；
+        // 钩子线程退出/失败时复位
+        IS_ACTIVE.store(true, Ordering::SeqCst);
 
         // 启动钩子线程（必须有消息循环）
         std::thread::spawn(|| {
@@ -94,6 +110,8 @@ mod win_impl {
                     }
                     Err(e) => {
                         log::error!("注册 Ctrl+V 钩子失败: {}", e);
+                        // IS_ACTIVE 已在 activate 里同步置位，失败必须复位
+                        IS_ACTIVE.store(false, Ordering::SeqCst);
                         SHUTTING_DOWN.store(false, Ordering::SeqCst);
                         HOOK_THREAD_ID.store(0, Ordering::SeqCst);
                     }
@@ -144,7 +162,16 @@ mod win_impl {
         if SHUTTING_DOWN.swap(true, Ordering::SeqCst) {
             return;
         }
-        let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+        // 等钩子线程发布线程 ID（刚启动的窗口期），最多等 1 秒；
+        // 否则会漏发 WM_QUIT，钩子线程变成无人能收的孤儿
+        let mut tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+        for _ in 0..20 {
+            if tid != 0 || !IS_ACTIVE.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+        }
         if tid == 0 {
             SHUTTING_DOWN.store(false, Ordering::SeqCst);
             return;
@@ -230,7 +257,7 @@ mod win_impl {
 
     /// 取出 activate 时保存的应用句柄
     fn get_hook_app() -> Option<tauri::AppHandle> {
-        HOOK_APP.lock().unwrap().clone()
+        HOOK_APP.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// 是否存在待销毁的粘贴/倒计时状态

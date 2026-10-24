@@ -380,6 +380,9 @@ export const usePasswordStore = defineStore('password', () => {
   /** 标签列表请求序号：同上 */
   let tagsSeq = 0
 
+  /** 写操作序号：防止并发写操作互相覆盖 loading/error（旧响应不得清掉新状态） */
+  let writeSeq = 0
+
   /** 后端回写页码时抑制 currentPage watch 的重复请求 */
   let suppressPageFetch = false
 
@@ -919,6 +922,7 @@ export const usePasswordStore = defineStore('password', () => {
    * @param item - 密码数据（可含 tags）
    */
   async function addPassword(item: NewPassword): Promise<PasswordItem> {
+    const seq = ++writeSeq
     loading.value = true
     error.value = null
 
@@ -927,11 +931,11 @@ export const usePasswordStore = defineStore('password', () => {
       await Promise.all([loadPasswords(), loadStats(), loadCategories(), loadTags()])
       return normalizePassword(result)
     } catch (e) {
-      error.value = String(e)
+      if (seq === writeSeq) error.value = String(e)
       console.error('添加密码失败:', e)
       throw e
     } finally {
-      loading.value = false
+      if (seq === writeSeq) loading.value = false
     }
   }
 
@@ -942,6 +946,7 @@ export const usePasswordStore = defineStore('password', () => {
    * @param data - 要更新的字段（url/notes/tags 缺失=不修改、null=清空）
    */
   async function updatePassword(id: string, data: UpdatePassword): Promise<PasswordItem> {
+    const seq = ++writeSeq
     loading.value = true
     error.value = null
 
@@ -950,11 +955,11 @@ export const usePasswordStore = defineStore('password', () => {
       await Promise.all([loadPasswords(), loadStats(), loadCategories(), loadTags()])
       return normalizePassword(result)
     } catch (e) {
-      error.value = String(e)
+      if (seq === writeSeq) error.value = String(e)
       console.error('更新密码失败:', e)
       throw e
     } finally {
-      loading.value = false
+      if (seq === writeSeq) loading.value = false
     }
   }
 
@@ -975,6 +980,7 @@ export const usePasswordStore = defineStore('password', () => {
    * @param id - 要删除的密码 ID
    */
   async function deletePassword(id: string): Promise<void> {
+    const seq = ++writeSeq
     loading.value = true
     error.value = null
 
@@ -982,11 +988,11 @@ export const usePasswordStore = defineStore('password', () => {
       await invoke('delete_password', { id })
       await Promise.all([loadPasswords(), loadStats(), loadCategories(), loadTags()])
     } catch (e) {
-      error.value = String(e)
+      if (seq === writeSeq) error.value = String(e)
       console.error('删除密码失败:', e)
       throw e
     } finally {
-      loading.value = false
+      if (seq === writeSeq) loading.value = false
     }
   }
 

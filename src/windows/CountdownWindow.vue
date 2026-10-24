@@ -73,7 +73,6 @@ const hideConfirmHint = async () => {
  * 开始倒计时
  */
 const startCountdown = (seconds: number = 10) => {
-  console.log('Starting countdown with', seconds, 'seconds')
 
   // 先停止之前的计时器
   if (timer) {
@@ -118,7 +117,6 @@ const clearClipboard = async () => {
     // 调用后端原生清空剪贴板（不向历史追加空记录）
     const { invoke } = await import('@/lib/api')
     await invoke('clear_clipboard')
-    console.log('Clipboard cleared')
   } catch (e) {
     console.error('清除剪贴板失败:', e)
   }
@@ -129,7 +127,6 @@ const clearClipboard = async () => {
  * 关闭窗口
  */
 const closeWindow = async () => {
-  console.log('closeWindow called')
 
   // 先停止光标跟随（不等待结果）
   try {
@@ -143,9 +140,7 @@ const closeWindow = async () => {
   try {
     const { getCurrentWindow } = await import('@tauri-apps/api/window')
     const win = getCurrentWindow()
-    console.log('Closing window...')
     await win.close()
-    console.log('Window closed')
   } catch (e) {
     console.error('Failed to close window:', e)
     // 尝试隐藏
@@ -162,7 +157,6 @@ const closeWindow = async () => {
  * 点击数字取消倒计时并关闭
  */
 const handleClick = async () => {
-  console.log('Countdown clicked, clearing clipboard and closing...')
   stopCountdown()
   await clearClipboard()
 }
@@ -181,37 +175,31 @@ onMounted(async () => {
 
     // 从后端获取倒计时秒数并启动
     const seconds = await invoke<number>('get_countdown_seconds')
-    console.log('Got countdown seconds from backend:', seconds)
     startCountdown(seconds)
 
     // 监听重置倒计时事件
     await listen<{ seconds: number }>('reset-countdown', (event) => {
-      console.log('Received reset-countdown event:', event.payload)
       hideConfirmHint()
       startCountdown(event.payload.seconds || 10)
     })
 
     // 监听终端注入二次确认提示（命中黑名单时后端触发）
     await listen<{ process: string }>('terminal-inject-confirm', (event) => {
-      console.log('Received terminal-inject-confirm event:', event.payload)
       showConfirmHint()
     })
 
     // 监听取消倒计时事件
     await listen('cancel-countdown', () => {
-      console.log('Received cancel-countdown event')
       stopCountdown()
       closeWindow()
     })
 
     // 后端已完成清除（兜底），前端只需关闭窗口
     await listen('clipboard-cleared', () => {
-      console.log('Received clipboard-cleared event')
       stopCountdown()
       closeWindow()
     })
 
-    console.log('Countdown window initialized')
   } catch (e) {
     console.error('Failed to initialize countdown window:', e)
   }

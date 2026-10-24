@@ -328,6 +328,11 @@ pub(crate) fn normalize_tags(tags: &[String]) -> Vec<String> {
         if trimmed.is_empty() {
             continue;
         }
+        // 含控制字符的标签整体丢弃：\u{1f} 是 GROUP_CONCAT 的分隔符（TAG_SEPARATOR），
+        // 混入会让一个标签在解析时裂成多个，过滤/统计/改名全部错乱
+        if trimmed.chars().any(|c| c.is_control()) {
+            continue;
+        }
         // 按字符截断（中文标签 32 字符 = 96 字节，不能按字节切）
         let truncated: String = trimmed.chars().take(MAX_TAG_CHARS).collect();
         // 大小写不敏感去重（Unicode 感知），保留首次出现的写法
@@ -393,6 +398,60 @@ fn parse_tags(concat: Option<String>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// 校验密码条目核心字段的长度/内容上限（新增/更新共用，后端兜底）
+///
+/// 前端校验可被绕过，入库前必须独立校验：标题非空且 ≤200 字符、
+/// 用户名 ≤200 字符、自定义字段名 ≤64/值 ≤4096 且最多 50 个。
+fn validate_entry_fields(
+    title: &str,
+    username: &str,
+    extra_fields: &[CustomField],
+) -> Result<(), String> {
+    if title.trim().is_empty() {
+        return Err("标题不能为空".to_string());
+    }
+    if title.chars().count() > 200 {
+        return Err("标题过长（最长 200 字符）".to_string());
+    }
+    if username.chars().count() > 200 {
+        return Err("用户名过长（最长 200 字符）".to_string());
+    }
+    if extra_fields.len() > 50 {
+        return Err(format!(
+            "自定义字段过多（{} 个，上限 50 个）",
+            extra_fields.len()
+        ));
+    }
+    for f in extra_fields {
+        if f.label.trim().is_empty() || f.label.chars().count() > 64 {
+            return Err("自定义字段名非法（非空且最长 64 字符）".to_string());
+        }
+        if f.value.chars().count() > 4096 {
+            return Err("自定义字段值过长（最长 4096 字符）".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// 校验分类存在（后端兜底，防止悬空 category_id）
+fn ensure_category_exists(conn: &rusqlite::Connection, category: &str) -> Result<(), String> {
+    if category.trim().is_empty() {
+        return Err("分类不能为空".to_string());
+    }
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM categories WHERE id = ?1",
+            params![category],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+    if exists {
+        Ok(())
+    } else {
+        Err(format!("分类不存在: {category}"))
+    }
 }
 
 /// 拼音结果进程内缓存：原文 -> (全拼, 简拼)
@@ -984,8 +1043,18 @@ pub async fn get_passwords(
 /// 存量数据强度一次性回填
 ///
 /// 强度列上线前的旧记录没有 strength 值；首次列表加载时补算并落库，
-/// 之后列表读取列即可（不再解密全库）。解密失败的行跳过，下次再试。
+/// 之后列表读取列即可（不再解密全库）。
+///
+/// - 进程内只跑一次（`BACKFILL_DONE`）：解密失败的损坏行此前会在每次列表加载时
+///   被反复重试，形成无谓的全表扫描 + 解密风暴；跑一次后失败行留待下次启动再试。
+/// - 所有 UPDATE 包在同一事务，中途失败整体回滚，不落半批。
 fn backfill_strength(conn: &rusqlite::Connection, aes_key: &[u8; 32]) {
+    use std::sync::atomic::AtomicBool;
+    static BACKFILL_DONE: AtomicBool = AtomicBool::new(false);
+    if BACKFILL_DONE.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+
     let rows: Vec<(String, String)> = match conn
         .prepare("SELECT id, password_encrypted FROM passwords WHERE strength IS NULL")
     {
@@ -1003,10 +1072,17 @@ fn backfill_strength(conn: &rusqlite::Connection, aes_key: &[u8; 32]) {
     }
 
     let mut filled = 0usize;
+    let tx = match conn.unchecked_transaction() {
+        Ok(tx) => tx,
+        Err(e) => {
+            log::warn!("强度回填开启事务失败: {e}");
+            return;
+        }
+    };
     for (id, encrypted) in rows {
         if let Ok(plaintext) = decrypt_password(aes_key, &encrypted) {
             let level = crate::crypto::password_strength_level(&plaintext);
-            if conn
+            if tx
                 .execute(
                     "UPDATE passwords SET strength = ?1 WHERE id = ?2",
                     params![level, id],
@@ -1016,6 +1092,10 @@ fn backfill_strength(conn: &rusqlite::Connection, aes_key: &[u8; 32]) {
                 filled += 1;
             }
         }
+    }
+    if let Err(e) = tx.commit() {
+        log::warn!("强度回填提交失败（已回滚，下次启动重试）: {e}");
+        return;
     }
     log::info!("密码强度回填完成: {} 条", filled);
 }
@@ -1145,6 +1225,13 @@ pub async fn add_password(
             return Err("应用未解锁".to_string());
         }
 
+        // 字段校验（后端兜底）
+        validate_entry_fields(
+            &data.title,
+            &data.username,
+            data.extra_fields.as_deref().unwrap_or_default(),
+        )?;
+
         // 获取 AES 密钥
         let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
@@ -1172,6 +1259,9 @@ pub async fn add_password(
 
         let db = state.get_db()?;
         let conn = db.conn();
+
+        // 分类必须存在（后端兜底，防止悬空 category_id）
+        ensure_category_exists(&conn, &data.category)?;
 
         // 是否显示密码强度（仅控制返回值）
         let show_strength = is_show_strength_enabled(&conn);
@@ -1332,10 +1422,21 @@ pub async fn update_password(
             })?;
 
         // 标量字段：None = 不修改
+        let category_changed = data.category.is_some();
         let title = data.title.unwrap_or(cur_title);
         let username = data.username.unwrap_or(cur_username);
         let category = data.category.unwrap_or(cur_category);
         let is_favorite = data.is_favorite.unwrap_or(cur_is_favorite != 0);
+
+        // 字段校验（后端兜底）：校验最终生效值与本次提交的自定义字段
+        validate_entry_fields(&title, &username, &[])?;
+        if let Some(Some(fields)) = &data.extra_fields {
+            validate_entry_fields(&title, &username, fields)?;
+        }
+        // 分类仅在本次修改时校验存在性（存量悬空引用由导入/删除的兜底逻辑修复）
+        if category_changed {
+            ensure_category_exists(&conn, &category)?;
+        }
 
         // URL 三层语义：缺失=不修改、null/空串=清空、字符串=赋值
         let url = match data.url {
@@ -1374,13 +1475,11 @@ pub async fn update_password(
             Some(Some(list)) => Some(normalize_tags(list)),
         };
 
-        // 密码：为空/缺失保留原密文与原强度，否则重新加密并重算强度
+        // 密码：缺失=保留原密文与原强度；空串=显式置空（合法状态，如先建占位条目）；
+        // 非空=重新加密并重算强度。
+        // 注意：前端「留空不改」必须不带该字段提交，不能靠空串特判（语义二义已废弃）。
         let (encrypted_password, strength) = match &data.password {
-            Some(p) if !p.is_empty() => (
-                encrypt_password(&aes_key, p)?,
-                crate::crypto::password_strength_level(p),
-            ),
-            _ => {
+            None => {
                 let level = match cur_strength {
                     Some(l) => l,
                     // 旧数据无强度值：解密补算一次（单条，可接受）
@@ -1390,6 +1489,10 @@ pub async fn update_password(
                 };
                 (cur_password_enc, level)
             }
+            Some(p) => (
+                encrypt_password(&aes_key, p)?,
+                crate::crypto::password_strength_level(p),
+            ),
         };
 
         // 是否显示密码强度（仅控制返回值）
@@ -1481,11 +1584,18 @@ pub async fn delete_password(
         let conn = db.conn();
         let now = chrono::Utc::now().timestamp_millis();
 
-        // 更新 deleted_at 字段（软删除）
-        conn.execute(
-            "UPDATE passwords SET deleted_at = ?1 WHERE id = ?2",
-            params![now, id],
-        ).map_err(|e| e.to_string())?;
+        // 更新 deleted_at 字段（软删除）。
+        // 只允许删未删除条目：重复删除不覆盖原删除时间戳（回收站/按删除时间排序的语义依赖它），
+        // id 不存在或已删除时明确报错，调用方能感知删除失败。
+        let affected = conn
+            .execute(
+                "UPDATE passwords SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+                params![now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if affected == 0 {
+            return Err("未找到密码".to_string());
+        }
 
         Ok(())
 
@@ -1524,18 +1634,29 @@ pub async fn toggle_favorite(
         let conn = db.conn();
         let now = chrono::Utc::now().timestamp_millis();
 
-        // 切换 is_favorite 字段
-        conn.execute(
-            "UPDATE passwords SET is_favorite = NOT is_favorite, updated_at = ?1 WHERE id = ?2",
-            params![now, id],
-        ).map_err(|e| e.to_string())?;
+        // 切换 is_favorite 字段（软删除条目不可改）
+        let affected = conn
+            .execute(
+                "UPDATE passwords SET is_favorite = NOT is_favorite, updated_at = ?1
+                 WHERE id = ?2 AND deleted_at IS NULL",
+                params![now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if affected == 0 {
+            return Err("未找到密码".to_string());
+        }
 
         // 获取更新后的状态
-        let is_favorite: i32 = conn.query_row(
-            "SELECT is_favorite FROM passwords WHERE id = ?1",
-            params![id],
-            |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
+        let is_favorite: i32 = conn
+            .query_row(
+                "SELECT is_favorite FROM passwords WHERE id = ?1 AND deleted_at IS NULL",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => "未找到密码".to_string(),
+                _ => e.to_string(),
+            })?;
 
         Ok(is_favorite != 0)
 
@@ -1667,6 +1788,10 @@ pub async fn rename_tag(
         if new_name.chars().count() > MAX_TAG_CHARS {
             return Err(format!("标签名称不能超过 {MAX_TAG_CHARS} 个字符"));
         }
+        // 控制字符会破坏 GROUP_CONCAT 分隔符协议（见 normalize_tags 注释），拒收
+        if new_name.chars().any(|c| c.is_control()) {
+            return Err("标签名不能包含控制字符".to_string());
+        }
 
         let db = state.get_db()?;
         let conn = db.conn();
@@ -1716,9 +1841,11 @@ pub async fn rename_tag(
 
     })}
 
-/// 删除标签（从所有密码移除该标签）
+/// 删除标签（从所有**未删除**密码移除该标签）
 ///
-/// 标签只是分类元数据，删除不影响密码本身；软删除密码的标签一并清理。
+/// 标签只是分类元数据，删除不影响密码本身。
+/// 只清理未删除密码的标签：与迁移注释「软删除密码不级联删除标签（保证可恢复性一致）」
+/// 对齐——软删除条目保留其标签，将来做回收站/恢复功能时标签可完整恢复。
 #[tauri::command]
 pub async fn delete_tag(name: String, state: State<'_, AppState>) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
@@ -1736,7 +1863,9 @@ pub async fn delete_tag(name: String, state: State<'_, AppState>) -> ApiResult<(
         let conn = db.conn();
 
         conn.execute(
-            "DELETE FROM password_tags WHERE tag = ?1 COLLATE NOCASE",
+            "DELETE FROM password_tags
+             WHERE tag = ?1 COLLATE NOCASE
+               AND password_id IN (SELECT id FROM passwords WHERE deleted_at IS NULL)",
             params![name],
         )
         .map_err(|e| e.to_string())?;

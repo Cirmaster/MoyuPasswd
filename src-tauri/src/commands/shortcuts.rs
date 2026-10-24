@@ -86,11 +86,15 @@ pub async fn get_shortcuts(state: State<'_, AppState>) -> ApiResult<ShortcutConf
         match result {
             Ok(json) => {
                 log::info!("读取到快捷键配置: {}", json);
-                // 解析 JSON
-                serde_json::from_str(&json).map_err(|e| {
-                    log::error!("解析快捷键配置失败: {}", e);
-                    e.to_string()
-                })
+                // 解析失败回退默认配置并告警（与 load_config_from_db 一致）：
+                // 配置损坏不该把设置页整个挡住
+                match serde_json::from_str(&json) {
+                    Ok(config) => Ok(config),
+                    Err(e) => {
+                        log::error!("解析快捷键配置失败，回退默认配置: {}", e);
+                        Ok(ShortcutConfig::default())
+                    }
+                }
             }
             Err(e) => {
                 log::info!("未找到快捷键配置，使用默认值: {:?}", e);
@@ -136,6 +140,12 @@ pub async fn save_shortcuts(
 
         log::info!("收到快捷键保存请求: {:?}", shortcuts);
 
+        // 入库前校验快捷键串（空串 = 不绑定，放行）：
+        // 任意字符串入库要等注册阶段才失败，应在保存时就拦截
+        validate_accelerator(&shortcuts.quick_search, "快速搜索")?;
+        validate_accelerator(&shortcuts.quick_add, "快速添加")?;
+        validate_accelerator(&shortcuts.password_generator, "密码生成器")?;
+
         let db = state.get_db()?;
         let conn = db.conn();
 
@@ -162,6 +172,20 @@ pub async fn save_shortcuts(
     })}
 
 // ==================== 注册实现（唯一入口） ====================
+
+/// 校验快捷键串可被全局快捷键插件解析（空串 = 不绑定，放行）
+fn validate_accelerator(value: &str, what: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    if value.len() > 64 {
+        return Err(format!("{what}快捷键过长: {value:?}"));
+    }
+    match value.parse::<tauri_plugin_global_shortcut::Shortcut>() {
+        Ok(_) => Ok(()),
+        Err(_) => Err(format!("{what}快捷键无法解析: {value:?}")),
+    }
+}
 
 /// 从数据库读取快捷键配置（读不到/未解锁时用默认值）
 pub fn load_config_from_db(state: &AppState) -> ShortcutConfig {

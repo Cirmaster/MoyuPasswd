@@ -248,8 +248,9 @@ pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle)
 #[tauri::command]
 pub async fn hide_countdown(app: tauri::AppHandle) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
-        // 先停止光标跟随
-        FOLLOW_CURSOR_RUNNING.store(false, Ordering::SeqCst);
+        // 先停止光标跟随（走统一的 join 回收路径，防止线程变孤儿）；
+        // 只置 FOLLOW_CURSOR_RUNNING=false 不 join 的旧写法会残留 JoinHandle
+        stop_follow_cursor_internal();
 
         if let Some(window) = app.get_webview_window("countdown") {
             let _ = window.hide();

@@ -23,7 +23,7 @@
 -->
 
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted } from 'vue'
+import { ref, watch, onUnmounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { invoke } from '@/lib/api'
 import { Button } from '@/components/ui/button'
@@ -403,26 +403,16 @@ watch(
 )
 
 /**
- * 注册全局快捷键
- * Ctrl+K (Windows/Linux) 或 Cmd+K (Mac) 呼出搜索
+ * 卸载清理
  *
- * 组件挂载时注册，卸载时自动移除
+ * 注：Ctrl+K 呼出的是独立快速搜索小窗（后端全局快捷键），
+ * 本内嵌弹窗不再拦截 Ctrl+K——旧写法与全局快捷键同时触发，会双弹窗；
+ * 内嵌弹窗仅由主界面的搜索入口打开。
  */
-onMounted(() => {
-  const handler = (e: KeyboardEvent) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
-      e.preventDefault()
-      emit('update:open', true)
-    }
-  }
-  window.addEventListener('keydown', handler)
-  // 组件卸载时移除监听
-  onUnmounted(() => {
-    window.removeEventListener('keydown', handler)
-    // 卸载时清理防抖定时器
-    cancelPendingSearch()
-    requestSeq++
-  })
+onUnmounted(() => {
+  // 卸载时清理防抖定时器
+  cancelPendingSearch()
+  requestSeq++
 })
 </script>
 

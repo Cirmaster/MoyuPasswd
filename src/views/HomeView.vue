@@ -778,18 +778,16 @@ onMounted(async () => {
   // 加载设置（剪贴板清除时间）
   try {
     const savedSettings = await invoke<{ clipboard_clear_time: number }>('get_settings')
-    clipboardClearTime.value = savedSettings.clipboard_clear_time || 30
+    // 0 = 明确不自动清除，不能用 || 兜底（0 会被折算成 30）
+    clipboardClearTime.value = savedSettings.clipboard_clear_time ?? 30
   } catch (e) {
     console.warn('加载设置失败:', e)
   }
 
-  // 监听全局快捷键事件（保存 unlisten，卸载时统一清理，防止反复进出页面叠加监听）
+  // 监听全局快捷键事件（保存 unlisten，卸载时统一清理，防止反复进出页面叠加监听）。
+  // Ctrl+K 的快速搜索走独立小窗（后端全局快捷键直接开窗），不再发 show-quick-search 事件；
+  // 内嵌搜索弹窗仅由主界面搜索入口打开。
   const { listen } = await import('@tauri-apps/api/event')
-  unlisteners.push(
-    await listen('show-quick-search', () => {
-      showQuickSearch.value = true
-    }),
-  )
 
   // app-locked 锁定清理与跳转由 App.vue 全局统一处理（clearSensitive + 跳解锁页），此处不再重复监听
 

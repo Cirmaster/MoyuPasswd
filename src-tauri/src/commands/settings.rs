@@ -57,6 +57,81 @@ impl Default for Settings {
     }
 }
 
+/// 已知设置键白名单（与 get_settings 的解析分支一致，另含快捷键配置）
+///
+/// 任意键值直写 settings 表会破坏不变量（如伪造 shortcuts 键让设置页解析报错、
+/// 无限写垃圾键膨胀数据库），保存前必须过白名单。
+const KNOWN_SETTING_KEYS: &[&str] = &[
+    "theme",
+    "language",
+    "auto_lock_time",
+    "clipboard_clear_time",
+    "auto_start",
+    "close_to_tray",
+    "show_password_strength",
+    "show_on_startup",
+    "allow_terminal_inject",
+    "shortcuts",
+];
+
+/// 校验单个设置项（键白名单 + 值域/长度）
+///
+/// 数值项：0 = 禁用（自动锁定/自动清除的既有语义），其余按 UI 范围 10~300 钳制——
+/// 安全边界不能只靠前端的 min/max 提示（手动输入 0/负数/9999 都能提交）。
+fn validate_setting(key: &str, value: &str) -> Result<(), String> {
+    if !KNOWN_SETTING_KEYS.contains(&key) {
+        return Err(format!("未知的设置项: {key}"));
+    }
+    if value.len() > 4096 {
+        return Err(format!("设置值过长（{key}）"));
+    }
+    match key {
+        // 数值项：0 有「禁用/不自动清除」语义，其余按 UI 输入范围钳制——
+        // 安全边界不能只靠前端的 min/max 提示（手动输入 0/负数/9999 都能提交）
+        "auto_lock_time" => {
+            let n: u64 = value
+                .parse()
+                .map_err(|_| format!("{key} 必须是非负整数（分钟）"))?;
+            if !(n == 0 || (1..=60).contains(&n)) {
+                return Err(format!("{key} 取值须为 0（禁用）或 1~60"));
+            }
+        }
+        "clipboard_clear_time" => {
+            let n: u64 = value
+                .parse()
+                .map_err(|_| format!("{key} 必须是非负整数（秒）"))?;
+            if !(n == 0 || (10..=300).contains(&n)) {
+                return Err(format!("{key} 取值须为 0（不自动清除）或 10~300"));
+            }
+        }
+        "theme" | "language" => {
+            let ok = !value.is_empty()
+                && value.len() <= 32
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if !ok {
+                return Err(format!("{key} 取值非法: {value:?}"));
+            }
+        }
+        "auto_start" | "close_to_tray" | "show_password_strength" | "show_on_startup"
+        | "allow_terminal_inject" => {
+            if value != "true" && value != "false" {
+                return Err(format!("{key} 只能是 true/false"));
+            }
+        }
+        "shortcuts" => {
+            // 必须是合法 JSON 对象（快捷键配置）
+            match serde_json::from_str::<serde_json::Value>(value) {
+                Ok(v) if v.is_object() => {}
+                _ => return Err("shortcuts 必须是 JSON 对象".to_string()),
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// 获取所有设置
 ///
 /// 从数据库读取所有设置，如果不存在则返回默认值。
@@ -195,10 +270,14 @@ pub async fn save_setting(
     key: String,
     value: String,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
         // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
         crate::commands::auth::require_unlocked(&state)?;
+
+        // 键白名单 + 值域校验（后端兜底）
+        validate_setting(&key, &value)?;
 
         let db = state.get_db()?;
         let conn = db.conn();
@@ -214,10 +293,28 @@ pub async fn save_setting(
             let minutes: u64 = value.parse().unwrap_or(5);
             crate::idle::set_auto_lock_minutes(minutes);
         }
+        // 开机自启：写库与注册表必须一致，否则 UI 显示与实际不符
+        if key == "auto_start" {
+            sync_auto_start(&app, value == "true")?;
+        }
 
         Ok(())
 
     })}
+
+/// 把注册表中的开机自启状态同步为目标值（幂等，状态一致时不写注册表）
+fn sync_auto_start(app: &tauri::AppHandle, enable: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    let current = manager.is_enabled().unwrap_or(false);
+    if current == enable {
+        return Ok(());
+    }
+    if enable {
+        manager.enable().map_err(|e| e.to_string())
+    } else {
+        manager.disable().map_err(|e| e.to_string())
+    }
+}
 
 /// 批量保存设置
 ///
@@ -246,13 +343,11 @@ pub async fn save_setting(
 pub async fn save_settings(
     settings: Settings,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
         // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
         crate::commands::auth::require_unlocked(&state)?;
-
-        let db = state.get_db()?;
-        let conn = db.conn();
 
         // 批量保存设置
         let settings_vec = vec![
@@ -267,15 +362,29 @@ pub async fn save_settings(
             ("allow_terminal_inject", settings.allow_terminal_inject.to_string()),
         ];
 
+        // 逐项校验（键白名单 + 值域），任一非法整体拒绝
+        for (key, value) in &settings_vec {
+            validate_setting(key, value)?;
+        }
+
+        let db = state.get_db()?;
+        let conn = db.conn();
+
+        // 整包事务：中途失败不留下半新半旧的配置
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         for (key, value) in settings_vec {
-            conn.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
                 params![key, value],
             ).map_err(|e| e.to_string())?;
         }
+        tx.commit().map_err(|e| e.to_string())?;
 
         // 同步更新空闲检测模块的自动锁定时间
         crate::idle::set_auto_lock_minutes(settings.auto_lock_time);
+
+        // 开机自启：写库与注册表必须一致（此前只写库，UI 显示与实际不符）
+        sync_auto_start(&app, settings.auto_start)?;
 
         Ok(())
 

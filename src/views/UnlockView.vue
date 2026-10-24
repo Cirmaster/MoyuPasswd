@@ -249,7 +249,10 @@ const handleSetup = async () => {
       password: password.value,
     })
 
-    // 设置成功，跳转到密码列表页
+    // 设置成功：清空输入框（主密码明文不驻留内存），跳转到密码列表页
+    //（失败时保留输入，方便用户修改后重试；与 handleUnlock 语义一致）
+    password.value = ''
+    confirmPassword.value = ''
     router.push('/home')
   } catch (e) {
     // 捕获异常，显示错误提示

@@ -1,16 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "enables the default permissions",
+  "description": "主窗口权限（按最小化原则显式列举，不再用 core:default 一揽子放开；小窗权限见 quick-search.json / countdown.json）",
   "windows": [
-    "main",
-    "countdown",
-    "quick-search"
+    "main"
   ],
   "permissions": [
-    "core:default",
     "core:event:allow-listen",
-    "core:event:allow-emit",
+    "core:event:allow-unlisten",
+    "core:window:default",
     "core:window:allow-close",
     "core:window:allow-hide",
     "core:window:allow-show",

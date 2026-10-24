@@ -178,7 +178,8 @@ const copyToClipboard = async () => {
     const settings = await invoke<{ clipboard_clear_time: number }>('get_settings')
     await invoke('copy_text_to_clipboard', {
       text: password.value,
-      clearAfter: settings.clipboard_clear_time || 30,
+      // 0 = 明确不自动清除，不能用 || 兜底（0 会被折算成 30）
+      clearAfter: settings.clipboard_clear_time ?? 30,
     })
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
   } catch {

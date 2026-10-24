@@ -41,6 +41,7 @@ import { usePasswordStore, type PasswordItem, type CustomField } from '@/stores/
 import PasswordGenerator from './PasswordGenerator.vue'
 import CustomFieldsEditor from './CustomFieldsEditor.vue'
 import TagInput from './TagInput.vue'
+import Toast from './Toast.vue'
 
 /**
  * 组件 Props 接口
@@ -143,13 +144,20 @@ const notesLoaded = ref(false)
 const fieldsLoaded = ref(false)
 
 /**
- * 监听编辑项变化
- * 当 editItem 变化时，自动填充表单数据
+ * 监听弹窗开关与编辑项变化
+ * - 打开时按模式填充表单（编辑模式拉取备注/敏感字段详情）
+ * - 关闭时立即清空表单：明文密码/备注/敏感字段不驻留内存
  * immediate: true 表示初始化时也执行一次
  */
 watch(
-  () => props.editItem,
-  (item) => {
+  () => [props.open, props.editItem] as const,
+  ([open, item]) => {
+    if (!open) {
+      notesLoaded.value = false
+      fieldsLoaded.value = false
+      resetForm()
+      return
+    }
     if (item) {
       // 编辑模式：填充除密码外的所有字段（密码不接触明文）
       notesLoaded.value = false
@@ -157,7 +165,7 @@ watch(
       form.value = {
         title: item.title,
         username: item.username,
-        password: '', // 编辑时密码留空，提交时为空则保留原密码
+        password: '', // 编辑时密码留空；提交时不携带该字段 = 不修改
         url: item.url || '',
         notes: '', // 备注不随列表下发，稍后从详情载入
         // 敏感字段值不随列表下发，先用列表数据占位（敏感值为空串），详情载入后覆盖
@@ -171,7 +179,7 @@ watch(
       getPasswordDetail(item.id)
         .then((detail) => {
           // 快速切换条目时防止串数据
-          if (props.editItem?.id === item.id) {
+          if (props.editItem?.id === item.id && props.open) {
             form.value.notes = detail.notes || ''
             notesLoaded.value = true
             form.value.extra_fields = (detail.extra_fields || []).map((f) => ({ ...f }))
@@ -194,30 +202,46 @@ watch(
 /** 控制密码生成器弹窗是否显示 */
 const showGenerator = ref(false)
 
+/** 提交中标志（防重复提交：双击保存会并发两次 add/update） */
+const submitting = ref(false)
+
+/** 轻提示（校验失败/保存失败必须给用户反馈，不能静默吞掉） */
+const toast = ref({ show: false, type: 'info' as 'success' | 'error' | 'info', message: '' })
+const showToast = (type: 'success' | 'error' | 'info', message: string) => {
+  toast.value = { show: true, type, message }
+}
+
 /**
  * 处理表单提交
- * 1. 验证必填字段
+ * 1. 验证必填字段（失败给出提示）
  * 2. 根据模式调用添加或更新方法
- * 3. 触发 saved 事件
- * 4. 关闭弹窗并重置表单
+ * 3. 触发 saved 事件并关闭弹窗
  */
 const handleSubmit = async () => {
   // 验证必填字段（编辑模式下密码非必填）
-  if (!form.value.title || !form.value.username) {
+  if (!form.value.title.trim() || !form.value.username.trim()) {
+    showToast('error', '请填写名称和用户名')
     return
   }
   // 添加模式下密码必填
   if (!isEditMode.value && !form.value.password) {
+    showToast('error', '请输入密码')
     return
   }
+  // 防重复提交
+  if (submitting.value) return
+  submitting.value = true
 
   try {
     // 根据模式执行不同操作
     if (isEditMode.value && props.editItem) {
-      // 编辑模式：更新现有密码（密码为空则保留原密码）
+      // 编辑模式：密码留空 = 不修改——**不携带** password 字段
+      //（后端语义：缺失=不修改、空串=显式置空；不能带空串提交，否则会清掉原密码）
       // 备注/自定义字段未载入完成时不携带对应字段（后端视为不修改），防止误清空原数据
+      const { password, ...rest } = form.value
       await updatePassword(props.editItem.id, {
-        ...form.value,
+        ...rest,
+        ...(password ? { password } : {}),
         // 标签随列表下发且编辑时始终整体提交（空数组 = 清空标签）
         tags: [...form.value.tags],
         notes: notesLoaded.value ? (form.value.notes || null) : undefined,
@@ -230,13 +254,13 @@ const handleSubmit = async () => {
 
     // 触发保存成功事件
     emit('saved')
-    // 关闭弹窗
+    // 关闭弹窗（关闭时 watch 会清空表单）
     emit('update:open', false)
-    // 重置表单
-    resetForm()
+    showToast('success', '已保存')
   } catch (e) {
-    // 错误已在 store 中处理
-    console.error('保存失败:', e)
+    showToast('error', '保存失败: ' + String(e))
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -372,13 +396,16 @@ const onPasswordGenerated = (pwd: string) => {
         <Button variant="outline" @click="emit('update:open', false)">
           取消
         </Button>
-        <!-- 提交按钮：根据模式显示不同文字 -->
-        <Button @click="handleSubmit">
-          {{ isEditMode ? '保存' : '添加' }}
+        <!-- 提交按钮：根据模式显示不同文字；提交中禁用防重复 -->
+        <Button :disabled="submitting" @click="handleSubmit">
+          {{ submitting ? '保存中…' : isEditMode ? '保存' : '添加' }}
         </Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>
+
+  <!-- 轻提示 -->
+  <Toast v-model:show="toast.show" :type="toast.type" :message="toast.message" />
 
   <!-- 密码生成器弹窗（子组件） -->
   <PasswordGenerator

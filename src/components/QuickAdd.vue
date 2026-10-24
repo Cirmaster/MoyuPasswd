@@ -11,7 +11,7 @@
 -->
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -144,25 +144,15 @@ const handleSave = async () => {
 
 /**
  * 监听弹窗打开状态
+ * 打开与关闭都重置表单：明文密码/自定义字段值不驻留内存
  */
 const handleOpenChange = (open: boolean) => {
-  if (open) {
-    resetForm()
-  }
+  resetForm()
   emit('update:open', open)
 }
 
-/**
- * 注册全局快捷键
- */
-onMounted(async () => {
-  const { listen } = await import('@tauri-apps/api/event')
-
-  // 监听全局快捷键事件
-  await listen('show-quick-add', () => {
-    emit('update:open', true)
-  })
-})
+// 注：'show-quick-add' 全局快捷键事件由 HomeView 统一监听并打开本弹窗，
+// 组件内部不再重复监听（旧写法 listen 返回的 unlisten 被丢弃，反复挂载会泄漏）
 </script>
 
 <template>
@@ -251,7 +241,7 @@ onMounted(async () => {
       </div>
 
       <DialogFooter>
-        <Button variant="outline" @click="emit('update:open', false)">
+        <Button variant="outline" @click="handleOpenChange(false)">
           取消
         </Button>
         <Button @click="handleSave" :disabled="loading">

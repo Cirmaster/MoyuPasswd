@@ -155,13 +155,26 @@ impl AppState {
     }
 
     /// 获取 AES 密钥
-    pub fn get_aes_key(&self) -> Option<[u8; 32]> {
+    ///
+    /// 返回 `Zeroizing` 包装：调用方持有的副本在作用域结束自动清零，
+    /// 不再以裸 `[u8;32]` 散落各命令栈帧（锁定只清 state 里的那一份）。
+    pub fn get_aes_key(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
         let aes_key = self.aes_key.lock();
-        *aes_key
+        (*aes_key).map(zeroize::Zeroizing::new)
     }
 
     /// 清除 AES 密钥（锁定时调用，清零所有密钥和数据库引用）
+    ///
+    /// 顺序约定：**先翻 `is_unlocked` 标志，再清密钥/连接**。
+    /// 反过来时，长命令（如导出全库）持有 db guard 会让本函数卡在清连接那一步，
+    /// 此窗口内 `is_unlocked` 仍为 true，新命令仍可通过门禁拿到密钥副本。
     pub fn clear_aes_key(&self) {
+        // 第一步：翻掉解锁标志——后续命令立刻被 require_unlocked 拒绝
+        {
+            let mut is_unlocked = self.is_unlocked.lock();
+            *is_unlocked = false;
+        }
+
         let mut aes_key = self.aes_key.lock();
         if let Some(ref mut key) = *aes_key {
             key.zeroize();
@@ -176,9 +189,6 @@ impl AppState {
 
         let mut db = self.db.lock();
         *db = None;
-
-        let mut is_unlocked = self.is_unlocked.lock();
-        *is_unlocked = false;
     }
 
     /// 设置数据库加密密钥
@@ -191,9 +201,11 @@ impl AppState {
     }
 
     /// 获取数据库加密密钥
-    pub fn get_db_key(&self) -> Option<[u8; 32]> {
+    ///
+    /// 同 `get_aes_key`：返回 `Zeroizing` 包装，副本自动清零。
+    pub fn get_db_key(&self) -> Option<zeroize::Zeroizing<[u8; 32]>> {
         let db_key = self.db_key.lock();
-        *db_key
+        (*db_key).map(zeroize::Zeroizing::new)
     }
 
     /// 检查是否已解锁

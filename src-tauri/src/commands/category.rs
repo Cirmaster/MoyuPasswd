@@ -204,7 +204,7 @@ pub async fn get_categories(state: State<'_, AppState>) -> ApiResult<Vec<Categor
                 "SELECT c.id, c.name, c.icon, c.sort_order, c.created_at, c.parent_id,
                         (SELECT COUNT(*) FROM passwords p WHERE p.category_id = c.id AND p.deleted_at IS NULL) AS password_count
                  FROM categories c
-                 ORDER BY c.sort_order",
+                 ORDER BY c.sort_order, c.created_at, c.id",
             )
             .map_err(|e| e.to_string())?;
 
@@ -266,6 +266,36 @@ pub async fn get_categories(state: State<'_, AppState>) -> ApiResult<Vec<Categor
 /// ```typescript
 /// const category = await invoke('add_category', { name: '新分类', parentId: 'work' });
 /// ```
+/// 大小写不敏感同名检查（Unicode 感知；exclude_id 用于更新时排除自身）
+///
+/// 用 Rust 侧 `to_lowercase` 比较：SQLite 的 LOWER/NOCASE 只折叠 ASCII，
+/// 「École」/「école」会被当成不同名。分类数量少，全量取出比较成本可忽略。
+fn name_exists(
+    conn: &rusqlite::Connection,
+    name: &str,
+    exclude_id: Option<&str>,
+) -> Result<bool, String> {
+    let target = name.to_lowercase();
+    let mut stmt = conn
+        .prepare("SELECT id, name FROM categories")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
+    for row in rows {
+        let (id, existing) = row.map_err(|e| e.to_string())?;
+        if Some(id.as_str()) == exclude_id {
+            continue;
+        }
+        if existing.to_lowercase() == target {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 #[tauri::command]
 pub async fn add_category(
     name: String,
@@ -284,17 +314,13 @@ pub async fn add_category(
         if trimmed.is_empty() {
             return Err("分类名称不能为空".to_string());
         }
+        if trimmed.chars().count() > 100 {
+            return Err("分类名称过长（最长 100 字符）".to_string());
+        }
         let name = trimmed.to_string();
 
-        // 同名校验（大小写不敏感）
-        let dup: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1)",
-                params![name],
-                |row| row.get(0),
-            )
-            .map_err(|e| e.to_string())?;
-        if dup > 0 {
+        // 同名校验（大小写不敏感，Unicode 感知）
+        if name_exists(&conn, &name, None)? {
             return Err("已存在同名分类".to_string());
         }
 
@@ -310,10 +336,19 @@ pub async fn add_category(
         // 获取当前时间戳（毫秒）
         let now = chrono::Utc::now().timestamp_millis();
 
+        // 排序号取当前最大值 +1（此前恒为 0，与默认分类冲突时顺序不确定）
+        let next_sort: i32 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
         // 插入数据库
         conn.execute(
-            "INSERT INTO categories (id, name, sort_order, created_at, parent_id) VALUES (?1, ?2, 0, ?3, ?4)",
-            params![id, name, now, parent_id],
+            "INSERT INTO categories (id, name, sort_order, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, name, next_sort, now, parent_id],
         ).map_err(|e| e.to_string())?;
 
         // 返回新添加的分类（新分类没有直接归属的密码，子树总数也为 0）
@@ -321,7 +356,7 @@ pub async fn add_category(
             id,
             name,
             icon: None,
-            sort_order: 0,
+            sort_order: next_sort,
             created_at: now,
             parent_id,
             password_count: 0,
@@ -400,8 +435,18 @@ pub async fn update_category(
 
         match current {
             Ok((current_id, current_name, current_icon, sort_order, created_at, current_parent_id)) => {
-                // 使用新值或当前值
-                let new_icon = icon.or(current_icon);
+                // 图标三层语义：缺失=保持、空串=清空、非空=赋值
+                //（此前 icon.or(current_icon) 永远无法清空图标）
+                let new_icon = match icon {
+                    None => current_icon,
+                    Some(s) if s.trim().is_empty() => None,
+                    Some(s) => {
+                        if s.chars().count() > 64 {
+                            return Err("图标过长（最长 64 字符）".to_string());
+                        }
+                        Some(s)
+                    }
+                };
                 let new_name = name.unwrap_or(current_name);
 
                 // 名称去空白，为空则报错
@@ -409,17 +454,13 @@ pub async fn update_category(
                 if trimmed.is_empty() {
                     return Err("分类名称不能为空".to_string());
                 }
+                if trimmed.chars().count() > 100 {
+                    return Err("分类名称过长（最长 100 字符）".to_string());
+                }
                 let new_name = trimmed.to_string();
 
-                // 同名校验（大小写不敏感，排除自身）
-                let dup: i64 = conn
-                    .query_row(
-                        "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1) AND id != ?2",
-                        params![new_name, current_id],
-                        |row| row.get(0),
-                    )
-                    .map_err(|e| e.to_string())?;
-                if dup > 0 {
+                // 同名校验（大小写不敏感，Unicode 感知，排除自身）
+                if name_exists(&conn, &new_name, Some(&current_id))? {
                     return Err("已存在同名分类".to_string());
                 }
 

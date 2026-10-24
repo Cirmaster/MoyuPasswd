@@ -113,13 +113,19 @@ mod platform {
                     cred.CredentialBlob,
                     cred.CredentialBlobSize as usize,
                 );
-                let utf16_data: Vec<u16> = blob
-                    .chunks_exact(2)
-                    .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
-                    .collect();
-                String::from_utf16(&utf16_data)
-                    .map(Some)
-                    .map_err(|e| format!("凭据内容编码错误: {e}"))
+                // 奇数长度 = UTF-16 编码损坏：必须报错，
+                // 不能让 chunks_exact(2) 静默丢掉尾字节把损坏掩盖成「可解析」
+                if blob.len() % 2 != 0 {
+                    Err("凭据内容长度异常（元数据损坏）".to_string())
+                } else {
+                    let utf16_data: Vec<u16> = blob
+                        .chunks_exact(2)
+                        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                        .collect();
+                    String::from_utf16(&utf16_data)
+                        .map(Some)
+                        .map_err(|e| format!("凭据内容编码错误: {e}"))
+                }
             };
 
             CredFree(credential.cast());
@@ -149,6 +155,10 @@ mod platform {
                 CredentialBlobSize: blob.len() as u32,
                 CredentialBlob: blob.as_ptr() as *mut u8,
                 Persist: CRED_PERSIST_LOCAL_MACHINE,
+                // 已知取舍（未改，改了会让存量用户的元数据读不到）：
+                // LOCAL_MACHINE 持久化 = 同用户任意进程可 CredReadW 读走主密码哈希，
+                // 离线可暴破弱主密码——主密码强度是唯一屏障。
+                // 若要收紧需换 DPAPI 再包一层并做存量迁移，属单独决策。
                 AttributeCount: 0,
                 Attributes: std::ptr::null_mut(),
                 TargetAlias: PWSTR::null(),
@@ -226,9 +236,21 @@ mod platform {
     }
 
     /// 写入元数据原始字符串
+    ///
+    /// 临时文件 + rename 原子替换：直接 fs::write 中途崩溃会留下截断文件，
+    /// 下次启动读到半截内容会卡在「元数据损坏」。
     pub fn write_meta(app_dir: &Path, key: &str, data: &str) -> Result<(), String> {
         let path = meta_path(app_dir, key);
-        fs::write(&path, data).map_err(|e| format!("保存元数据文件失败: {e}"))?;
+        // 同目录临时文件（rename 同一文件系统内是原子操作）
+        let mut tmp_name = path.clone().into_os_string();
+        tmp_name.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp_name);
+
+        fs::write(&tmp, data).map_err(|e| format!("保存元数据文件失败: {e}"))?;
+        if let Err(e) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(format!("替换元数据文件失败: {e}"));
+        }
 
         // 收紧文件 ACL
         if let Err(e) = crate::acl::harden_file_acl(&path) {

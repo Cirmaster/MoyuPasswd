@@ -1,13 +1,13 @@
 import { fileURLToPath, URL } from 'node:url'
 import { resolve } from 'node:path'
-import { defineConfig } from 'vite'
+import { defineConfig, type UserConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import vueJsx from '@vitejs/plugin-vue-jsx'
 import svgLoader from 'vite-svg-loader'
 // import vueDevTools from 'vite-plugin-vue-devtools'
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ command }): UserConfig => ({
   plugins: [
     vue(),
     vueJsx(),
@@ -29,4 +29,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))
