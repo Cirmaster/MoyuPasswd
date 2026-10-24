@@ -13,8 +13,10 @@
 -->
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
-import { RouterView } from 'vue-router'
+import { onMounted, onUnmounted } from 'vue'
+import { RouterView, useRouter } from 'vue-router'
+import { invoke } from '@tauri-apps/api/core'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTheme } from '@/composables/useTheme'
 import { useAutoLock } from '@/composables/useAutoLock'
 import { disableContextMenu } from '@/lib/windowSetup'
@@ -22,16 +24,40 @@ import { disableContextMenu } from '@/lib/windowSetup'
 /** 主题管理 */
 const { initTheme } = useTheme()
 
-/** 全局用户活动上报（自动锁定由后端空闲检测统一负责，以系统空闲为准） */
+/** 全局用户活动上报（自动锁定由后端空闲检测统一负责，双条件取先到） */
 useAutoLock()
 
+const router = useRouter()
+
+/** 窗口焦点监听的清理函数 */
+let unlistenFocus: (() => void) | null = null
+
 /**
- * 组件挂载时初始化主题
+ * 组件挂载时初始化主题，并注册窗口焦点复核
  */
-onMounted(() => {
+onMounted(async () => {
   initTheme()
   // 禁用浏览器默认右键菜单（入口已拦一道；组件内再拦，保证热替换后也生效）
   disableContextMenu()
+
+  // 窗口重新获得焦点（含从托盘恢复、切回本应用）时复核解锁状态：
+  // 防止 app-locked 事件丢失后主界面停留在旧页面、看起来「没锁」
+  unlistenFocus = await getCurrentWindow().onFocusChanged(async ({ payload: focused }) => {
+    if (!focused) return
+    try {
+      const unlocked = await invoke<boolean>('is_unlocked')
+      if (!unlocked && router.currentRoute.value.path !== '/') {
+        await router.push('/')
+      }
+    } catch {
+      // 复核失败不打断用户操作，由路由守卫与后端命令门禁兜底
+    }
+  })
+})
+
+onUnmounted(() => {
+  unlistenFocus?.()
+  unlistenFocus = null
 })
 </script>
 

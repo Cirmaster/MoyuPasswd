@@ -5,9 +5,11 @@
 //!
 //! # 工作原理
 //!
-//! - Windows: 使用 `GetLastInputInfo` API 获取**系统空闲时间**（全局键鼠输入），
-//!   用户在其他应用工作视为「未离开」，不触发锁定
-//! - 非 Windows: 无系统空闲 API，退化为应用内活动（前端 `report_activity` 上报）
+//! - 自动锁定采用**双条件取先到**：「系统空闲」（离开电脑）与「应用内无操作」
+//!   任一先达到阈值即触发锁定——离开电脑会锁，人一直在电脑前但长时间不用本应用也会锁
+//! - Windows: 系统空闲用 `GetLastInputInfo` API（全局键鼠输入）；
+//!   应用内活动由前端 `report_activity` 命令上报（`useAutoLock` composable）
+//! - 非 Windows: 无系统空闲 API，退化为应用内活动单一条件
 //! - 后台线程每 10 秒检查一次，超过设置阈值触发锁定
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,26 +41,20 @@ pub async fn report_activity() {
     LAST_ACTIVITY.store(now, Ordering::SeqCst);
 }
 
-/// 获取自上次活动以来的空闲时间（秒）
+/// 获取用于自动锁定判定的空闲时间（秒）
 ///
-/// 自动锁定语义以「用户是否离开电脑」为准（唯一权威信号）：
-/// - Windows：取系统空闲时间——用户在其他应用工作不算空闲
-/// - 其他平台：退化为应用内活动（`report_activity` 上报）
+/// 自动锁定采用**双条件取先到**（任一先达到阈值即锁定）：
+/// - 系统空闲：用户离开电脑（全局键鼠无输入）
+/// - 应用内无操作：用户在电脑前但长时间不使用本应用（含只用其他应用的情况）
 ///
-/// 返回 `u64::MAX` 表示「无法判定」，调用方不应据此锁定。
+/// 返回两者的较小值；两者都「无法判定」时返回 `u64::MAX`，调用方不应据此锁定。
 pub fn get_idle_seconds() -> u64 {
-    #[cfg(windows)]
-    {
-        get_system_idle_seconds()
-    }
-    #[cfg(not(windows))]
-    {
-        get_app_idle_seconds()
-    }
+    let system_idle = get_system_idle_seconds();
+    let app_idle = get_app_idle_seconds();
+    system_idle.min(app_idle)
 }
 
-/// 获取应用内空闲时间（秒）（非 Windows 平台的空闲判定依据）
-#[cfg(not(windows))]
+/// 获取应用内空闲时间（秒）（应用内活动由前端 `report_activity` 上报）
 fn get_app_idle_seconds() -> u64 {
     let last_activity = LAST_ACTIVITY.load(Ordering::SeqCst);
     if last_activity == 0 {

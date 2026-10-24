@@ -66,4 +66,24 @@ const router = createRouter({
   ],
 })
 
+/**
+ * 全局路由守卫：未解锁时禁止进入任何业务页面，统一跳回解锁页。
+ *
+ * 兜底作用：即使 `app-locked` 事件在窗口隐藏/节流时丢失，
+ * 任何导航动作都会重新核实后端解锁状态，不会停留在旧页面。
+ */
+router.beforeEach(async (to) => {
+  // 解锁页本身放行（含锁定后的跳转目标）
+  if (to.path === '/') return true
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const unlocked = await invoke<boolean>('is_unlocked')
+    if (!unlocked) return { path: '/' }
+  } catch {
+    // 后端不可用时不拦截（避免导航被卡死），由页面自身的错误提示兜底
+  }
+  return true
+})
+
 export default router

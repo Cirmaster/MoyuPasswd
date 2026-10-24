@@ -1,10 +1,9 @@
 /**
  * useAutoLock.ts - 用户活动上报
  *
- * 自动锁定由后端空闲检测统一负责（以系统空闲为准，见 idle.rs），
- * 前端不再各自计时锁定——此前前端只看应用内事件、后端取系统与应用空闲的较小值，
- * 两套语义互相矛盾。本 composable 只负责把前端活动上报给后端
- * （非 Windows 平台的空闲判定依据）。
+ * 自动锁定由后端空闲检测统一负责（双条件取先到：系统空闲 / 应用内无操作，
+ * 见 idle.rs），前端不自行计时锁定，只负责把应用内的用户活动上报给后端
+ * （`report_activity`），作为「应用内无操作」条件的判定依据。
  *
  * @example
  * ```ts
@@ -43,13 +42,19 @@ export function useAutoLock() {
 
   /**
    * 开始监听用户活动
+   *
+   * keydown 覆盖全部按键（keypress 对功能键/修饰键不触发）；
+   * wheel 覆盖滚轮滚动（scroll 事件不冒泡，部分滚动场景收不到）。
+   * 漏报活动会导致「人在用却被锁」，事件宁多勿少（节流已兜底）。
    */
   const startTracking = () => {
     if (isTracking) return
 
     window.addEventListener('mousemove', handleActivity)
     window.addEventListener('mousedown', handleActivity)
+    window.addEventListener('keydown', handleActivity)
     window.addEventListener('keypress', handleActivity)
+    window.addEventListener('wheel', handleActivity)
     window.addEventListener('touchmove', handleActivity)
     window.addEventListener('scroll', handleActivity)
 
@@ -64,7 +69,9 @@ export function useAutoLock() {
 
     window.removeEventListener('mousemove', handleActivity)
     window.removeEventListener('mousedown', handleActivity)
+    window.removeEventListener('keydown', handleActivity)
     window.removeEventListener('keypress', handleActivity)
+    window.removeEventListener('wheel', handleActivity)
     window.removeEventListener('touchmove', handleActivity)
     window.removeEventListener('scroll', handleActivity)
 

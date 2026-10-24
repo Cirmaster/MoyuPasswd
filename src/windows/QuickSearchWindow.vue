@@ -29,11 +29,15 @@ import { Label } from '@/components/ui/label'
 import { useTheme } from '@/composables/useTheme'
 import type { CustomField } from '@/stores/password'
 import { disableContextMenu } from '@/lib/windowSetup'
+import { useAutoLock } from '@/composables/useAutoLock'
 import { IconLock, IconSearch, IconSpinner } from '@/components/icons'
 import Toast from '@/components/Toast.vue'
 
 /** 主题管理 */
 const { isDark, initTheme } = useTheme()
+
+/** 用户活动上报（弹窗里的操作也算使用应用，避免人在用却被自动锁定） */
+useAutoLock()
 
 /** 搜索关键词 */
 const searchQuery = ref('')
@@ -44,8 +48,15 @@ const selectedIndex = ref(0)
 /** 加载状态 */
 const loading = ref(false)
 
-/** 是否已解锁 */
-const isUnlocked = ref(false)
+/**
+ * 是否已解锁（三态）
+ *
+ * - `null`：未知——首次查询尚未完成/查询遇到非解锁类错误；
+ *   此时**不得**显示「密码库已锁定」，避免把瞬时故障误报成锁定
+ * - `true`：后端查询成功，确认已解锁
+ * - `false`：后端明确返回未解锁（或收到 app-locked 事件），显示解锁界面
+ */
+const isUnlocked = ref<boolean | null>(null)
 
 /** 主密码输入 */
 const masterPassword = ref('')
@@ -237,13 +248,17 @@ const searchPasswords = async (query: string) => {
   } catch (e) {
     if (seq !== requestSeq) return
     console.error('查询密码失败:', e)
-    // 后端返回错误，检查是否是未解锁导致的
+    // 后端返回错误，区分「未解锁」与其他错误：
+    // 只有明确未解锁才显示锁定界面，其他错误（如数据库瞬时锁冲突）保持
+    // 现有解锁状态不变并提示重试，避免误显示「密码库已锁定」
     const errorMsg = String(e)
     if (errorMsg.includes('未解锁') || errorMsg.includes('not unlocked')) {
       // 后端未解锁，显示解锁界面
       isUnlocked.value = false
       results.value = []
       searchQuery.value = ''
+    } else {
+      toast.value = { show: true, type: 'error', message: '查询失败，请稍后重试' }
     }
   } finally {
     // 只有最新一次请求负责结束 loading
@@ -476,8 +491,8 @@ const handleKeydown = (e: KeyboardEvent) => {
     return
   }
 
-  // 如果未解锁，按 Enter 时触发解锁
-  if (!isUnlocked.value) {
+  // 确认未解锁时，按 Enter 时触发解锁（未知状态 null 不拦截，按正常搜索流程处理）
+  if (isUnlocked.value === false) {
     if (e.key === 'Enter') {
       e.preventDefault()
       handleUnlock()
@@ -618,8 +633,8 @@ onMounted(async () => {
 <template>
   <!-- overflow-hidden + min-h-0 链条：列表高度收敛到窗口内，滚动条长在结果区而不是整个窗口 -->
   <div class="h-screen overflow-hidden bg-transparent text-foreground flex flex-col">
-    <!-- 未解锁 -->
-    <div v-if="!isUnlocked" class="flex-1 flex items-center justify-center bg-card">
+    <!-- 未解锁（仅确认未解锁时显示；查询瞬时失败不误报锁定） -->
+    <div v-if="isUnlocked === false" class="flex-1 flex items-center justify-center bg-card">
       <div class="w-full max-w-sm bg-card border shadow-lg">
         <!-- 系统认证进行中 -->
         <div v-if="attemptingSystemAuth" class="p-6 text-center">

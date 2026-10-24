@@ -113,6 +113,10 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String
         }
     }
 
+    // 同步自动锁定阈值到空闲检测线程。
+    // 否则重启后空闲检测一直用默认 5 分钟，直到用户再次保存设置才生效。
+    crate::idle::set_auto_lock_minutes(settings.auto_lock_time);
+
     Ok(settings)
 }
 
