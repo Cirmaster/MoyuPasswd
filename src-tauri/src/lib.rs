@@ -47,6 +47,9 @@ pub mod system_auth;
 /// 应用状态模块
 pub mod state;
 
+/// 统一响应格式模块（所有命令返回 { code, message, data } 包裹）
+pub mod response;
+
 /// Tauri 命令模块
 pub mod commands;
 

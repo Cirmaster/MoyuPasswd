@@ -10,6 +10,7 @@
 //! - `stop_follow_cursor`: 停止跟随光标
 //! - `get_countdown_seconds`: 获取倒计时秒数
 
+use crate::response::{respond, ApiResult};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -83,38 +84,40 @@ fn show_without_activate(window: &tauri::WebviewWindow) {
 /// await invoke('start_follow_cursor');
 /// ```
 #[tauri::command]
-pub async fn start_follow_cursor(app: tauri::AppHandle) -> Result<(), String> {
-    // 停止并回收旧线程，避免重复启动导致多线程竞态
-    stop_follow_cursor_internal();
+pub async fn start_follow_cursor(app: tauri::AppHandle) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 停止并回收旧线程，避免重复启动导致多线程竞态
+        stop_follow_cursor_internal();
 
-    FOLLOW_CURSOR_RUNNING.store(true, Ordering::SeqCst);
+        FOLLOW_CURSOR_RUNNING.store(true, Ordering::SeqCst);
 
-    let handle = std::thread::spawn(move || {
-        log::info!("Cursor follow thread started");
+        let handle = std::thread::spawn(move || {
+            log::info!("Cursor follow thread started");
 
-        while FOLLOW_CURSOR_RUNNING.load(Ordering::SeqCst) {
-            if let Some((x, y)) = get_cursor_position() {
-                // 更新窗口位置（鼠标右下角偏移 15px）
-                if let Some(window) = app.get_webview_window("countdown") {
-                    let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                        x: x + 15,
-                        y: y + 15,
-                    }));
+            while FOLLOW_CURSOR_RUNNING.load(Ordering::SeqCst) {
+                if let Some((x, y)) = get_cursor_position() {
+                    // 更新窗口位置（鼠标右下角偏移 15px）
+                    if let Some(window) = app.get_webview_window("countdown") {
+                        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                            x: x + 15,
+                            y: y + 15,
+                        }));
+                    }
                 }
+                // 每 16ms 更新一次（约 60fps）
+                std::thread::sleep(std::time::Duration::from_millis(16));
             }
-            // 每 16ms 更新一次（约 60fps）
-            std::thread::sleep(std::time::Duration::from_millis(16));
+
+            log::info!("Cursor follow thread stopped");
+        });
+
+        if let Ok(mut guard) = FOLLOW_CURSOR_HANDLE.lock() {
+            *guard = Some(handle);
         }
 
-        log::info!("Cursor follow thread stopped");
-    });
+        Ok(())
 
-    if let Ok(mut guard) = FOLLOW_CURSOR_HANDLE.lock() {
-        *guard = Some(handle);
-    }
-
-    Ok(())
-}
+    })}
 
 /// 停止跟随光标（内部实现：置标志 + join 回收线程）
 fn stop_follow_cursor_internal() {
@@ -135,11 +138,13 @@ fn stop_follow_cursor_internal() {
 /// await invoke('stop_follow_cursor');
 /// ```
 #[tauri::command]
-pub async fn stop_follow_cursor() -> Result<(), String> {
-    stop_follow_cursor_internal();
-    log::info!("Cursor follow stopped");
-    Ok(())
-}
+pub async fn stop_follow_cursor() -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        stop_follow_cursor_internal();
+        log::info!("Cursor follow stopped");
+        Ok(())
+
+    })}
 
 /// 获取倒计时秒数
 ///
@@ -151,9 +156,11 @@ pub async fn stop_follow_cursor() -> Result<(), String> {
 /// const seconds = await invoke('get_countdown_seconds');
 /// ```
 #[tauri::command]
-pub async fn get_countdown_seconds() -> Result<u32, String> {
-    Ok(COUNTDOWN_SECONDS.load(Ordering::SeqCst))
-}
+pub async fn get_countdown_seconds() -> ApiResult<u32> {
+    respond(|| -> Result<u32, String> {
+        Ok(COUNTDOWN_SECONDS.load(Ordering::SeqCst))
+
+    })}
 
 /// 显示倒计时窗口
 ///
@@ -172,58 +179,60 @@ pub async fn get_countdown_seconds() -> Result<u32, String> {
 /// await invoke('show_countdown', { seconds: 30, x: 100, y: 200 });
 /// ```
 #[tauri::command]
-pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle) -> Result<(), String> {
-    log::info!("show_countdown called: seconds={}, x={}, y={}", seconds, x, y);
+pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        log::info!("show_countdown called: seconds={}, x={}, y={}", seconds, x, y);
 
-    // 存储倒计时秒数
-    COUNTDOWN_SECONDS.store(seconds, Ordering::SeqCst);
+        // 存储倒计时秒数
+        COUNTDOWN_SECONDS.store(seconds, Ordering::SeqCst);
 
-    // 计算窗口位置（鼠标右下角偏移 15px）
-    let window_x = x + 15.0;
-    let window_y = y + 15.0;
+        // 计算窗口位置（鼠标右下角偏移 15px）
+        let window_x = x + 15.0;
+        let window_y = y + 15.0;
 
-    // 检查窗口是否已存在
-    if let Some(window) = app.get_webview_window("countdown") {
-        log::info!("Countdown window exists, updating position");
-        // 窗口已存在，更新位置并显示
-        let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-            x: window_x as i32,
-            y: window_y as i32,
-        }));
-        // 发送重置事件
-        let _ = window.emit("reset-countdown", serde_json::json!({ "seconds": seconds }));
-        // 显示但不抢焦点
-        show_without_activate(&window);
-    } else {
-        log::info!("Creating new countdown window");
-        // 创建新窗口 - 透明无边框，始终置顶，无阴影
-        let _window = tauri::WebviewWindowBuilder::new(
-            &app,
-            "countdown",
-            tauri::WebviewUrl::App("countdown.html".into())
-        )
-        .title("")
-        .inner_size(16.0, 16.0)
-        .min_inner_size(16.0, 16.0)
-        // 上限放宽：终端二次确认提示时前端会把小圆点扩成提示条（见 CountdownWindow.vue）
-        .max_inner_size(320.0, 48.0)
-        .resizable(false)
-        .decorations(false)
-        .always_on_top(true)
-        .position(window_x, window_y)
-        .transparent(true)
-        .skip_taskbar(true)
-        .shadow(false)
-        .focused(false)
-        .visible(true)
-        .build()
-        .map_err(|e| e.to_string())?;
+        // 检查窗口是否已存在
+        if let Some(window) = app.get_webview_window("countdown") {
+            log::info!("Countdown window exists, updating position");
+            // 窗口已存在，更新位置并显示
+            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
+                x: window_x as i32,
+                y: window_y as i32,
+            }));
+            // 发送重置事件
+            let _ = window.emit("reset-countdown", serde_json::json!({ "seconds": seconds }));
+            // 显示但不抢焦点
+            show_without_activate(&window);
+        } else {
+            log::info!("Creating new countdown window");
+            // 创建新窗口 - 透明无边框，始终置顶，无阴影
+            let _window = tauri::WebviewWindowBuilder::new(
+                &app,
+                "countdown",
+                tauri::WebviewUrl::App("countdown.html".into())
+            )
+            .title("")
+            .inner_size(16.0, 16.0)
+            .min_inner_size(16.0, 16.0)
+            // 上限放宽：终端二次确认提示时前端会把小圆点扩成提示条（见 CountdownWindow.vue）
+            .max_inner_size(320.0, 48.0)
+            .resizable(false)
+            .decorations(false)
+            .always_on_top(true)
+            .position(window_x, window_y)
+            .transparent(true)
+            .skip_taskbar(true)
+            .shadow(false)
+            .focused(false)
+            .visible(true)
+            .build()
+            .map_err(|e| e.to_string())?;
 
-        log::info!("Countdown window created");
-    }
+            log::info!("Countdown window created");
+        }
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 隐藏倒计时窗口
 ///
@@ -237,16 +246,18 @@ pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle)
 /// await invoke('hide_countdown');
 /// ```
 #[tauri::command]
-pub async fn hide_countdown(app: tauri::AppHandle) -> Result<(), String> {
-    // 先停止光标跟随
-    FOLLOW_CURSOR_RUNNING.store(false, Ordering::SeqCst);
+pub async fn hide_countdown(app: tauri::AppHandle) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 先停止光标跟随
+        FOLLOW_CURSOR_RUNNING.store(false, Ordering::SeqCst);
 
-    if let Some(window) = app.get_webview_window("countdown") {
-        let _ = window.hide();
-    }
+        if let Some(window) = app.get_webview_window("countdown") {
+            let _ = window.hide();
+        }
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 清除剪贴板
 ///
@@ -256,11 +267,13 @@ pub async fn hide_countdown(app: tauri::AppHandle) -> Result<(), String> {
 /// await invoke('clear_clipboard');
 /// ```
 #[tauri::command]
-pub async fn clear_clipboard(app: tauri::AppHandle) -> Result<(), String> {
-    crate::clipboard::clear_now(&app)?;
-    log::info!("Clipboard cleared");
-    Ok(())
-}
+pub async fn clear_clipboard(app: tauri::AppHandle) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        crate::clipboard::clear_now(&app)?;
+        log::info!("Clipboard cleared");
+        Ok(())
+
+    })}
 
 /// 统一销毁「粘贴/倒计时」状态（钩子检测到 Ctrl+C / Esc 时调用）
 ///

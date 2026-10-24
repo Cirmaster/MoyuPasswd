@@ -18,6 +18,7 @@
 //! - 不注册无修饰键的 Escape（全局裸 Esc 会吞系统级 Esc；快速搜索窗口内的
 //!   Esc 由前端窗口级键盘监听处理）
 
+use crate::response::{respond, ApiResult};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State};
@@ -64,39 +65,41 @@ impl Default for ShortcutConfig {
 /// const shortcuts = await invoke('get_shortcuts');
 /// ```
 #[tauri::command]
-pub async fn get_shortcuts(state: State<'_, AppState>) -> Result<ShortcutConfig, String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+pub async fn get_shortcuts(state: State<'_, AppState>) -> ApiResult<ShortcutConfig> {
+    respond(|| -> Result<ShortcutConfig, String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 查询快捷键配置
-    let result = conn.query_row(
-        "SELECT value FROM settings WHERE key = 'shortcuts'",
-        [],
-        |row| {
-            let value: String = row.get(0)?;
-            Ok(value)
-        },
-    );
+        // 查询快捷键配置
+        let result = conn.query_row(
+            "SELECT value FROM settings WHERE key = 'shortcuts'",
+            [],
+            |row| {
+                let value: String = row.get(0)?;
+                Ok(value)
+            },
+        );
 
-    match result {
-        Ok(json) => {
-            log::info!("读取到快捷键配置: {}", json);
-            // 解析 JSON
-            serde_json::from_str(&json).map_err(|e| {
-                log::error!("解析快捷键配置失败: {}", e);
-                e.to_string()
-            })
+        match result {
+            Ok(json) => {
+                log::info!("读取到快捷键配置: {}", json);
+                // 解析 JSON
+                serde_json::from_str(&json).map_err(|e| {
+                    log::error!("解析快捷键配置失败: {}", e);
+                    e.to_string()
+                })
+            }
+            Err(e) => {
+                log::info!("未找到快捷键配置，使用默认值: {:?}", e);
+                // 返回默认配置
+                Ok(ShortcutConfig::default())
+            }
         }
-        Err(e) => {
-            log::info!("未找到快捷键配置，使用默认值: {:?}", e);
-            // 返回默认配置
-            Ok(ShortcutConfig::default())
-        }
-    }
-}
+
+    })}
 
 /// 保存快捷键配置
 ///
@@ -126,35 +129,37 @@ pub async fn get_shortcuts(state: State<'_, AppState>) -> Result<ShortcutConfig,
 pub async fn save_shortcuts(
     shortcuts: ShortcutConfig,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    log::info!("收到快捷键保存请求: {:?}", shortcuts);
+        log::info!("收到快捷键保存请求: {:?}", shortcuts);
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 序列化为 JSON
-    let json = serde_json::to_string(&shortcuts).map_err(|e| {
-        log::error!("序列化快捷键配置失败: {}", e);
-        e.to_string()
-    })?;
+        // 序列化为 JSON
+        let json = serde_json::to_string(&shortcuts).map_err(|e| {
+            log::error!("序列化快捷键配置失败: {}", e);
+            e.to_string()
+        })?;
 
-    log::info!("序列化后的 JSON: {}", json);
+        log::info!("序列化后的 JSON: {}", json);
 
-    // 保存到数据库
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES ('shortcuts', ?1)",
-        params![json],
-    ).map_err(|e| {
-        log::error!("保存快捷键到数据库失败: {}", e);
-        e.to_string()
-    })?;
+        // 保存到数据库
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('shortcuts', ?1)",
+            params![json],
+        ).map_err(|e| {
+            log::error!("保存快捷键到数据库失败: {}", e);
+            e.to_string()
+        })?;
 
-    log::info!("快捷键配置保存成功");
-    Ok(())
-}
+        log::info!("快捷键配置保存成功");
+        Ok(())
+
+    })}
 
 // ==================== 注册实现（唯一入口） ====================
 
@@ -317,17 +322,19 @@ pub fn reload_from_settings(
 pub async fn update_global_shortcuts(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<Vec<String>> {
+    respond(|| -> Result<Vec<String>, String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    log::info!("开始更新全局快捷键...");
-    let config = load_config_from_db(&state);
-    log::info!("新的快捷键配置: {:?}", config);
-    let failed = register_all(&app, &config)?;
-    log::info!("全局快捷键更新完成，失败: {:?}", failed);
-    Ok(failed)
-}
+        log::info!("开始更新全局快捷键...");
+        let config = load_config_from_db(&state);
+        log::info!("新的快捷键配置: {:?}", config);
+        let failed = register_all(&app, &config)?;
+        log::info!("全局快捷键更新完成，失败: {:?}", failed);
+        Ok(failed)
+
+    })}
 
 /// 注销所有全局快捷键
 ///
@@ -350,16 +357,18 @@ pub async fn update_global_shortcuts(
 pub async fn unregister_all_shortcuts(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    log::info!("注销所有全局快捷键...");
-    let global_shortcut = app.global_shortcut();
-    global_shortcut.unregister_all().map_err(|e| {
-        log::error!("注销快捷键失败: {}", e);
-        e.to_string()
-    })?;
-    log::info!("已注销所有全局快捷键");
-    Ok(())
-}
+        log::info!("注销所有全局快捷键...");
+        let global_shortcut = app.global_shortcut();
+        global_shortcut.unregister_all().map_err(|e| {
+            log::error!("注销快捷键失败: {}", e);
+            e.to_string()
+        })?;
+        log::info!("已注销所有全局快捷键");
+        Ok(())
+
+    })}

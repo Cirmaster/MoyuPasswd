@@ -12,7 +12,7 @@
  */
 
 import { onMounted, onUnmounted } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/lib/api'
 
 /** 是否正在监听 */
 let isTracking = false

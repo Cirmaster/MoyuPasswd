@@ -116,7 +116,7 @@ const stopCountdown = () => {
 const clearClipboard = async () => {
   try {
     // 调用后端原生清空剪贴板（不向历史追加空记录）
-    const { invoke } = await import('@tauri-apps/api/core')
+    const { invoke } = await import('@/lib/api')
     await invoke('clear_clipboard')
     console.log('Clipboard cleared')
   } catch (e) {
@@ -133,7 +133,7 @@ const closeWindow = async () => {
 
   // 先停止光标跟随（不等待结果）
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
+    const { invoke } = await import('@/lib/api')
     invoke('stop_follow_cursor').catch(err => console.warn('stop_follow_cursor failed:', err))
   } catch (e) {
     console.warn('Failed to invoke stop_follow_cursor:', e)
@@ -176,7 +176,7 @@ onMounted(async () => {
 
   try {
     // 动态导入 Tauri API
-    const { invoke } = await import('@tauri-apps/api/core')
+    const { invoke } = await import('@/lib/api')
     const { listen } = await import('@tauri-apps/api/event')
 
     // 从后端获取倒计时秒数并启动

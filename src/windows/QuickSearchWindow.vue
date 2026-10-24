@@ -20,7 +20,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/lib/api'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen } from '@tauri-apps/api/event'
 import { Button } from '@/components/ui/button'

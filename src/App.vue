@@ -15,7 +15,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted } from 'vue'
 import { RouterView, useRouter } from 'vue-router'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/lib/api'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { useTheme } from '@/composables/useTheme'
 import { useAutoLock } from '@/composables/useAutoLock'

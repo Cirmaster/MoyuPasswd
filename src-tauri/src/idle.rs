@@ -33,12 +33,13 @@ pub fn init() {
 ///
 /// 前端每次用户操作时调用此命令
 #[tauri::command]
-pub async fn report_activity() {
+pub async fn report_activity() -> crate::response::ApiResult<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
     LAST_ACTIVITY.store(now, Ordering::SeqCst);
+    Ok(crate::response::ApiResponse::ok(()))
 }
 
 /// 获取用于自动锁定判定的空闲时间（秒）

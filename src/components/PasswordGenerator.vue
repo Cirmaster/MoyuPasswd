@@ -22,7 +22,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/lib/api'
 import { calcPasswordStrength } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'

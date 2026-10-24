@@ -9,6 +9,7 @@
 //! - `save_setting`: 保存单个设置
 //! - `save_settings`: 批量保存设置
 
+use crate::response::{respond, ApiResult};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
@@ -74,51 +75,53 @@ impl Default for Settings {
 /// const settings = await invoke('get_settings');
 /// ```
 #[tauri::command]
-pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+pub async fn get_settings(state: State<'_, AppState>) -> ApiResult<Settings> {
+    respond(|| -> Result<Settings, String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 查询所有设置
-    let mut stmt = conn
-        .prepare("SELECT key, value FROM settings")
-        .map_err(|e| e.to_string())?;
+        // 查询所有设置
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM settings")
+            .map_err(|e| e.to_string())?;
 
-    let mut settings = Settings::default();
+        let mut settings = Settings::default();
 
-    let rows = stmt
-        .query_map([], |row| {
-            let key: String = row.get(0)?;
-            let value: String = row.get(1)?;
-            Ok((key, value))
-        })
-        .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                let key: String = row.get(0)?;
+                let value: String = row.get(1)?;
+                Ok((key, value))
+            })
+            .map_err(|e| e.to_string())?;
 
-    for row in rows {
-        let (key, value) = row.map_err(|e| e.to_string())?;
+        for row in rows {
+            let (key, value) = row.map_err(|e| e.to_string())?;
 
-        match key.as_str() {
-            "theme" => settings.theme = value,
-            "language" => settings.language = value,
-            "auto_lock_time" => settings.auto_lock_time = value.parse().unwrap_or(5),
-            "clipboard_clear_time" => settings.clipboard_clear_time = value.parse().unwrap_or(30),
-            "auto_start" => settings.auto_start = value == "true",
-            "close_to_tray" => settings.close_to_tray = value == "true",
-            "show_password_strength" => settings.show_password_strength = value == "true",
-            "show_on_startup" => settings.show_on_startup = value == "true",
-            "allow_terminal_inject" => settings.allow_terminal_inject = value == "true",
-            _ => {}
+            match key.as_str() {
+                "theme" => settings.theme = value,
+                "language" => settings.language = value,
+                "auto_lock_time" => settings.auto_lock_time = value.parse().unwrap_or(5),
+                "clipboard_clear_time" => settings.clipboard_clear_time = value.parse().unwrap_or(30),
+                "auto_start" => settings.auto_start = value == "true",
+                "close_to_tray" => settings.close_to_tray = value == "true",
+                "show_password_strength" => settings.show_password_strength = value == "true",
+                "show_on_startup" => settings.show_on_startup = value == "true",
+                "allow_terminal_inject" => settings.allow_terminal_inject = value == "true",
+                _ => {}
+            }
         }
-    }
 
-    // 同步自动锁定阈值到空闲检测线程。
-    // 否则重启后空闲检测一直用默认 5 分钟，直到用户再次保存设置才生效。
-    crate::idle::set_auto_lock_minutes(settings.auto_lock_time);
+        // 同步自动锁定阈值到空闲检测线程。
+        // 否则重启后空闲检测一直用默认 5 分钟，直到用户再次保存设置才生效。
+        crate::idle::set_auto_lock_minutes(settings.auto_lock_time);
 
-    Ok(settings)
-}
+        Ok(settings)
+
+    })}
 
 /// 获取单个设置
 ///
@@ -142,29 +145,31 @@ pub async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String
 pub async fn get_setting(
     key: String,
     state: State<'_, AppState>,
-) -> Result<Option<String>, String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<Option<String>> {
+    respond(|| -> Result<Option<String>, String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 查询单个设置
-    let result = conn.query_row(
-        "SELECT value FROM settings WHERE key = ?1",
-        params![key],
-        |row| {
-            let value: String = row.get(0)?;
-            Ok(value)
-        },
-    );
+        // 查询单个设置
+        let result = conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![key],
+            |row| {
+                let value: String = row.get(0)?;
+                Ok(value)
+            },
+        );
 
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
-}
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+
+    })}
 
 /// 保存单个设置
 ///
@@ -190,27 +195,29 @@ pub async fn save_setting(
     key: String,
     value: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 使用 INSERT OR REPLACE 保存设置
-    conn.execute(
-        "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-        params![key, value],
-    ).map_err(|e| e.to_string())?;
+        // 使用 INSERT OR REPLACE 保存设置
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        ).map_err(|e| e.to_string())?;
 
-    // 如果是自动锁定时间设置，同步更新空闲检测模块
-    if key == "auto_lock_time" {
-        let minutes: u64 = value.parse().unwrap_or(5);
-        crate::idle::set_auto_lock_minutes(minutes);
-    }
+        // 如果是自动锁定时间设置，同步更新空闲检测模块
+        if key == "auto_lock_time" {
+            let minutes: u64 = value.parse().unwrap_or(5);
+            crate::idle::set_auto_lock_minutes(minutes);
+        }
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 批量保存设置
 ///
@@ -239,38 +246,40 @@ pub async fn save_setting(
 pub async fn save_settings(
     settings: Settings,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 批量保存设置
-    let settings_vec = vec![
-        ("theme", settings.theme),
-        ("language", settings.language),
-        ("auto_lock_time", settings.auto_lock_time.to_string()),
-        ("clipboard_clear_time", settings.clipboard_clear_time.to_string()),
-        ("auto_start", settings.auto_start.to_string()),
-        ("close_to_tray", settings.close_to_tray.to_string()),
-        ("show_password_strength", settings.show_password_strength.to_string()),
-        ("show_on_startup", settings.show_on_startup.to_string()),
-        ("allow_terminal_inject", settings.allow_terminal_inject.to_string()),
-    ];
+        // 批量保存设置
+        let settings_vec = vec![
+            ("theme", settings.theme),
+            ("language", settings.language),
+            ("auto_lock_time", settings.auto_lock_time.to_string()),
+            ("clipboard_clear_time", settings.clipboard_clear_time.to_string()),
+            ("auto_start", settings.auto_start.to_string()),
+            ("close_to_tray", settings.close_to_tray.to_string()),
+            ("show_password_strength", settings.show_password_strength.to_string()),
+            ("show_on_startup", settings.show_on_startup.to_string()),
+            ("allow_terminal_inject", settings.allow_terminal_inject.to_string()),
+        ];
 
-    for (key, value) in settings_vec {
-        conn.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
-            params![key, value],
-        ).map_err(|e| e.to_string())?;
-    }
+        for (key, value) in settings_vec {
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            ).map_err(|e| e.to_string())?;
+        }
 
-    // 同步更新空闲检测模块的自动锁定时间
-    crate::idle::set_auto_lock_minutes(settings.auto_lock_time);
+        // 同步更新空闲检测模块的自动锁定时间
+        crate::idle::set_auto_lock_minutes(settings.auto_lock_time);
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 设置开机自启
 ///
@@ -291,17 +300,19 @@ pub async fn save_settings(
 /// await invoke('set_auto_start', { enable: true });
 /// ```
 #[tauri::command]
-pub async fn set_auto_start(enable: bool, app: tauri::AppHandle) -> Result<(), String> {
-    let autostart_manager = app.autolaunch();
+pub async fn set_auto_start(enable: bool, app: tauri::AppHandle) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        let autostart_manager = app.autolaunch();
 
-    if enable {
-        autostart_manager.enable().map_err(|e| e.to_string())?;
-    } else {
-        autostart_manager.disable().map_err(|e| e.to_string())?;
-    }
+        if enable {
+            autostart_manager.enable().map_err(|e| e.to_string())?;
+        } else {
+            autostart_manager.disable().map_err(|e| e.to_string())?;
+        }
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 获取开机自启状态
 ///
@@ -319,10 +330,12 @@ pub async fn set_auto_start(enable: bool, app: tauri::AppHandle) -> Result<(), S
 /// const enabled = await invoke('is_auto_start_enabled');
 /// ```
 #[tauri::command]
-pub async fn is_auto_start_enabled(app: tauri::AppHandle) -> Result<bool, String> {
-    let autostart_manager = app.autolaunch();
-    autostart_manager.is_enabled().map_err(|e| e.to_string())
-}
+pub async fn is_auto_start_enabled(app: tauri::AppHandle) -> ApiResult<bool> {
+    respond(|| -> Result<bool, String> {
+        let autostart_manager = app.autolaunch();
+        autostart_manager.is_enabled().map_err(|e| e.to_string())
+
+    })}
 
 /// 最小化窗口到托盘
 ///
@@ -342,10 +355,12 @@ pub async fn is_auto_start_enabled(app: tauri::AppHandle) -> Result<bool, String
 /// await invoke('minimize_to_tray');
 /// ```
 #[tauri::command]
-pub async fn minimize_to_tray(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("main") {
-        window.hide().map_err(|e| e.to_string())?;
-        log::info!("窗口已最小化到托盘");
-    }
-    Ok(())
-}
+pub async fn minimize_to_tray(app: tauri::AppHandle) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        if let Some(window) = app.get_webview_window("main") {
+            window.hide().map_err(|e| e.to_string())?;
+            log::info!("窗口已最小化到托盘");
+        }
+        Ok(())
+
+    })}

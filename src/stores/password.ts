@@ -28,7 +28,7 @@
 
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/lib/api'
 
 // ==================== 类型定义 ====================
 

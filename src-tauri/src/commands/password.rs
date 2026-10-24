@@ -18,6 +18,7 @@
 //! - `rename_tag`: 全局重命名标签（冲突即合并）
 //! - `delete_tag`: 从所有密码移除某标签
 
+use crate::response::{respond, ApiResult};
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
@@ -720,263 +721,265 @@ pub async fn get_passwords(
     page: Option<u32>,
     page_size: Option<u32>,
     state: State<'_, AppState>,
-) -> Result<PasswordPage, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+) -> ApiResult<PasswordPage> {
+    respond(|| -> Result<PasswordPage, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    // 获取 AES 密钥（仅用于存量数据强度回填）
-    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+        // 获取 AES 密钥（仅用于存量数据强度回填）
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 是否显示密码强度（仅控制返回值，不影响落库）
-    let show_strength = is_show_strength_enabled(&conn);
+        // 是否显示密码强度（仅控制返回值，不影响落库）
+        let show_strength = is_show_strength_enabled(&conn);
 
-    // 存量数据强度回填（strength 为空的行补算一次并落库，之后列表零解密）
-    backfill_strength(&conn, &aes_key);
+        // 存量数据强度回填（strength 为空的行补算一次并落库，之后列表零解密）
+        backfill_strength(&conn, &aes_key);
 
-    // 参数规范化：排序默认 updated_at DESC，分页默认 1 / 50（page_size 钳制 1..=500）
-    let sort_by = sort_by.as_deref().unwrap_or("updated_at");
-    let ascending = matches!(sort_order.as_deref(), Some("asc"));
-    let page_size = page_size
-        .unwrap_or(DEFAULT_PAGE_SIZE)
-        .clamp(1, MAX_PAGE_SIZE);
-    let page = page.unwrap_or(1).max(1);
+        // 参数规范化：排序默认 updated_at DESC，分页默认 1 / 50（page_size 钳制 1..=500）
+        let sort_by = sort_by.as_deref().unwrap_or("updated_at");
+        let ascending = matches!(sort_order.as_deref(), Some("asc"));
+        let page_size = page_size
+            .unwrap_or(DEFAULT_PAGE_SIZE)
+            .clamp(1, MAX_PAGE_SIZE);
+        let page = page.unwrap_or(1).max(1);
 
-    // 读取全部未删除行（列表零解密：备注只给 has_notes，强度读预存列，
-    // 自定义字段读明文列、敏感值只给空串占位；标签聚合子查询见 TAGS_SUBQUERY）
-    let sql = format!(
-        "SELECT id, title, username, url, notes_encrypted, extra_fields_plain, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count, {} AS tags
-         FROM passwords
-         WHERE deleted_at IS NULL",
-        TAGS_SUBQUERY
-    );
-    let rows = {
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let collected = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,          // id
-                    row.get::<_, String>(1)?,          // title
-                    row.get::<_, String>(2)?,          // username
-                    row.get::<_, Option<String>>(3)?,  // url
-                    row.get::<_, Option<String>>(4)?,  // notes_encrypted
-                    row.get::<_, Option<String>>(5)?,  // extra_fields_plain
-                    row.get::<_, String>(6)?,          // category_id
-                    row.get::<_, i32>(7)?,             // is_favorite
-                    row.get::<_, Option<i32>>(8)?,     // strength
-                    row.get::<_, i64>(9)?,             // created_at
-                    row.get::<_, i64>(10)?,            // updated_at
-                    row.get::<_, Option<i64>>(11)?,    // last_used_at
-                    row.get::<_, i64>(12)?,            // use_count
-                    row.get::<_, Option<String>>(13)?, // tags
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        collected
-    };
+        // 读取全部未删除行（列表零解密：备注只给 has_notes，强度读预存列，
+        // 自定义字段读明文列、敏感值只给空串占位；标签聚合子查询见 TAGS_SUBQUERY）
+        let sql = format!(
+            "SELECT id, title, username, url, notes_encrypted, extra_fields_plain, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count, {} AS tags
+             FROM passwords
+             WHERE deleted_at IS NULL",
+            TAGS_SUBQUERY
+        );
+        let rows = {
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+            let collected = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,          // id
+                        row.get::<_, String>(1)?,          // title
+                        row.get::<_, String>(2)?,          // username
+                        row.get::<_, Option<String>>(3)?,  // url
+                        row.get::<_, Option<String>>(4)?,  // notes_encrypted
+                        row.get::<_, Option<String>>(5)?,  // extra_fields_plain
+                        row.get::<_, String>(6)?,          // category_id
+                        row.get::<_, i32>(7)?,             // is_favorite
+                        row.get::<_, Option<i32>>(8)?,     // strength
+                        row.get::<_, i64>(9)?,             // created_at
+                        row.get::<_, i64>(10)?,            // updated_at
+                        row.get::<_, Option<i64>>(11)?,    // last_used_at
+                        row.get::<_, i64>(12)?,            // use_count
+                        row.get::<_, Option<String>>(13)?, // tags
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            collected
+        };
 
-    // 后端加载分类树（用于「普通分类含全部后代」过滤与分类名搜索）
-    let category_index = CategoryIndex::load(&conn)?;
+        // 后端加载分类树（用于「普通分类含全部后代」过滤与分类名搜索）
+        let category_index = CategoryIndex::load(&conn)?;
 
-    // 分类视图判定
-    let category_value = category.as_deref().unwrap_or("all");
-    let favorite_only = category_value == "favorite";
-    let recent_only = category_value == "recent";
-    let category_scope: Option<HashSet<String>> = if category_value.is_empty()
-        || category_value == "all"
-        || favorite_only
-        || recent_only
-    {
-        None
-    } else {
-        Some(category_index.collect_descendants(category_value))
-    };
+        // 分类视图判定
+        let category_value = category.as_deref().unwrap_or("all");
+        let favorite_only = category_value == "favorite";
+        let recent_only = category_value == "recent";
+        let category_scope: Option<HashSet<String>> = if category_value.is_empty()
+            || category_value == "all"
+            || favorite_only
+            || recent_only
+        {
+            None
+        } else {
+            Some(category_index.collect_descendants(category_value))
+        };
 
-    // 标签筛选：trim + 小写（AND，大小写不敏感）
-    let tag_filters: Vec<String> = tags
-        .unwrap_or_default()
-        .into_iter()
-        .map(|tag| tag.trim().to_lowercase())
-        .filter(|tag| !tag.is_empty())
-        .collect();
+        // 标签筛选：trim + 小写（AND，大小写不敏感）
+        let tag_filters: Vec<String> = tags
+            .unwrap_or_default()
+            .into_iter()
+            .map(|tag| tag.trim().to_lowercase())
+            .filter(|tag| !tag.is_empty())
+            .collect();
 
-    // 搜索分词（AND；空搜索词不参与过滤）
-    let tokens = tokenize_search(search.as_deref().unwrap_or(""));
+        // 搜索分词（AND；空搜索词不参与过滤）
+        let tokens = tokenize_search(search.as_deref().unwrap_or(""));
 
-    // 过滤：智能视图 → 分类（含后代）→ 标签 AND → 搜索（每个词都需命中 haystack）
-    let mut filtered: Vec<ListRow> = Vec::new();
-    for (
-        id,
-        title,
-        username,
-        url,
-        notes_encrypted,
-        extra_fields_plain,
-        category_id,
-        is_favorite,
-        strength,
-        created_at,
-        updated_at,
-        last_used_at,
-        use_count,
-        tags_concat,
-    ) in rows
-    {
-        // 零解密构造列表项（与详情接口不同：不下发备注明文/明文密码）
-        let extra_fields = merge_extra_fields(extra_fields_plain.as_deref(), None, None)
-            .unwrap_or_default();
-        let item = PasswordItem {
+        // 过滤：智能视图 → 分类（含后代）→ 标签 AND → 搜索（每个词都需命中 haystack）
+        let mut filtered: Vec<ListRow> = Vec::new();
+        for (
             id,
             title,
             username,
-            password: String::new(), // 列表不返回明文
             url,
-            notes: None,
-            has_notes: notes_encrypted.is_some(),
-            extra_fields,
-            category: category_id,
-            is_favorite: is_favorite != 0,
-            password_strength: if show_strength { strength } else { None },
+            notes_encrypted,
+            extra_fields_plain,
+            category_id,
+            is_favorite,
+            strength,
             created_at,
             updated_at,
-            tags: parse_tags(tags_concat),
             last_used_at,
             use_count,
-        };
+            tags_concat,
+        ) in rows
+        {
+            // 零解密构造列表项（与详情接口不同：不下发备注明文/明文密码）
+            let extra_fields = merge_extra_fields(extra_fields_plain.as_deref(), None, None)
+                .unwrap_or_default();
+            let item = PasswordItem {
+                id,
+                title,
+                username,
+                password: String::new(), // 列表不返回明文
+                url,
+                notes: None,
+                has_notes: notes_encrypted.is_some(),
+                extra_fields,
+                category: category_id,
+                is_favorite: is_favorite != 0,
+                password_strength: if show_strength { strength } else { None },
+                created_at,
+                updated_at,
+                tags: parse_tags(tags_concat),
+                last_used_at,
+                use_count,
+            };
 
-        // 智能视图 / 分类（含全部后代）过滤
-        if favorite_only && !item.is_favorite {
-            continue;
-        }
-        if recent_only && item.last_used_at.is_none() {
-            continue;
-        }
-        if let Some(scope) = &category_scope {
-            if !scope.contains(&item.category) {
+            // 智能视图 / 分类（含全部后代）过滤
+            if favorite_only && !item.is_favorite {
                 continue;
             }
-        }
-
-        // 标签 AND 过滤（大小写不敏感）
-        if !tag_filters.is_empty() {
-            let item_tags: Vec<String> = item.tags.iter().map(|tag| tag.to_lowercase()).collect();
-            if !tag_filters
-                .iter()
-                .all(|filter| item_tags.iter().any(|tag| tag == filter))
-            {
+            if recent_only && item.last_used_at.is_none() {
                 continue;
             }
-        }
-
-        // 搜索：每个词都必须命中 haystack（原文/全拼/简拼）
-        if !tokens.is_empty() {
-            let category_name = category_index.name_of(&item.category);
-            let mut fields: Vec<&str> =
-                Vec::with_capacity(4 + item.tags.len() + item.extra_fields.len() * 2);
-            fields.push(item.title.as_str());
-            fields.push(item.username.as_str());
-            if let Some(url) = item.url.as_deref() {
-                fields.push(url);
-            }
-            fields.push(category_name);
-            for tag in &item.tags {
-                fields.push(tag.as_str());
-            }
-            for field in &item.extra_fields {
-                fields.push(field.label.as_str());
-                // 敏感字段在列表中 value 为空串，不参与搜索
-                if !field.sensitive {
-                    fields.push(field.value.as_str());
+            if let Some(scope) = &category_scope {
+                if !scope.contains(&item.category) {
+                    continue;
                 }
             }
-            let haystack = build_search_haystack(&fields);
-            if !matches_search(&haystack, &tokens) {
-                continue;
+
+            // 标签 AND 过滤（大小写不敏感）
+            if !tag_filters.is_empty() {
+                let item_tags: Vec<String> = item.tags.iter().map(|tag| tag.to_lowercase()).collect();
+                if !tag_filters
+                    .iter()
+                    .all(|filter| item_tags.iter().any(|tag| tag == filter))
+                {
+                    continue;
+                }
             }
+
+            // 搜索：每个词都必须命中 haystack（原文/全拼/简拼）
+            if !tokens.is_empty() {
+                let category_name = category_index.name_of(&item.category);
+                let mut fields: Vec<&str> =
+                    Vec::with_capacity(4 + item.tags.len() + item.extra_fields.len() * 2);
+                fields.push(item.title.as_str());
+                fields.push(item.username.as_str());
+                if let Some(url) = item.url.as_deref() {
+                    fields.push(url);
+                }
+                fields.push(category_name);
+                for tag in &item.tags {
+                    fields.push(tag.as_str());
+                }
+                for field in &item.extra_fields {
+                    fields.push(field.label.as_str());
+                    // 敏感字段在列表中 value 为空串，不参与搜索
+                    if !field.sensitive {
+                        fields.push(field.value.as_str());
+                    }
+                }
+                let haystack = build_search_haystack(&fields);
+                if !matches_search(&haystack, &tokens) {
+                    continue;
+                }
+            }
+
+            // 仅按标题排序时才计算拼音全拼，避免无谓开销
+            let title_sort = if sort_by == "title" {
+                pinyin_variants(&item.title).0
+            } else {
+                String::new()
+            };
+
+            filtered.push(ListRow { item, title_sort });
         }
 
-        // 仅按标题排序时才计算拼音全拼，避免无谓开销
-        let title_sort = if sort_by == "title" {
-            pinyin_variants(&item.title).0
-        } else {
-            String::new()
-        };
+        // 排序：先按 updated_at DESC 稳定预排序，作为所有排序的次级顺序（tie-breaker）；
+        // 稳定排序保证同一主键值的行保持该次级顺序。
+        filtered.sort_by(|a, b| b.item.updated_at.cmp(&a.item.updated_at));
 
-        filtered.push(ListRow { item, title_sort });
-    }
+        match sort_by {
+            "created_at" => filtered.sort_by(|a, b| {
+                if ascending {
+                    a.item.created_at.cmp(&b.item.created_at)
+                } else {
+                    b.item.created_at.cmp(&a.item.created_at)
+                }
+            }),
+            "title" => filtered.sort_by(|a, b| {
+                // 标题按拼音全拼比较（中文按拼音序，英文按字母序）
+                if ascending {
+                    a.title_sort.cmp(&b.title_sort)
+                } else {
+                    b.title_sort.cmp(&a.title_sort)
+                }
+            }),
+            "last_used_at" => filtered.sort_by(|a, b| {
+                // 缺失使用记录按 0 处理
+                let left = a.item.last_used_at.unwrap_or(0);
+                let right = b.item.last_used_at.unwrap_or(0);
+                if ascending {
+                    left.cmp(&right)
+                } else {
+                    right.cmp(&left)
+                }
+            }),
+            "use_count" => filtered.sort_by(|a, b| {
+                if ascending {
+                    a.item.use_count.cmp(&b.item.use_count)
+                } else {
+                    b.item.use_count.cmp(&a.item.use_count)
+                }
+            }),
+            // 默认 updated_at（未知排序字段也回退到 updated_at）
+            _ => filtered.sort_by(|a, b| {
+                if ascending {
+                    a.item.updated_at.cmp(&b.item.updated_at)
+                } else {
+                    b.item.updated_at.cmp(&a.item.updated_at)
+                }
+            }),
+        }
 
-    // 排序：先按 updated_at DESC 稳定预排序，作为所有排序的次级顺序（tie-breaker）；
-    // 稳定排序保证同一主键值的行保持该次级顺序。
-    filtered.sort_by(|a, b| b.item.updated_at.cmp(&a.item.updated_at));
+        // 分页：total = 过滤后总条数；页码钳制到 [1, page_count]（空结果时 page=1）
+        let total = filtered.len() as i64;
+        let page_count = ((total + page_size as i64 - 1) / page_size as i64).max(1) as u32;
+        let page = page.min(page_count);
+        let offset = ((page - 1) as usize) * (page_size as usize);
+        let items: Vec<PasswordItem> = filtered
+            .into_iter()
+            .skip(offset)
+            .take(page_size as usize)
+            .map(|row| row.item)
+            .collect();
 
-    match sort_by {
-        "created_at" => filtered.sort_by(|a, b| {
-            if ascending {
-                a.item.created_at.cmp(&b.item.created_at)
-            } else {
-                b.item.created_at.cmp(&a.item.created_at)
-            }
-        }),
-        "title" => filtered.sort_by(|a, b| {
-            // 标题按拼音全拼比较（中文按拼音序，英文按字母序）
-            if ascending {
-                a.title_sort.cmp(&b.title_sort)
-            } else {
-                b.title_sort.cmp(&a.title_sort)
-            }
-        }),
-        "last_used_at" => filtered.sort_by(|a, b| {
-            // 缺失使用记录按 0 处理
-            let left = a.item.last_used_at.unwrap_or(0);
-            let right = b.item.last_used_at.unwrap_or(0);
-            if ascending {
-                left.cmp(&right)
-            } else {
-                right.cmp(&left)
-            }
-        }),
-        "use_count" => filtered.sort_by(|a, b| {
-            if ascending {
-                a.item.use_count.cmp(&b.item.use_count)
-            } else {
-                b.item.use_count.cmp(&a.item.use_count)
-            }
-        }),
-        // 默认 updated_at（未知排序字段也回退到 updated_at）
-        _ => filtered.sort_by(|a, b| {
-            if ascending {
-                a.item.updated_at.cmp(&b.item.updated_at)
-            } else {
-                b.item.updated_at.cmp(&a.item.updated_at)
-            }
-        }),
-    }
+        Ok(PasswordPage {
+            items,
+            total,
+            page,
+            page_size,
+        })
 
-    // 分页：total = 过滤后总条数；页码钳制到 [1, page_count]（空结果时 page=1）
-    let total = filtered.len() as i64;
-    let page_count = ((total + page_size as i64 - 1) / page_size as i64).max(1) as u32;
-    let page = page.min(page_count);
-    let offset = ((page - 1) as usize) * (page_size as usize);
-    let items: Vec<PasswordItem> = filtered
-        .into_iter()
-        .skip(offset)
-        .take(page_size as usize)
-        .map(|row| row.item)
-        .collect();
-
-    Ok(PasswordPage {
-        items,
-        total,
-        page,
-        page_size,
-    })
-}
+    })}
 
 /// 存量数据强度一次性回填
 ///
@@ -1025,81 +1028,83 @@ fn backfill_strength(conn: &rusqlite::Connection, aes_key: &[u8; 32]) {
 pub async fn get_password_detail(
     id: String,
     state: State<'_, AppState>,
-) -> Result<PasswordItem, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
-
-    // 获取 AES 密钥
-    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
-
-    let db = state.get_db()?;
-    let conn = db.conn();
-
-    // 查询数据库（列表接口不可见的备注/敏感字段密文在此按需解密）
-    let result = conn.query_row(
-        "SELECT id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count
-         FROM passwords
-         WHERE id = ?1 AND deleted_at IS NULL",
-        params![id],
-        |row| {
-            let id: String = row.get(0)?;
-            let title: String = row.get(1)?;
-            let username: String = row.get(2)?;
-            let url: Option<String> = row.get(3)?;
-            let notes_encrypted: Option<String> = row.get(4)?;
-            let extra_fields_plain: Option<String> = row.get(5)?;
-            let extra_fields_encrypted: Option<String> = row.get(6)?;
-            let category_id: String = row.get(7)?;
-            let is_favorite: i32 = row.get(8)?;
-            let strength: Option<i32> = row.get(9)?;
-            let created_at: i64 = row.get(10)?;
-            let updated_at: i64 = row.get(11)?;
-            let last_used_at: Option<i64> = row.get(12)?;
-            let use_count: i64 = row.get(13)?;
-
-            Ok((id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count))
-        },
-    );
-
-    match result {
-        Ok((id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count)) => {
-            // 备注解密失败必须报错：静默返回 None 会让更新流程把原备注覆盖清空
-            let notes = match notes_encrypted {
-                Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
-                None => None,
-            };
-            // 敏感字段值按需解密；解密失败同样必须报错，绝不静默空值
-            let extra_fields = merge_extra_fields(
-                extra_fields_plain.as_deref(),
-                extra_fields_encrypted.as_deref(),
-                Some(&aes_key),
-            )?;
-            let tags = fetch_tags(&conn, &id)?;
-            Ok(PasswordItem {
-                id,
-                title,
-                username,
-                password: String::new(), // 不返回明文
-                url,
-                has_notes: notes.is_some(),
-                notes,
-                extra_fields,
-                category: category_id,
-                is_favorite: is_favorite != 0,
-                password_strength: strength,
-                created_at,
-                updated_at,
-                tags,
-                last_used_at,
-                use_count,
-            })
+) -> ApiResult<PasswordItem> {
+    respond(|| -> Result<PasswordItem, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err("未找到密码".to_string()),
-        Err(e) => Err(e.to_string()),
-    }
-}
+
+        // 获取 AES 密钥
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+
+        let db = state.get_db()?;
+        let conn = db.conn();
+
+        // 查询数据库（列表接口不可见的备注/敏感字段密文在此按需解密）
+        let result = conn.query_row(
+            "SELECT id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count
+             FROM passwords
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id],
+            |row| {
+                let id: String = row.get(0)?;
+                let title: String = row.get(1)?;
+                let username: String = row.get(2)?;
+                let url: Option<String> = row.get(3)?;
+                let notes_encrypted: Option<String> = row.get(4)?;
+                let extra_fields_plain: Option<String> = row.get(5)?;
+                let extra_fields_encrypted: Option<String> = row.get(6)?;
+                let category_id: String = row.get(7)?;
+                let is_favorite: i32 = row.get(8)?;
+                let strength: Option<i32> = row.get(9)?;
+                let created_at: i64 = row.get(10)?;
+                let updated_at: i64 = row.get(11)?;
+                let last_used_at: Option<i64> = row.get(12)?;
+                let use_count: i64 = row.get(13)?;
+
+                Ok((id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count))
+            },
+        );
+
+        match result {
+            Ok((id, title, username, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at, last_used_at, use_count)) => {
+                // 备注解密失败必须报错：静默返回 None 会让更新流程把原备注覆盖清空
+                let notes = match notes_encrypted {
+                    Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
+                    None => None,
+                };
+                // 敏感字段值按需解密；解密失败同样必须报错，绝不静默空值
+                let extra_fields = merge_extra_fields(
+                    extra_fields_plain.as_deref(),
+                    extra_fields_encrypted.as_deref(),
+                    Some(&aes_key),
+                )?;
+                let tags = fetch_tags(&conn, &id)?;
+                Ok(PasswordItem {
+                    id,
+                    title,
+                    username,
+                    password: String::new(), // 不返回明文
+                    url,
+                    has_notes: notes.is_some(),
+                    notes,
+                    extra_fields,
+                    category: category_id,
+                    is_favorite: is_favorite != 0,
+                    password_strength: strength,
+                    created_at,
+                    updated_at,
+                    tags,
+                    last_used_at,
+                    use_count,
+                })
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err("未找到密码".to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+
+    })}
 
 /// 添加密码
 ///
@@ -1133,92 +1138,94 @@ pub async fn get_password_detail(
 pub async fn add_password(
     data: NewPassword,
     state: State<'_, AppState>,
-) -> Result<PasswordItem, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+) -> ApiResult<PasswordItem> {
+    respond(|| -> Result<PasswordItem, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    // 获取 AES 密钥
-    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+        // 获取 AES 密钥
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    // 生成唯一 ID
-    let id = uuid::Uuid::new_v4().to_string();
+        // 生成唯一 ID
+        let id = uuid::Uuid::new_v4().to_string();
 
-    // 获取当前时间戳
-    let now = chrono::Utc::now().timestamp_millis();
+        // 获取当前时间戳
+        let now = chrono::Utc::now().timestamp_millis();
 
-    // 加密密码
-    let encrypted_password = encrypt_password(&aes_key, &data.password)?;
+        // 加密密码
+        let encrypted_password = encrypt_password(&aes_key, &data.password)?;
 
-    // 密码强度写入时计算并落库（列表读列即可，不再全量解密）
-    let strength = crate::crypto::password_strength_level(&data.password);
+        // 密码强度写入时计算并落库（列表读列即可，不再全量解密）
+        let strength = crate::crypto::password_strength_level(&data.password);
 
-    // 加密备注（若有）
-    let encrypted_notes = match &data.notes {
-        Some(n) if !n.is_empty() => Some(encrypt_password(&aes_key, n)?),
-        _ => None,
-    };
+        // 加密备注（若有）
+        let encrypted_notes = match &data.notes {
+            Some(n) if !n.is_empty() => Some(encrypt_password(&aes_key, n)?),
+            _ => None,
+        };
 
-    // 拆分自定义字段（明文列 + 敏感值密文列）
-    let (extra_fields_plain, extra_fields_encrypted) =
-        split_extra_fields(&aes_key, data.extra_fields.as_deref().unwrap_or_default())?;
+        // 拆分自定义字段（明文列 + 敏感值密文列）
+        let (extra_fields_plain, extra_fields_encrypted) =
+            split_extra_fields(&aes_key, data.extra_fields.as_deref().unwrap_or_default())?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 是否显示密码强度（仅控制返回值）
-    let show_strength = is_show_strength_enabled(&conn);
+        // 是否显示密码强度（仅控制返回值）
+        let show_strength = is_show_strength_enabled(&conn);
 
-    // 标签按后端规则规范化（缺省视为空）
-    let tags = normalize_tags(data.tags.as_deref().unwrap_or_default());
+        // 标签按后端规则规范化（缺省视为空）
+        let tags = normalize_tags(data.tags.as_deref().unwrap_or_default());
 
-    // 密码与标签同事务写入，保证原子性
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    tx.execute(
-        "INSERT INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-        params![
+        // 密码与标签同事务写入，保证原子性
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                id,
+                data.title,
+                data.username,
+                encrypted_password,
+                data.url,
+                encrypted_notes,
+                extra_fields_plain,
+                extra_fields_encrypted,
+                data.category,
+                data.is_favorite as i32,
+                strength,
+                now,
+                now,
+            ],
+        ).map_err(|e| e.to_string())?;
+        replace_tags(&tx, &id, &tags)?;
+        tx.commit().map_err(|e| e.to_string())?;
+
+        // 返回新添加的密码项（不返回明文密码、不回显备注明文、敏感字段值留空）
+        let extra_fields =
+            merge_extra_fields(extra_fields_plain.as_deref(), None, None).unwrap_or_default();
+        Ok(PasswordItem {
             id,
-            data.title,
-            data.username,
-            encrypted_password,
-            data.url,
-            encrypted_notes,
-            extra_fields_plain,
-            extra_fields_encrypted,
-            data.category,
-            data.is_favorite as i32,
-            strength,
-            now,
-            now,
-        ],
-    ).map_err(|e| e.to_string())?;
-    replace_tags(&tx, &id, &tags)?;
-    tx.commit().map_err(|e| e.to_string())?;
+            title: data.title,
+            username: data.username,
+            password: String::new(),
+            url: data.url,
+            notes: None,
+            has_notes: encrypted_notes.is_some(),
+            extra_fields,
+            category: data.category,
+            is_favorite: data.is_favorite,
+            password_strength: if show_strength { Some(strength) } else { None },
+            created_at: now,
+            updated_at: now,
+            tags,
+            last_used_at: None,
+            use_count: 0,
+        })
 
-    // 返回新添加的密码项（不返回明文密码、不回显备注明文、敏感字段值留空）
-    let extra_fields =
-        merge_extra_fields(extra_fields_plain.as_deref(), None, None).unwrap_or_default();
-    Ok(PasswordItem {
-        id,
-        title: data.title,
-        username: data.username,
-        password: String::new(),
-        url: data.url,
-        notes: None,
-        has_notes: encrypted_notes.is_some(),
-        extra_fields,
-        category: data.category,
-        is_favorite: data.is_favorite,
-        password_strength: if show_strength { Some(strength) } else { None },
-        created_at: now,
-        updated_at: now,
-        tags,
-        last_used_at: None,
-        use_count: 0,
-    })
-}
+    })}
 
 /// 更新密码
 ///
@@ -1250,194 +1257,196 @@ pub async fn update_password(
     id: String,
     data: UpdatePassword,
     state: State<'_, AppState>,
-) -> Result<PasswordItem, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+) -> ApiResult<PasswordItem> {
+    respond(|| -> Result<PasswordItem, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    // 获取 AES 密钥
-    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+        // 获取 AES 密钥
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    let now = chrono::Utc::now().timestamp_millis();
+        let now = chrono::Utc::now().timestamp_millis();
 
-    // 读取当前原始行：备注/敏感字段密文不改动则完全不解密、不重写，
-    // 从根上消除「解密失败 → 静默清空」的问题
-    let db = state.get_db()?;
-    let conn = db.conn();
+        // 读取当前原始行：备注/敏感字段密文不改动则完全不解密、不重写，
+        // 从根上消除「解密失败 → 静默清空」的问题
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    let (
-        cur_title,
-        cur_username,
-        cur_password_enc,
-        cur_url,
-        cur_notes_enc,
-        cur_extra_plain,
-        cur_extra_enc,
-        cur_category,
-        cur_is_favorite,
-        cur_strength,
-        created_at,
-        last_used_at,
-        use_count,
-    ): (
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-        i32,
-        Option<i32>,
-        i64,
-        Option<i64>,
-        i64,
-    ) = conn
-        .query_row(
-            "SELECT title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, last_used_at, use_count
-             FROM passwords
-             WHERE id = ?1 AND deleted_at IS NULL",
-            params![id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                    row.get(7)?,
-                    row.get(8)?,
-                    row.get(9)?,
-                    row.get(10)?,
-                    row.get(11)?,
-                    row.get(12)?,
-                ))
-            },
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => "未找到密码".to_string(),
-            _ => e.to_string(),
-        })?;
+        let (
+            cur_title,
+            cur_username,
+            cur_password_enc,
+            cur_url,
+            cur_notes_enc,
+            cur_extra_plain,
+            cur_extra_enc,
+            cur_category,
+            cur_is_favorite,
+            cur_strength,
+            created_at,
+            last_used_at,
+            use_count,
+        ): (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            i32,
+            Option<i32>,
+            i64,
+            Option<i64>,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, strength, created_at, last_used_at, use_count
+                 FROM passwords
+                 WHERE id = ?1 AND deleted_at IS NULL",
+                params![id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                    ))
+                },
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => "未找到密码".to_string(),
+                _ => e.to_string(),
+            })?;
 
-    // 标量字段：None = 不修改
-    let title = data.title.unwrap_or(cur_title);
-    let username = data.username.unwrap_or(cur_username);
-    let category = data.category.unwrap_or(cur_category);
-    let is_favorite = data.is_favorite.unwrap_or(cur_is_favorite != 0);
+        // 标量字段：None = 不修改
+        let title = data.title.unwrap_or(cur_title);
+        let username = data.username.unwrap_or(cur_username);
+        let category = data.category.unwrap_or(cur_category);
+        let is_favorite = data.is_favorite.unwrap_or(cur_is_favorite != 0);
 
-    // URL 三层语义：缺失=不修改、null/空串=清空、字符串=赋值
-    let url = match data.url {
-        None => cur_url,
-        Some(None) => None,
-        Some(Some(v)) => {
-            let v = v.trim().to_string();
-            if v.is_empty() {
-                None
-            } else {
-                Some(v)
+        // URL 三层语义：缺失=不修改、null/空串=清空、字符串=赋值
+        let url = match data.url {
+            None => cur_url,
+            Some(None) => None,
+            Some(Some(v)) => {
+                let v = v.trim().to_string();
+                if v.is_empty() {
+                    None
+                } else {
+                    Some(v)
+                }
             }
+        };
+
+        // 备注三层语义：缺失=保持原密文不动、null/空串=清空、字符串=重新加密
+        let encrypted_notes = match &data.notes {
+            None => cur_notes_enc,
+            Some(None) => None,
+            Some(Some(n)) if n.trim().is_empty() => None,
+            Some(Some(n)) => Some(encrypt_password(&aes_key, n)?),
+        };
+        let has_notes = encrypted_notes.is_some();
+
+        // 自定义字段三层语义：缺失=不修改、null/空数组=清空、数组=整体替换
+        let (extra_fields_plain, extra_fields_encrypted) = match &data.extra_fields {
+            None => (cur_extra_plain, cur_extra_enc),
+            Some(None) => (None, None),
+            Some(Some(fields)) => split_extra_fields(&aes_key, fields)?,
+        };
+
+        // 标签三层语义：缺失=不修改、null/空数组=清空、数组=整体替换（按后端规则规范化）
+        let tags_change = match &data.tags {
+            None => None,
+            Some(None) => Some(Vec::new()),
+            Some(Some(list)) => Some(normalize_tags(list)),
+        };
+
+        // 密码：为空/缺失保留原密文与原强度，否则重新加密并重算强度
+        let (encrypted_password, strength) = match &data.password {
+            Some(p) if !p.is_empty() => (
+                encrypt_password(&aes_key, p)?,
+                crate::crypto::password_strength_level(p),
+            ),
+            _ => {
+                let level = match cur_strength {
+                    Some(l) => l,
+                    // 旧数据无强度值：解密补算一次（单条，可接受）
+                    None => decrypt_password(&aes_key, &cur_password_enc)
+                        .map(|p| crate::crypto::password_strength_level(&p))
+                        .unwrap_or(0),
+                };
+                (cur_password_enc, level)
+            }
+        };
+
+        // 是否显示密码强度（仅控制返回值）
+        let show_strength = is_show_strength_enabled(&conn);
+
+        // 密码与标签同事务写入（标签未变更时不触碰 password_tags），保证原子性
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE passwords
+             SET title = ?1, username = ?2, password_encrypted = ?3, url = ?4, notes_encrypted = ?5,
+                 extra_fields_plain = ?6, extra_fields_encrypted = ?7,
+                 category_id = ?8, is_favorite = ?9, strength = ?10, updated_at = ?11
+             WHERE id = ?12",
+            params![
+                title,
+                username,
+                encrypted_password,
+                url,
+                encrypted_notes,
+                extra_fields_plain,
+                extra_fields_encrypted,
+                category,
+                is_favorite as i32,
+                strength,
+                now,
+                id,
+            ],
+        ).map_err(|e| e.to_string())?;
+        if let Some(new_tags) = &tags_change {
+            replace_tags(&tx, &id, new_tags)?;
         }
-    };
+        let tags = fetch_tags(&tx, &id)?;
+        tx.commit().map_err(|e| e.to_string())?;
 
-    // 备注三层语义：缺失=保持原密文不动、null/空串=清空、字符串=重新加密
-    let encrypted_notes = match &data.notes {
-        None => cur_notes_enc,
-        Some(None) => None,
-        Some(Some(n)) if n.trim().is_empty() => None,
-        Some(Some(n)) => Some(encrypt_password(&aes_key, n)?),
-    };
-    let has_notes = encrypted_notes.is_some();
-
-    // 自定义字段三层语义：缺失=不修改、null/空数组=清空、数组=整体替换
-    let (extra_fields_plain, extra_fields_encrypted) = match &data.extra_fields {
-        None => (cur_extra_plain, cur_extra_enc),
-        Some(None) => (None, None),
-        Some(Some(fields)) => split_extra_fields(&aes_key, fields)?,
-    };
-
-    // 标签三层语义：缺失=不修改、null/空数组=清空、数组=整体替换（按后端规则规范化）
-    let tags_change = match &data.tags {
-        None => None,
-        Some(None) => Some(Vec::new()),
-        Some(Some(list)) => Some(normalize_tags(list)),
-    };
-
-    // 密码：为空/缺失保留原密文与原强度，否则重新加密并重算强度
-    let (encrypted_password, strength) = match &data.password {
-        Some(p) if !p.is_empty() => (
-            encrypt_password(&aes_key, p)?,
-            crate::crypto::password_strength_level(p),
-        ),
-        _ => {
-            let level = match cur_strength {
-                Some(l) => l,
-                // 旧数据无强度值：解密补算一次（单条，可接受）
-                None => decrypt_password(&aes_key, &cur_password_enc)
-                    .map(|p| crate::crypto::password_strength_level(&p))
-                    .unwrap_or(0),
-            };
-            (cur_password_enc, level)
-        }
-    };
-
-    // 是否显示密码强度（仅控制返回值）
-    let show_strength = is_show_strength_enabled(&conn);
-
-    // 密码与标签同事务写入（标签未变更时不触碰 password_tags），保证原子性
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    tx.execute(
-        "UPDATE passwords
-         SET title = ?1, username = ?2, password_encrypted = ?3, url = ?4, notes_encrypted = ?5,
-             extra_fields_plain = ?6, extra_fields_encrypted = ?7,
-             category_id = ?8, is_favorite = ?9, strength = ?10, updated_at = ?11
-         WHERE id = ?12",
-        params![
+        // 返回更新后的密码项（不返回明文密码、不回显备注明文、敏感字段值留空）
+        let extra_fields =
+            merge_extra_fields(extra_fields_plain.as_deref(), None, None).unwrap_or_default();
+        Ok(PasswordItem {
+            id,
             title,
             username,
-            encrypted_password,
+            password: String::new(),
             url,
-            encrypted_notes,
-            extra_fields_plain,
-            extra_fields_encrypted,
+            notes: None,
+            has_notes,
+            extra_fields,
             category,
-            is_favorite as i32,
-            strength,
-            now,
-            id,
-        ],
-    ).map_err(|e| e.to_string())?;
-    if let Some(new_tags) = &tags_change {
-        replace_tags(&tx, &id, new_tags)?;
-    }
-    let tags = fetch_tags(&tx, &id)?;
-    tx.commit().map_err(|e| e.to_string())?;
+            is_favorite,
+            password_strength: if show_strength { Some(strength) } else { None },
+            created_at,
+            updated_at: now,
+            tags,
+            last_used_at,
+            use_count,
+        })
 
-    // 返回更新后的密码项（不返回明文密码、不回显备注明文、敏感字段值留空）
-    let extra_fields =
-        merge_extra_fields(extra_fields_plain.as_deref(), None, None).unwrap_or_default();
-    Ok(PasswordItem {
-        id,
-        title,
-        username,
-        password: String::new(),
-        url,
-        notes: None,
-        has_notes,
-        extra_fields,
-        category,
-        is_favorite,
-        password_strength: if show_strength { Some(strength) } else { None },
-        created_at,
-        updated_at: now,
-        tags,
-        last_used_at,
-        use_count,
-    })
-}
+    })}
 
 /// 删除密码（软删除）
 ///
@@ -1461,24 +1470,26 @@ pub async fn update_password(
 pub async fn delete_password(
     id: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    let db = state.get_db()?;
-    let conn = db.conn();
-    let now = chrono::Utc::now().timestamp_millis();
+        let db = state.get_db()?;
+        let conn = db.conn();
+        let now = chrono::Utc::now().timestamp_millis();
 
-    // 更新 deleted_at 字段（软删除）
-    conn.execute(
-        "UPDATE passwords SET deleted_at = ?1 WHERE id = ?2",
-        params![now, id],
-    ).map_err(|e| e.to_string())?;
+        // 更新 deleted_at 字段（软删除）
+        conn.execute(
+            "UPDATE passwords SET deleted_at = ?1 WHERE id = ?2",
+            params![now, id],
+        ).map_err(|e| e.to_string())?;
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 切换收藏状态
 ///
@@ -1502,31 +1513,33 @@ pub async fn delete_password(
 pub async fn toggle_favorite(
     id: String,
     state: State<'_, AppState>,
-) -> Result<bool, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+) -> ApiResult<bool> {
+    respond(|| -> Result<bool, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    let db = state.get_db()?;
-    let conn = db.conn();
-    let now = chrono::Utc::now().timestamp_millis();
+        let db = state.get_db()?;
+        let conn = db.conn();
+        let now = chrono::Utc::now().timestamp_millis();
 
-    // 切换 is_favorite 字段
-    conn.execute(
-        "UPDATE passwords SET is_favorite = NOT is_favorite, updated_at = ?1 WHERE id = ?2",
-        params![now, id],
-    ).map_err(|e| e.to_string())?;
+        // 切换 is_favorite 字段
+        conn.execute(
+            "UPDATE passwords SET is_favorite = NOT is_favorite, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        ).map_err(|e| e.to_string())?;
 
-    // 获取更新后的状态
-    let is_favorite: i32 = conn.query_row(
-        "SELECT is_favorite FROM passwords WHERE id = ?1",
-        params![id],
-        |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
+        // 获取更新后的状态
+        let is_favorite: i32 = conn.query_row(
+            "SELECT is_favorite FROM passwords WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
 
-    Ok(is_favorite != 0)
-}
+        Ok(is_favorite != 0)
+
+    })}
 
 /// 标签统计项
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1553,69 +1566,73 @@ pub struct TagInfo {
 pub async fn touch_password_usage(
     id: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    let db = state.get_db()?;
-    let conn = db.conn();
-    let now = chrono::Utc::now().timestamp_millis();
+        let db = state.get_db()?;
+        let conn = db.conn();
+        let now = chrono::Utc::now().timestamp_millis();
 
-    // 只更新时间/次数，不改 updated_at——使用行为不应打乱「按更新时间」排序
-    let affected = conn
-        .execute(
-            "UPDATE passwords SET last_used_at = ?1, use_count = use_count + 1
-             WHERE id = ?2 AND deleted_at IS NULL",
-            params![now, id],
-        )
-        .map_err(|e| e.to_string())?;
-    if affected == 0 {
-        return Err("未找到密码".to_string());
-    }
+        // 只更新时间/次数，不改 updated_at——使用行为不应打乱「按更新时间」排序
+        let affected = conn
+            .execute(
+                "UPDATE passwords SET last_used_at = ?1, use_count = use_count + 1
+                 WHERE id = ?2 AND deleted_at IS NULL",
+                params![now, id],
+            )
+            .map_err(|e| e.to_string())?;
+        if affected == 0 {
+            return Err("未找到密码".to_string());
+        }
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 获取全局标签列表
 ///
 /// 按大小写不敏感分组（COLLATE NOCASE），展示名取组内任一原写法（MIN(tag)），
 /// count 只统计未删除密码；结果按 count DESC、name 排序。
 #[tauri::command]
-pub async fn get_tags(state: State<'_, AppState>) -> Result<Vec<TagInfo>, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+pub async fn get_tags(state: State<'_, AppState>) -> ApiResult<Vec<TagInfo>> {
+    respond(|| -> Result<Vec<TagInfo>, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    let mut stmt = conn
-        .prepare(
-            "SELECT MIN(pt.tag) AS name, COUNT(DISTINCT pt.password_id) AS count
-             FROM password_tags pt
-             JOIN passwords p ON p.id = pt.password_id
-             WHERE p.deleted_at IS NULL
-             GROUP BY pt.tag COLLATE NOCASE
-             ORDER BY count DESC, name",
-        )
-        .map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT MIN(pt.tag) AS name, COUNT(DISTINCT pt.password_id) AS count
+                 FROM password_tags pt
+                 JOIN passwords p ON p.id = pt.password_id
+                 WHERE p.deleted_at IS NULL
+                 GROUP BY pt.tag COLLATE NOCASE
+                 ORDER BY count DESC, name",
+            )
+            .map_err(|e| e.to_string())?;
 
-    let tags = stmt
-        .query_map([], |row| {
-            Ok(TagInfo {
-                name: row.get(0)?,
-                count: row.get(1)?,
+        let tags = stmt
+            .query_map([], |row| {
+                Ok(TagInfo {
+                    name: row.get(0)?,
+                    count: row.get(1)?,
+                })
             })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
 
-    Ok(tags)
-}
+        Ok(tags)
+
+    })}
 
 /// 全局重命名标签
 ///
@@ -1631,98 +1648,102 @@ pub async fn rename_tag(
     old_name: String,
     new_name: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    let old_name = old_name.trim();
-    if old_name.is_empty() {
-        return Err("标签名称不能为空".to_string());
-    }
+        let old_name = old_name.trim();
+        if old_name.is_empty() {
+            return Err("标签名称不能为空".to_string());
+        }
 
-    let new_name = new_name.trim();
-    if new_name.is_empty() {
-        return Err("标签名称不能为空".to_string());
-    }
-    if new_name.chars().count() > MAX_TAG_CHARS {
-        return Err(format!("标签名称不能超过 {MAX_TAG_CHARS} 个字符"));
-    }
+        let new_name = new_name.trim();
+        if new_name.is_empty() {
+            return Err("标签名称不能为空".to_string());
+        }
+        if new_name.chars().count() > MAX_TAG_CHARS {
+            return Err(format!("标签名称不能超过 {MAX_TAG_CHARS} 个字符"));
+        }
 
-    let db = state.get_db()?;
-    let conn = db.conn();
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let db = state.get_db()?;
+        let conn = db.conn();
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
 
-    // 收集原标签所在密码及其最小 sort_order（用于保留排序位置）
-    let rows: Vec<(String, i64)> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT password_id, MIN(sort_order) FROM password_tags
-                 WHERE tag = ?1 COLLATE NOCASE
-                 GROUP BY password_id",
+        // 收集原标签所在密码及其最小 sort_order（用于保留排序位置）
+        let rows: Vec<(String, i64)> = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT password_id, MIN(sort_order) FROM password_tags
+                     WHERE tag = ?1 COLLATE NOCASE
+                     GROUP BY password_id",
+                )
+                .map_err(|e| e.to_string())?;
+            let collected = stmt
+                .query_map(params![old_name], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            collected
+        };
+
+        if rows.is_empty() {
+            return Err("标签不存在".to_string());
+        }
+
+        for (password_id, min_sort_order) in rows {
+            // 先删旧写法（大小写不敏感，含同组脏数据），再插新写法：
+            // 若该密码已存在新标签，INSERT OR IGNORE 保持原行，实现合并去重
+            tx.execute(
+                "DELETE FROM password_tags WHERE password_id = ?1 AND tag = ?2 COLLATE NOCASE",
+                params![password_id, old_name],
             )
             .map_err(|e| e.to_string())?;
-        let collected = stmt
-            .query_map(params![old_name], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
+            tx.execute(
+                "INSERT OR IGNORE INTO password_tags (password_id, tag, sort_order) VALUES (?1, ?2, ?3)",
+                params![password_id, new_name, min_sort_order],
+            )
             .map_err(|e| e.to_string())?;
-        collected
-    };
+        }
 
-    if rows.is_empty() {
-        return Err("标签不存在".to_string());
-    }
+        tx.commit().map_err(|e| e.to_string())?;
+        log::info!("标签重命名完成: {} -> {}", old_name, new_name);
+        Ok(())
 
-    for (password_id, min_sort_order) in rows {
-        // 先删旧写法（大小写不敏感，含同组脏数据），再插新写法：
-        // 若该密码已存在新标签，INSERT OR IGNORE 保持原行，实现合并去重
-        tx.execute(
-            "DELETE FROM password_tags WHERE password_id = ?1 AND tag = ?2 COLLATE NOCASE",
-            params![password_id, old_name],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT OR IGNORE INTO password_tags (password_id, tag, sort_order) VALUES (?1, ?2, ?3)",
-            params![password_id, new_name, min_sort_order],
-        )
-        .map_err(|e| e.to_string())?;
-    }
-
-    tx.commit().map_err(|e| e.to_string())?;
-    log::info!("标签重命名完成: {} -> {}", old_name, new_name);
-    Ok(())
-}
+    })}
 
 /// 删除标签（从所有密码移除该标签）
 ///
 /// 标签只是分类元数据，删除不影响密码本身；软删除密码的标签一并清理。
 #[tauri::command]
-pub async fn delete_tag(name: String, state: State<'_, AppState>) -> Result<(), String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+pub async fn delete_tag(name: String, state: State<'_, AppState>) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("标签名称不能为空".to_string());
-    }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("标签名称不能为空".to_string());
+        }
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    conn.execute(
-        "DELETE FROM password_tags WHERE tag = ?1 COLLATE NOCASE",
-        params![name],
-    )
-    .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM password_tags WHERE tag = ?1 COLLATE NOCASE",
+            params![name],
+        )
+        .map_err(|e| e.to_string())?;
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 获取智能视图统计（全部 / 收藏 / 最近使用）
 ///
@@ -1735,43 +1756,45 @@ pub async fn delete_tag(name: String, state: State<'_, AppState>) -> Result<(), 
 /// // { all: 12, favorite: 3, recent: 5 }
 /// ```
 #[tauri::command]
-pub async fn get_password_stats(state: State<'_, AppState>) -> Result<PasswordStats, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
+pub async fn get_password_stats(state: State<'_, AppState>) -> ApiResult<PasswordStats> {
+    respond(|| -> Result<PasswordStats, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    let all: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM passwords WHERE deleted_at IS NULL",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    let favorite: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM passwords WHERE deleted_at IS NULL AND is_favorite = 1",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    let recent: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM passwords WHERE deleted_at IS NULL AND last_used_at IS NOT NULL",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
+        let all: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM passwords WHERE deleted_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let favorite: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM passwords WHERE deleted_at IS NULL AND is_favorite = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        let recent: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM passwords WHERE deleted_at IS NULL AND last_used_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
 
-    Ok(PasswordStats {
-        all,
-        favorite,
-        recent,
-    })
-}
+        Ok(PasswordStats {
+            all,
+            favorite,
+            recent,
+        })
+
+    })}
 
 /// 解密密码并准备粘贴注入（延迟解密）
 ///
@@ -1801,84 +1824,86 @@ pub async fn copy_password_to_clipboard(
     id: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
-) -> Result<u32, String> {
-    log::info!("[CMD] copy_password_to_clipboard 被调用: id={}", id);
+) -> ApiResult<u32> {
+    respond(|| -> Result<u32, String> {
+        log::info!("[CMD] copy_password_to_clipboard 被调用: id={}", id);
 
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        log::warn!("[CMD] 应用未解锁");
-        return Err("应用未解锁".to_string());
-    }
-
-    let db = state.get_db()?;
-    let conn = db.conn();
-
-    // 验证密码条目存在并获取密文
-    let encrypted: String = conn
-        .query_row(
-            "SELECT password_encrypted FROM passwords WHERE id = ?1 AND deleted_at IS NULL",
-            params![id],
-            |row| row.get(0),
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                log::warn!("[CMD] 未找到密码: id={}", id);
-                "未找到密码".to_string()
-            }
-            _ => e.to_string(),
-        })?;
-
-    // 读取剪贴板清除时间设置（作为 pending TTL）
-    let clear_time: u32 = conn
-        .query_row(
-            "SELECT value FROM settings WHERE key = 'clipboard_clear_time'",
-            [],
-            |row| {
-                let v: String = row.get(0)?;
-                Ok(v.parse().unwrap_or(30))
-            },
-        )
-        .unwrap_or(30);
-
-    log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s", id, clear_time);
-
-    // 创建解密闭包：不捕获密钥副本，调用时从状态现场取密钥。
-    // 锁定后任何迟到的调用都会失败（fail closed），杜绝锁定后仍可解密注入。
-    let encrypted_clone = encrypted.clone();
-    let app_handle = app.clone();
-    let decrypt_fn: crate::pending::DecryptFn = std::sync::Arc::new(move |_entry_id: &str| -> Result<String, String> {
-        use tauri::Manager;
-        let state = app_handle.state::<AppState>();
+        // 检查是否已解锁
         if !state.is_unlocked() {
-            log::warn!("[DECRYPT] 应用已锁定，拒绝解密");
-            return Err("应用已锁定，无法解密".to_string());
+            log::warn!("[CMD] 应用未解锁");
+            return Err("应用未解锁".to_string());
         }
-        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
-        log::info!("[DECRYPT] 调用解密闭包，解密密文");
-        let plaintext = decrypt_password(&aes_key, &encrypted_clone)?;
-        log::info!("[DECRYPT] 解密成功，长度={}", plaintext.len());
-        Ok(plaintext)
-    });
 
-    // 登记待粘贴密码（带解密闭包）
-    let seq = crate::pending::register_with_decrypt(&id, clear_time, decrypt_fn);
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 激活 Ctrl+V 钩子（传入句柄，钩子检测到 Ctrl+C / Esc 时销毁粘贴状态）
-    crate::hotkey::activate(app);
+        // 验证密码条目存在并获取密文
+        let encrypted: String = conn
+            .query_row(
+                "SELECT password_encrypted FROM passwords WHERE id = ?1 AND deleted_at IS NULL",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    log::warn!("[CMD] 未找到密码: id={}", id);
+                    "未找到密码".to_string()
+                }
+                _ => e.to_string(),
+            })?;
 
-    // 成功登记待粘贴后顺带登记使用记录（注入成功/失败不影响登记结果，故失败只记日志）
-    let now = chrono::Utc::now().timestamp_millis();
-    if let Err(e) = conn.execute(
-        "UPDATE passwords SET last_used_at = ?1, use_count = use_count + 1 WHERE id = ?2",
-        params![now, id],
-    ) {
-        log::warn!("[CMD] 登记使用记录失败: id={}, err={}", id, e);
-    }
+        // 读取剪贴板清除时间设置（作为 pending TTL）
+        let clear_time: u32 = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'clipboard_clear_time'",
+                [],
+                |row| {
+                    let v: String = row.get(0)?;
+                    Ok(v.parse().unwrap_or(30))
+                },
+            )
+            .unwrap_or(30);
 
-    log::info!("[CMD] copy_password_to_clipboard 完成: id={}, seq={}, ttl={}s", id, seq, clear_time);
+        log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s", id, clear_time);
 
-    Ok(clear_time)
-}
+        // 创建解密闭包：不捕获密钥副本，调用时从状态现场取密钥。
+        // 锁定后任何迟到的调用都会失败（fail closed），杜绝锁定后仍可解密注入。
+        let encrypted_clone = encrypted.clone();
+        let app_handle = app.clone();
+        let decrypt_fn: crate::pending::DecryptFn = std::sync::Arc::new(move |_entry_id: &str| -> Result<String, String> {
+            use tauri::Manager;
+            let state = app_handle.state::<AppState>();
+            if !state.is_unlocked() {
+                log::warn!("[DECRYPT] 应用已锁定，拒绝解密");
+                return Err("应用已锁定，无法解密".to_string());
+            }
+            let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+            log::info!("[DECRYPT] 调用解密闭包，解密密文");
+            let plaintext = decrypt_password(&aes_key, &encrypted_clone)?;
+            log::info!("[DECRYPT] 解密成功，长度={}", plaintext.len());
+            Ok(plaintext)
+        });
+
+        // 登记待粘贴密码（带解密闭包）
+        let seq = crate::pending::register_with_decrypt(&id, clear_time, decrypt_fn);
+
+        // 激活 Ctrl+V 钩子（传入句柄，钩子检测到 Ctrl+C / Esc 时销毁粘贴状态）
+        crate::hotkey::activate(app);
+
+        // 成功登记待粘贴后顺带登记使用记录（注入成功/失败不影响登记结果，故失败只记日志）
+        let now = chrono::Utc::now().timestamp_millis();
+        if let Err(e) = conn.execute(
+            "UPDATE passwords SET last_used_at = ?1, use_count = use_count + 1 WHERE id = ?2",
+            params![now, id],
+        ) {
+            log::warn!("[CMD] 登记使用记录失败: id={}, err={}", id, e);
+        }
+
+        log::info!("[CMD] copy_password_to_clipboard 完成: id={}, seq={}, ttl={}s", id, seq, clear_time);
+
+        Ok(clear_time)
+
+    })}
 
 #[cfg(test)]
 mod tests {

@@ -7,6 +7,7 @@
 //! 导出/导入包含标签与分类层级；旧导出文件缺字段时按默认值（空标签/顶级分类）处理，
 //! 保持 `moyu-passwd-encrypted-v1` 格式向后兼容。
 
+use crate::response::{respond, ApiResult};
 use std::collections::HashMap;
 
 use rusqlite::params;
@@ -157,134 +158,136 @@ fn decrypt_export(wrapper: &EncryptedExport, export_password: &str) -> Result<St
 pub async fn export_data(
     export_password: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
-    if export_password.is_empty() {
-        return Err("请输入导出密码".to_string());
-    }
-
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
-
-    // 获取 AES 密钥
-    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
-
-    let db = state.get_db()?;
-    let conn = db.conn();
-
-    // 查询所有密码（含加密备注与自定义字段两列）
-    let passwords = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at
-                 FROM passwords WHERE deleted_at IS NULL",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, i32>(9)?,
-                    row.get::<_, i64>(10)?,
-                    row.get::<_, i64>(11)?,
-                ))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        drop(stmt);
-        rows
-    };
-
-    // 预取所有标签（按 sort_order、rowid 保序），避免逐条查询
-    let mut tags_map: HashMap<String, Vec<String>> = HashMap::new();
-    {
-        let mut stmt = conn
-            .prepare("SELECT password_id, tag FROM password_tags ORDER BY password_id, sort_order, rowid")
-            .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let password_id: String = row.get(0).map_err(|e| e.to_string())?;
-            let tag: String = row.get(1).map_err(|e| e.to_string())?;
-            tags_map.entry(password_id).or_default().push(tag);
+) -> ApiResult<String> {
+    respond(|| -> Result<String, String> {
+        if export_password.is_empty() {
+            return Err("请输入导出密码".to_string());
         }
-    }
 
-    // 解密并转换
-    let mut export_passwords = Vec::new();
-    for (id, title, username, password_encrypted, url, notes_encrypted, extra_plain, extra_enc, category_id, is_favorite, created_at, updated_at) in passwords {
-        let password = decrypt_password(&aes_key, &password_encrypted)?;
-        let notes = match notes_encrypted {
-            Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
-            None => None,
-        };
-        // 自定义字段：敏感值随导出一并解密（导出文件整体由导出密码加密保护）
-        let extra_fields = password::merge_extra_fields(
-            extra_plain.as_deref(),
-            extra_enc.as_deref(),
-            Some(&aes_key),
-        )?;
-        // 标签：明文随导出（按录入顺序）
-        let tags = tags_map.remove(&id).unwrap_or_default();
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
 
-        export_passwords.push(ExportPasswordItem {
-            id,
-            title,
-            username,
-            password,
-            url,
-            notes,
-            extra_fields,
-            tags,
-            category: category_id,
-            is_favorite: is_favorite != 0,
-            created_at,
-            updated_at,
-        });
-    }
+        // 获取 AES 密钥
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
-    // 查询所有分类（含分类树父节点）
-    let categories = {
-        let mut stmt = conn
-            .prepare("SELECT id, name, icon, sort_order, parent_id FROM categories ORDER BY sort_order")
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok(ExportCategory {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    icon: row.get(2)?,
-                    sort_order: row.get(3)?,
-                    parent_id: row.get(4)?,
+        let db = state.get_db()?;
+        let conn = db.conn();
+
+        // 查询所有密码（含加密备注与自定义字段两列）
+        let passwords = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at
+                     FROM passwords WHERE deleted_at IS NULL",
+                )
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, i32>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                    ))
                 })
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        drop(stmt);
-        rows
-    };
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            drop(stmt);
+            rows
+        };
 
-    // 构建导出数据
-    let export_data = ExportData {
-        exported_at: chrono::Utc::now().timestamp_millis(),
-        passwords: export_passwords,
-        categories,
-    };
+        // 预取所有标签（按 sort_order、rowid 保序），避免逐条查询
+        let mut tags_map: HashMap<String, Vec<String>> = HashMap::new();
+        {
+            let mut stmt = conn
+                .prepare("SELECT password_id, tag FROM password_tags ORDER BY password_id, sort_order, rowid")
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt.query([]).map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let password_id: String = row.get(0).map_err(|e| e.to_string())?;
+                let tag: String = row.get(1).map_err(|e| e.to_string())?;
+                tags_map.entry(password_id).or_default().push(tag);
+            }
+        }
 
-    let plaintext_json = serde_json::to_string(&export_data).map_err(|e| e.to_string())?;
+        // 解密并转换
+        let mut export_passwords = Vec::new();
+        for (id, title, username, password_encrypted, url, notes_encrypted, extra_plain, extra_enc, category_id, is_favorite, created_at, updated_at) in passwords {
+            let password = decrypt_password(&aes_key, &password_encrypted)?;
+            let notes = match notes_encrypted {
+                Some(enc) => Some(decrypt_password(&aes_key, &enc)?),
+                None => None,
+            };
+            // 自定义字段：敏感值随导出一并解密（导出文件整体由导出密码加密保护）
+            let extra_fields = password::merge_extra_fields(
+                extra_plain.as_deref(),
+                extra_enc.as_deref(),
+                Some(&aes_key),
+            )?;
+            // 标签：明文随导出（按录入顺序）
+            let tags = tags_map.remove(&id).unwrap_or_default();
 
-    encrypt_export(&plaintext_json, &export_password)
-}
+            export_passwords.push(ExportPasswordItem {
+                id,
+                title,
+                username,
+                password,
+                url,
+                notes,
+                extra_fields,
+                tags,
+                category: category_id,
+                is_favorite: is_favorite != 0,
+                created_at,
+                updated_at,
+            });
+        }
+
+        // 查询所有分类（含分类树父节点）
+        let categories = {
+            let mut stmt = conn
+                .prepare("SELECT id, name, icon, sort_order, parent_id FROM categories ORDER BY sort_order")
+                .map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ExportCategory {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        icon: row.get(2)?,
+                        sort_order: row.get(3)?,
+                        parent_id: row.get(4)?,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            drop(stmt);
+            rows
+        };
+
+        // 构建导出数据
+        let export_data = ExportData {
+            exported_at: chrono::Utc::now().timestamp_millis(),
+            passwords: export_passwords,
+            categories,
+        };
+
+        let plaintext_json = serde_json::to_string(&export_data).map_err(|e| e.to_string())?;
+
+        encrypt_export(&plaintext_json, &export_password)
+
+    })}
 
 /// 导入结果统计
 #[derive(Debug, serde::Serialize)]
@@ -318,128 +321,130 @@ pub async fn import_data(
     import_password: String,
     on_conflict: Option<String>,
     state: State<'_, AppState>,
-) -> Result<ImportResult, String> {
-    // 检查是否已解锁
-    if !state.is_unlocked() {
-        return Err("应用未解锁".to_string());
-    }
-
-    // 冲突策略：默认 skip——绝不静默覆盖现有数据
-    let replace_on_conflict = match on_conflict.as_deref() {
-        None | Some("skip") => false,
-        Some("replace") => true,
-        Some(other) => return Err(format!("未知的冲突策略: {other}")),
-    };
-
-    // 获取 AES 密钥
-    let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
-
-    // 识别格式：仅接受加密导出格式，拒绝明文导入
-    let import_data: ImportData = {
-        let value: serde_json::Value =
-            serde_json::from_str(&json).map_err(|e| format!("解析数据失败: {e}"))?;
-        if value.get("format").and_then(|f| f.as_str()) == Some(ENCRYPTED_FORMAT) {
-            if import_password.is_empty() {
-                return Err("该文件已加密，请输入导入密码".to_string());
-            }
-            let wrapper: EncryptedExport = serde_json::from_value(value)
-                .map_err(|e| format!("解析加密数据失败: {e}"))?;
-            let plaintext = decrypt_export(&wrapper, &import_password)?;
-            serde_json::from_str(&plaintext).map_err(|e| format!("解析数据失败: {e}"))?
-        } else {
-            return Err("不支持明文导入，请使用加密导出文件".to_string());
-        }
-    };
-
-    let db = state.get_db()?;
-    let conn = db.conn();
-    // 整包事务：中途任何失败回滚，不留半截导入
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    let now = chrono::Utc::now().timestamp_millis();
-    let mut result = ImportResult {
-        imported: 0,
-        skipped: 0,
-        replaced: 0,
-    };
-
-    // 导入分类（id 已存在则跳过；parent_id 先按导出值写入，全部插入后统一修正悬空引用）
-    for category in &import_data.categories {
-        tx.execute(
-            "INSERT OR IGNORE INTO categories (id, name, icon, sort_order, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![category.id, category.name, category.icon, category.sort_order, now, category.parent_id],
-        ).map_err(|e| e.to_string())?;
-    }
-
-    // 分类全部插入后，把指向不存在分类的 parent_id 置为 NULL（旧导出文件无该字段时天然为 NULL）
-    tx.execute(
-        "UPDATE categories SET parent_id = NULL
-         WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM categories)",
-        [],
-    ).map_err(|e| e.to_string())?;
-
-    // 导入密码（按 id 判重，冲突策略决定跳过或覆盖）
-    for password in &import_data.passwords {
-        let exists: bool = tx
-            .query_row(
-                "SELECT 1 FROM passwords WHERE id = ?1",
-                params![password.id],
-                |_| Ok(true),
-            )
-            .unwrap_or(false);
-        if exists && !replace_on_conflict {
-            result.skipped += 1;
-            continue;
+) -> ApiResult<ImportResult> {
+    respond(|| -> Result<ImportResult, String> {
+        // 检查是否已解锁
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
         }
 
-        // 加密密码
-        let encrypted_password = encrypt_password(&aes_key, &password.password)?;
-
-        // 加密备注（若有）
-        let encrypted_notes = match &password.notes {
-            Some(n) if !n.is_empty() => Some(encrypt_password(&aes_key, n)?),
-            _ => None,
+        // 冲突策略：默认 skip——绝不静默覆盖现有数据
+        let replace_on_conflict = match on_conflict.as_deref() {
+            None | Some("skip") => false,
+            Some("replace") => true,
+            Some(other) => return Err(format!("未知的冲突策略: {other}")),
         };
 
-        // 自定义字段：拆分明文列 + 敏感值密文列（旧导出文件无该字段时视为空）
-        let (extra_fields_plain, extra_fields_encrypted) =
-            password::split_extra_fields(&aes_key, &password.extra_fields)?;
+        // 获取 AES 密钥
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 
+        // 识别格式：仅接受加密导出格式，拒绝明文导入
+        let import_data: ImportData = {
+            let value: serde_json::Value =
+                serde_json::from_str(&json).map_err(|e| format!("解析数据失败: {e}"))?;
+            if value.get("format").and_then(|f| f.as_str()) == Some(ENCRYPTED_FORMAT) {
+                if import_password.is_empty() {
+                    return Err("该文件已加密，请输入导入密码".to_string());
+                }
+                let wrapper: EncryptedExport = serde_json::from_value(value)
+                    .map_err(|e| format!("解析加密数据失败: {e}"))?;
+                let plaintext = decrypt_export(&wrapper, &import_password)?;
+                serde_json::from_str(&plaintext).map_err(|e| format!("解析数据失败: {e}"))?
+            } else {
+                return Err("不支持明文导入，请使用加密导出文件".to_string());
+            }
+        };
+
+        let db = state.get_db()?;
+        let conn = db.conn();
+        // 整包事务：中途任何失败回滚，不留半截导入
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut result = ImportResult {
+            imported: 0,
+            skipped: 0,
+            replaced: 0,
+        };
+
+        // 导入分类（id 已存在则跳过；parent_id 先按导出值写入，全部插入后统一修正悬空引用）
+        for category in &import_data.categories {
+            tx.execute(
+                "INSERT OR IGNORE INTO categories (id, name, icon, sort_order, created_at, parent_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![category.id, category.name, category.icon, category.sort_order, now, category.parent_id],
+            ).map_err(|e| e.to_string())?;
+        }
+
+        // 分类全部插入后，把指向不存在分类的 parent_id 置为 NULL（旧导出文件无该字段时天然为 NULL）
         tx.execute(
-            "INSERT OR REPLACE INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                password.id,
-                password.title,
-                password.username,
-                encrypted_password,
-                password.url,
-                encrypted_notes,
-                extra_fields_plain,
-                extra_fields_encrypted,
-                password.category,
-                password.is_favorite as i32,
-                password.created_at,
-                password.updated_at,
-            ],
+            "UPDATE categories SET parent_id = NULL
+             WHERE parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM categories)",
+            [],
         ).map_err(|e| e.to_string())?;
 
-        // 标签：按后端规则规范化后整体重建（replace 冲突时先删旧标签再插新，旧文件无标签则清空）
-        let tags = password::normalize_tags(&password.tags);
-        password::replace_tags(&tx, &password.id, &tags)?;
+        // 导入密码（按 id 判重，冲突策略决定跳过或覆盖）
+        for password in &import_data.passwords {
+            let exists: bool = tx
+                .query_row(
+                    "SELECT 1 FROM passwords WHERE id = ?1",
+                    params![password.id],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if exists && !replace_on_conflict {
+                result.skipped += 1;
+                continue;
+            }
 
-        if exists {
-            result.replaced += 1;
-        } else {
-            result.imported += 1;
+            // 加密密码
+            let encrypted_password = encrypt_password(&aes_key, &password.password)?;
+
+            // 加密备注（若有）
+            let encrypted_notes = match &password.notes {
+                Some(n) if !n.is_empty() => Some(encrypt_password(&aes_key, n)?),
+                _ => None,
+            };
+
+            // 自定义字段：拆分明文列 + 敏感值密文列（旧导出文件无该字段时视为空）
+            let (extra_fields_plain, extra_fields_encrypted) =
+                password::split_extra_fields(&aes_key, &password.extra_fields)?;
+
+            tx.execute(
+                "INSERT OR REPLACE INTO passwords (id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    password.id,
+                    password.title,
+                    password.username,
+                    encrypted_password,
+                    password.url,
+                    encrypted_notes,
+                    extra_fields_plain,
+                    extra_fields_encrypted,
+                    password.category,
+                    password.is_favorite as i32,
+                    password.created_at,
+                    password.updated_at,
+                ],
+            ).map_err(|e| e.to_string())?;
+
+            // 标签：按后端规则规范化后整体重建（replace 冲突时先删旧标签再插新，旧文件无标签则清空）
+            let tags = password::normalize_tags(&password.tags);
+            password::replace_tags(&tx, &password.id, &tags)?;
+
+            if exists {
+                result.replaced += 1;
+            } else {
+                result.imported += 1;
+            }
         }
-    }
 
-    tx.commit().map_err(|e| e.to_string())?;
-    log::info!(
-        "导入完成: 新增 {}, 跳过 {}, 覆盖 {}",
-        result.imported,
-        result.skipped,
-        result.replaced
-    );
-    Ok(result)
-}
+        tx.commit().map_err(|e| e.to_string())?;
+        log::info!(
+            "导入完成: 新增 {}, 跳过 {}, 覆盖 {}",
+            result.imported,
+            result.skipped,
+            result.replaced
+        );
+        Ok(result)
+
+    })}

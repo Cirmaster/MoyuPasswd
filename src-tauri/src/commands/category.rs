@@ -10,6 +10,7 @@
 //! - `delete_category`: 删除分类（子分类上移一级，密码移到「其他」）
 //! - `reorder_categories`: 批量调整分类排序（拖拽排序）
 
+use crate::response::{respond, ApiResult};
 use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
@@ -189,60 +190,62 @@ fn sum_subtree_password_count(
 /// const categories = await invoke('get_categories');
 /// ```
 #[tauri::command]
-pub async fn get_categories(state: State<'_, AppState>) -> Result<Vec<Category>, String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+pub async fn get_categories(state: State<'_, AppState>) -> ApiResult<Vec<Category>> {
+    respond(|| -> Result<Vec<Category>, String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 查询分类列表（password_count 只统计直接归属且未删除的密码；total_count 由下方 Rust 汇总）
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.id, c.name, c.icon, c.sort_order, c.created_at, c.parent_id,
-                    (SELECT COUNT(*) FROM passwords p WHERE p.category_id = c.id AND p.deleted_at IS NULL) AS password_count
-             FROM categories c
-             ORDER BY c.sort_order",
-        )
-        .map_err(|e| e.to_string())?;
+        // 查询分类列表（password_count 只统计直接归属且未删除的密码；total_count 由下方 Rust 汇总）
+        let mut stmt = conn
+            .prepare(
+                "SELECT c.id, c.name, c.icon, c.sort_order, c.created_at, c.parent_id,
+                        (SELECT COUNT(*) FROM passwords p WHERE p.category_id = c.id AND p.deleted_at IS NULL) AS password_count
+                 FROM categories c
+                 ORDER BY c.sort_order",
+            )
+            .map_err(|e| e.to_string())?;
 
-    let mut categories = stmt
-        .query_map([], |row| {
-            Ok(Category {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                icon: row.get(2)?,
-                sort_order: row.get(3)?,
-                created_at: row.get(4)?,
-                parent_id: row.get(5)?,
-                password_count: row.get(6)?,
-                total_count: 0, // 占位，随后按子树汇总
+        let mut categories = stmt
+            .query_map([], |row| {
+                Ok(Category {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    icon: row.get(2)?,
+                    sort_order: row.get(3)?,
+                    created_at: row.get(4)?,
+                    parent_id: row.get(5)?,
+                    password_count: row.get(6)?,
+                    total_count: 0, // 占位，随后按子树汇总
+                })
             })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
 
-    // 汇总 total_count：自身 + 全部后代的直接密码数（visited 防历史脏数据成环）
-    let mut children: CategoryChildren = HashMap::new();
-    for category in &categories {
-        if let Some(parent) = &category.parent_id {
-            children
-                .entry(parent.clone())
-                .or_default()
-                .push(category.id.clone());
+        // 汇总 total_count：自身 + 全部后代的直接密码数（visited 防历史脏数据成环）
+        let mut children: CategoryChildren = HashMap::new();
+        for category in &categories {
+            if let Some(parent) = &category.parent_id {
+                children
+                    .entry(parent.clone())
+                    .or_default()
+                    .push(category.id.clone());
+            }
         }
-    }
-    let direct_counts: HashMap<String, i64> = categories
-        .iter()
-        .map(|category| (category.id.clone(), category.password_count))
-        .collect();
-    for category in &mut categories {
-        category.total_count = sum_subtree_password_count(&children, &direct_counts, &category.id);
-    }
+        let direct_counts: HashMap<String, i64> = categories
+            .iter()
+            .map(|category| (category.id.clone(), category.password_count))
+            .collect();
+        for category in &mut categories {
+            category.total_count = sum_subtree_password_count(&children, &direct_counts, &category.id);
+        }
 
-    Ok(categories)
-}
+        Ok(categories)
+
+    })}
 
 /// 添加分类
 ///
@@ -268,62 +271,64 @@ pub async fn add_category(
     name: String,
     parent_id: Option<String>,
     state: State<'_, AppState>,
-) -> Result<Category, String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<Category> {
+    respond(|| -> Result<Category, String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 名称去空白，为空则报错（与 update_category 校验一致）
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return Err("分类名称不能为空".to_string());
-    }
-    let name = trimmed.to_string();
+        // 名称去空白，为空则报错（与 update_category 校验一致）
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err("分类名称不能为空".to_string());
+        }
+        let name = trimmed.to_string();
 
-    // 同名校验（大小写不敏感）
-    let dup: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1)",
-            params![name],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    if dup > 0 {
-        return Err("已存在同名分类".to_string());
-    }
+        // 同名校验（大小写不敏感）
+        let dup: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1)",
+                params![name],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if dup > 0 {
+            return Err("已存在同名分类".to_string());
+        }
 
-    // 父分类：trim 空串视为顶级；指定时父分类必须存在
-    let parent_id = normalize_parent_id(parent_id);
-    if let Some(parent) = &parent_id {
-        ensure_parent_exists(&conn, parent)?;
-    }
+        // 父分类：trim 空串视为顶级；指定时父分类必须存在
+        let parent_id = normalize_parent_id(parent_id);
+        if let Some(parent) = &parent_id {
+            ensure_parent_exists(&conn, parent)?;
+        }
 
-    // 生成唯一 ID
-    let id = uuid::Uuid::new_v4().to_string();
+        // 生成唯一 ID
+        let id = uuid::Uuid::new_v4().to_string();
 
-    // 获取当前时间戳（毫秒）
-    let now = chrono::Utc::now().timestamp_millis();
+        // 获取当前时间戳（毫秒）
+        let now = chrono::Utc::now().timestamp_millis();
 
-    // 插入数据库
-    conn.execute(
-        "INSERT INTO categories (id, name, sort_order, created_at, parent_id) VALUES (?1, ?2, 0, ?3, ?4)",
-        params![id, name, now, parent_id],
-    ).map_err(|e| e.to_string())?;
+        // 插入数据库
+        conn.execute(
+            "INSERT INTO categories (id, name, sort_order, created_at, parent_id) VALUES (?1, ?2, 0, ?3, ?4)",
+            params![id, name, now, parent_id],
+        ).map_err(|e| e.to_string())?;
 
-    // 返回新添加的分类（新分类没有直接归属的密码，子树总数也为 0）
-    Ok(Category {
-        id,
-        name,
-        icon: None,
-        sort_order: 0,
-        created_at: now,
-        parent_id,
-        password_count: 0,
-        total_count: 0,
-    })
-}
+        // 返回新添加的分类（新分类没有直接归属的密码，子树总数也为 0）
+        Ok(Category {
+            id,
+            name,
+            icon: None,
+            sort_order: 0,
+            created_at: now,
+            parent_id,
+            password_count: 0,
+            total_count: 0,
+        })
+
+    })}
 
 /// 更新分类
 ///
@@ -370,107 +375,109 @@ pub async fn update_category(
     parent_id: Option<String>,
     clear_parent: Option<bool>,
     state: State<'_, AppState>,
-) -> Result<Category, String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<Category> {
+    respond(|| -> Result<Category, String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 获取当前分类
-    let current = conn.query_row(
-        "SELECT id, name, icon, sort_order, created_at, parent_id FROM categories WHERE id = ?1",
-        params![id],
-        |row| {
-            let id: String = row.get(0)?;
-            let name: String = row.get(1)?;
-            let icon: Option<String> = row.get(2)?;
-            let sort_order: i32 = row.get(3)?;
-            let created_at: i64 = row.get(4)?;
-            let parent_id: Option<String> = row.get(5)?;
-            Ok((id, name, icon, sort_order, created_at, parent_id))
-        },
-    );
+        // 获取当前分类
+        let current = conn.query_row(
+            "SELECT id, name, icon, sort_order, created_at, parent_id FROM categories WHERE id = ?1",
+            params![id],
+            |row| {
+                let id: String = row.get(0)?;
+                let name: String = row.get(1)?;
+                let icon: Option<String> = row.get(2)?;
+                let sort_order: i32 = row.get(3)?;
+                let created_at: i64 = row.get(4)?;
+                let parent_id: Option<String> = row.get(5)?;
+                Ok((id, name, icon, sort_order, created_at, parent_id))
+            },
+        );
 
-    match current {
-        Ok((current_id, current_name, current_icon, sort_order, created_at, current_parent_id)) => {
-            // 使用新值或当前值
-            let new_icon = icon.or(current_icon);
-            let new_name = name.unwrap_or(current_name);
+        match current {
+            Ok((current_id, current_name, current_icon, sort_order, created_at, current_parent_id)) => {
+                // 使用新值或当前值
+                let new_icon = icon.or(current_icon);
+                let new_name = name.unwrap_or(current_name);
 
-            // 名称去空白，为空则报错
-            let trimmed = new_name.trim();
-            if trimmed.is_empty() {
-                return Err("分类名称不能为空".to_string());
-            }
-            let new_name = trimmed.to_string();
-
-            // 同名校验（大小写不敏感，排除自身）
-            let dup: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1) AND id != ?2",
-                    params![new_name, current_id],
-                    |row| row.get(0),
-                )
-                .map_err(|e| e.to_string())?;
-            if dup > 0 {
-                return Err("已存在同名分类".to_string());
-            }
-
-            // 父分类：clearParent=true 置顶级；parentId 非空=设置；否则不修改
-            let new_parent_id = if clear_parent.unwrap_or(false) {
-                None
-            } else {
-                match normalize_parent_id(parent_id) {
-                    // 未提供/空串：不修改父分类
-                    None => current_parent_id,
-                    Some(target) => {
-                        if target == current_id {
-                            return Err("分类层级不能形成环".to_string());
-                        }
-                        ensure_parent_exists(&conn, &target)?;
-                        ensure_no_cycle(&conn, &current_id, &target)?;
-                        Some(target)
-                    }
+                // 名称去空白，为空则报错
+                let trimmed = new_name.trim();
+                if trimmed.is_empty() {
+                    return Err("分类名称不能为空".to_string());
                 }
-            };
+                let new_name = trimmed.to_string();
 
-            // 更新数据库
-            conn.execute(
-                "UPDATE categories SET name = ?1, icon = ?2, parent_id = ?3 WHERE id = ?4",
-                params![new_name, new_icon, new_parent_id, current_id],
-            ).map_err(|e| e.to_string())?;
+                // 同名校验（大小写不敏感，排除自身）
+                let dup: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM categories WHERE LOWER(name) = LOWER(?1) AND id != ?2",
+                        params![new_name, current_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+                if dup > 0 {
+                    return Err("已存在同名分类".to_string());
+                }
 
-            // 直接归属的未删除密码数（用于返回，与实际查询保持一致）
-            let password_count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM passwords WHERE category_id = ?1 AND deleted_at IS NULL",
-                    params![current_id],
-                    |row| row.get(0),
-                )
-                .map_err(|e| e.to_string())?;
+                // 父分类：clearParent=true 置顶级；parentId 非空=设置；否则不修改
+                let new_parent_id = if clear_parent.unwrap_or(false) {
+                    None
+                } else {
+                    match normalize_parent_id(parent_id) {
+                        // 未提供/空串：不修改父分类
+                        None => current_parent_id,
+                        Some(target) => {
+                            if target == current_id {
+                                return Err("分类层级不能形成环".to_string());
+                            }
+                            ensure_parent_exists(&conn, &target)?;
+                            ensure_no_cycle(&conn, &current_id, &target)?;
+                            Some(target)
+                        }
+                    }
+                };
 
-            // 自身 + 全部后代的直接密码数汇总（后端计算，前端直接展示）
-            let children = load_category_children(&conn)?;
-            let direct_counts = load_direct_password_counts(&conn)?;
-            let total_count = sum_subtree_password_count(&children, &direct_counts, &current_id);
+                // 更新数据库
+                conn.execute(
+                    "UPDATE categories SET name = ?1, icon = ?2, parent_id = ?3 WHERE id = ?4",
+                    params![new_name, new_icon, new_parent_id, current_id],
+                ).map_err(|e| e.to_string())?;
 
-            // 返回更新后的分类
-            Ok(Category {
-                id: current_id,
-                name: new_name,
-                icon: new_icon,
-                sort_order,
-                created_at,
-                parent_id: new_parent_id,
-                password_count,
-                total_count,
-            })
+                // 直接归属的未删除密码数（用于返回，与实际查询保持一致）
+                let password_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM passwords WHERE category_id = ?1 AND deleted_at IS NULL",
+                        params![current_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| e.to_string())?;
+
+                // 自身 + 全部后代的直接密码数汇总（后端计算，前端直接展示）
+                let children = load_category_children(&conn)?;
+                let direct_counts = load_direct_password_counts(&conn)?;
+                let total_count = sum_subtree_password_count(&children, &direct_counts, &current_id);
+
+                // 返回更新后的分类
+                Ok(Category {
+                    id: current_id,
+                    name: new_name,
+                    icon: new_icon,
+                    sort_order,
+                    created_at,
+                    parent_id: new_parent_id,
+                    password_count,
+                    total_count,
+                })
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Err("未找到分类".to_string()),
+            Err(e) => Err(e.to_string()),
         }
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err("未找到分类".to_string()),
-        Err(e) => Err(e.to_string()),
-    }
-}
+
+    })}
 
 /// 删除分类
 ///
@@ -495,60 +502,62 @@ pub async fn update_category(
 pub async fn delete_category(
     id: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    let db = state.get_db()?;
-    let conn = db.conn();
+        let db = state.get_db()?;
+        let conn = db.conn();
 
-    // 内置兜底分类不可删除：所有被删分类下的密码都重归属到 'other'
-    if id == "other" {
-        return Err("内置分类不可删除".to_string());
-    }
+        // 内置兜底分类不可删除：所有被删分类下的密码都重归属到 'other'
+        if id == "other" {
+            return Err("内置分类不可删除".to_string());
+        }
 
-    // 多表写入（分类上移/密码重归属/删除分类）同事务，保证原子性
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        // 多表写入（分类上移/密码重归属/删除分类）同事务，保证原子性
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
 
-    // 读取被删分类的父分类（子分类上移一级后挂到它下面）
-    let parent_id: Option<String> = tx
-        .query_row(
-            "SELECT parent_id FROM categories WHERE id = ?1",
+        // 读取被删分类的父分类（子分类上移一级后挂到它下面）
+        let parent_id: Option<String> = tx
+            .query_row(
+                "SELECT parent_id FROM categories WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => "未找到分类".to_string(),
+                _ => e.to_string(),
+            })?;
+
+        // 确保兜底分类存在（历史数据中 'other' 可能已被删除，防止产生悬空引用）
+        let now = chrono::Utc::now().timestamp_millis();
+        tx.execute(
+            "INSERT OR IGNORE INTO categories (id, name, sort_order, created_at) VALUES ('other', '其他', 4, ?1)",
+            params![now],
+        ).map_err(|e| e.to_string())?;
+
+        // 子分类上移一级：parent_id 改为被删分类的 parent_id
+        tx.execute(
+            "UPDATE categories SET parent_id = ?1 WHERE parent_id = ?2",
+            params![parent_id, id],
+        ).map_err(|e| e.to_string())?;
+
+        // 将该分类下的密码移到"其他"分类（软删除密码一并重归属，保持数据一致）
+        tx.execute(
+            "UPDATE passwords SET category_id = 'other' WHERE category_id = ?1",
             params![id],
-            |row| row.get(0),
-        )
-        .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => "未找到分类".to_string(),
-            _ => e.to_string(),
-        })?;
+        ).map_err(|e| e.to_string())?;
 
-    // 确保兜底分类存在（历史数据中 'other' 可能已被删除，防止产生悬空引用）
-    let now = chrono::Utc::now().timestamp_millis();
-    tx.execute(
-        "INSERT OR IGNORE INTO categories (id, name, sort_order, created_at) VALUES ('other', '其他', 4, ?1)",
-        params![now],
-    ).map_err(|e| e.to_string())?;
+        // 删除分类
+        tx.execute("DELETE FROM categories WHERE id = ?1", params![id])
+            .map_err(|e| e.to_string())?;
 
-    // 子分类上移一级：parent_id 改为被删分类的 parent_id
-    tx.execute(
-        "UPDATE categories SET parent_id = ?1 WHERE parent_id = ?2",
-        params![parent_id, id],
-    ).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
 
-    // 将该分类下的密码移到"其他"分类（软删除密码一并重归属，保持数据一致）
-    tx.execute(
-        "UPDATE passwords SET category_id = 'other' WHERE category_id = ?1",
-        params![id],
-    ).map_err(|e| e.to_string())?;
+        Ok(())
 
-    // 删除分类
-    tx.execute("DELETE FROM categories WHERE id = ?1", params![id])
-        .map_err(|e| e.to_string())?;
-
-    tx.commit().map_err(|e| e.to_string())?;
-
-    Ok(())
-}
+    })}
 
 /// 批量调整分类排序（前端拖拽排序后提交同一父分类下的新顺序）
 ///
@@ -569,31 +578,33 @@ pub async fn delete_category(
 pub async fn reorder_categories(
     ordered_ids: Vec<String>,
     state: State<'_, AppState>,
-) -> Result<(), String> {
-    // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
-    crate::commands::auth::require_unlocked(&state)?;
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 命令门禁：未解锁（含首跑未设主密码）一律拒绝
+        crate::commands::auth::require_unlocked(&state)?;
 
-    if ordered_ids.is_empty() {
-        return Ok(());
-    }
-
-    let db = state.get_db()?;
-    let conn = db.conn();
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-
-    for (index, id) in ordered_ids.iter().enumerate() {
-        let affected = tx
-            .execute(
-                "UPDATE categories SET sort_order = ?1 WHERE id = ?2",
-                params![index as i32, id],
-            )
-            .map_err(|e| e.to_string())?;
-        if affected == 0 {
-            // 分类不存在：整体回滚，避免只改了一半的顺序
-            return Err("未找到分类".to_string());
+        if ordered_ids.is_empty() {
+            return Ok(());
         }
-    }
 
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(())
-}
+        let db = state.get_db()?;
+        let conn = db.conn();
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+
+        for (index, id) in ordered_ids.iter().enumerate() {
+            let affected = tx
+                .execute(
+                    "UPDATE categories SET sort_order = ?1 WHERE id = ?2",
+                    params![index as i32, id],
+                )
+                .map_err(|e| e.to_string())?;
+            if affected == 0 {
+                // 分类不存在：整体回滚，避免只改了一半的顺序
+                return Err("未找到分类".to_string());
+            }
+        }
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+
+    })}

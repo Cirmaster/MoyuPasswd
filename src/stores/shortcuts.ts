@@ -6,7 +6,7 @@
 
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke } from '@/lib/api'
 
 /**
  * 后端快捷键配置接口（snake_case）

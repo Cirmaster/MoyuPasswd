@@ -77,7 +77,7 @@ router.beforeEach(async (to) => {
   if (to.path === '/') return true
 
   try {
-    const { invoke } = await import('@tauri-apps/api/core')
+    const { invoke } = await import('@/lib/api')
     const unlocked = await invoke<boolean>('is_unlocked')
     if (!unlocked) return { path: '/' }
   } catch {

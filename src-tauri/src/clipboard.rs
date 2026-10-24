@@ -8,6 +8,7 @@
 //! 同时提供「后端兜底清除」：复制敏感内容后由后端定时清空剪贴板，
 //! 不依赖前端倒计时窗口是否存活。
 
+use crate::response::{respond, ApiResult};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::Emitter;
 
@@ -95,29 +96,31 @@ pub async fn copy_text_to_clipboard(
     clear_after: Option<u32>,
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
-) -> Result<(), String> {
-    // 文本复制与密码注入共用 Ctrl+V 语义：用户改为复制文本（用户名/自定义字段等）
-    // 说明意图已切换，必须作废之前登记的待粘贴密码——否则 Ctrl+V 钩子会继续拦截
-    // 按键注入密码，用户刚复制的文本被吞掉（粘贴出来的是密码）。
-    crate::pending::revoke("text-copy");
+) -> ApiResult<()> {
+    respond(|| -> Result<(), String> {
+        // 文本复制与密码注入共用 Ctrl+V 语义：用户改为复制文本（用户名/自定义字段等）
+        // 说明意图已切换，必须作废之前登记的待粘贴密码——否则 Ctrl+V 钩子会继续拦截
+        // 按键注入密码，用户刚复制的文本被吞掉（粘贴出来的是密码）。
+        crate::pending::revoke("text-copy");
 
-    write_text_excluded(&app, &text)?;
-    let seconds = match clear_after {
-        Some(0) => None,
-        Some(n) => Some(n),
-        None => Some(read_clipboard_clear_time(&state)),
-    };
-    if let Some(seconds) = seconds {
-        schedule_clear(&app, seconds);
-    }
+        write_text_excluded(&app, &text)?;
+        let seconds = match clear_after {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None => Some(read_clipboard_clear_time(&state)),
+        };
+        if let Some(seconds) = seconds {
+            schedule_clear(&app, seconds);
+        }
 
-    // 挂上一次性 Ctrl+C/Esc 监察钩子：用户随后按 Ctrl+C 复制了别的内容时，
-    // 销毁本次复制的倒计时与定时清除任务（否则定时清除会把用户的新内容误清）。
-    // 钩子对 Ctrl+V 的拦截以「有待粘贴密码」为前提，文本复制场景不会劫持正常粘贴。
-    crate::hotkey::activate(app);
+        // 挂上一次性 Ctrl+C/Esc 监察钩子：用户随后按 Ctrl+C 复制了别的内容时，
+        // 销毁本次复制的倒计时与定时清除任务（否则定时清除会把用户的新内容误清）。
+        // 钩子对 Ctrl+V 的拦截以「有待粘贴密码」为前提，文本复制场景不会劫持正常粘贴。
+        crate::hotkey::activate(app);
 
-    Ok(())
-}
+        Ok(())
+
+    })}
 
 /// 读取剪贴板清除时间设置（秒），默认 30
 fn read_clipboard_clear_time(state: &crate::state::AppState) -> u32 {
