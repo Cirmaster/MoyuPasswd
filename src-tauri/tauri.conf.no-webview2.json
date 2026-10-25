@@ -1,4 +1,7 @@
 {
+  "build": {
+    "beforeBuildCommand": null
+  },
   "bundle": {
     "windows": {
       "webviewInstallMode": {
