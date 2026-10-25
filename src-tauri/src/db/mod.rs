@@ -103,15 +103,42 @@ pub fn verify_key(app_dir: &Path, key: &[u8; 32]) -> Result<bool, String> {
     }
 }
 
+/// 隔离旧库时随库保存的凭据快照后缀
+///
+/// 只隔离数据文件是不够的：没有对应的主密码哈希与盐值，用户即使记得当时的主密码
+/// 也派生不出解密密钥。快照与隔离库同名同批次，恢复时一并还原。
+const META_SNAPSHOT_SUFFIX: &str = ".meta.json";
+
 /// 隔离已存在的旧数据库文件（改名保留，绝不删除用户数据）
 ///
 /// 旧数据库可能是明文 SQLite、使用不同密钥加密或已损坏；
 /// 一律改名为 `moyu_passwd.db.invalid-<时间戳>` 保留备查，由用户决定去留。
+///
+/// 同时把当前凭据（主密码哈希/盐值）快照到 `<隔离库>.meta.json`，
+/// 使「设置 → 备份」里的恢复功能能真正把库还原到可用状态。
 fn quarantine_existing_db(app_dir: &Path) -> Result<(), String> {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+
+    // 先快照凭据：必须在改动任何文件之前读，此时 meta 还是与旧库配套的那一份
+    if let Ok(Some(json)) = crate::db_meta::read_meta_json(app_dir) {
+        let snapshot = app_dir.join(format!(
+            "{}.invalid-{}{}",
+            DB_NAME, ts, META_SNAPSHOT_SUFFIX
+        ));
+        match fs::write(&snapshot, json) {
+            Ok(()) => {
+                crate::acl::harden_backup_acl(&snapshot);
+                log::warn!("已随隔离库保存凭据快照: {:?}", snapshot);
+            }
+            Err(e) => log::warn!("保存隔离库凭据快照失败（该库将无法直接恢复解锁）: {e}"),
+        }
+    } else {
+        log::warn!("隔离旧库时没有可用的凭据元数据，恢复后需手工定位对应主密码");
+    }
+
     for suffix in ["", "-wal", "-shm"] {
         let src = app_dir.join(format!("{}{}", DB_NAME, suffix));
         if src.exists() {
@@ -261,6 +288,226 @@ impl Database {
     pub fn conn(&self) -> parking_lot::MutexGuard<'_, Connection> {
         self.conn.lock()
     }
+}
+
+// ==================== 备份与恢复 ====================
+//
+// 库里可能出现两类历史副本，都允许用户在「设置 → 备份」里看到并恢复：
+// - `moyu_passwd.db.invalid-<秒>`：启动时无法用当前密钥打开的旧库被隔离（含凭据快照）
+// - `moyu_passwd.db.current-<毫秒>`：恢复备份前被挪开的当时库（用于回退误操作）
+// - `backup/moyu_passwd.db.bak`：修改主密码前的整库备份
+//
+// 设计约束：
+// - 只按**白名单文件名**解析，绝不接受任意路径（杜绝目录穿越）
+// - 恢复采用「复制」而不是「移动」：备份条目始终保留，可反复回退
+// - 被替换掉的当前库改名保留为 `current-*`，误恢复也能拽回来
+
+/// 修改主密码前备份的固定标识（相对 app_dir）
+const CHANGE_PASSWORD_BACKUP_NAME: &str = "backup/moyu_passwd.db.bak";
+
+/// 可恢复的备份条目
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BackupEntry {
+    /// 恢复时使用的标识（受控文件名，已通过白名单校验）
+    pub file_name: String,
+    /// 类别：quarantine=旧库隔离，current=恢复前的当前库，change_password=改密前备份
+    pub kind: String,
+    /// 生成时间（Unix 毫秒）
+    pub created_at_ms: u64,
+    /// 文件大小（字节）
+    pub size_bytes: u64,
+    /// 是否带凭据快照（带则恢复后可直接用当时的主密码解锁）
+    pub has_meta_snapshot: bool,
+}
+
+/// 校验备份文件标识是否合法（纯字符串判断，无 IO，供命令层前置校验）
+pub fn validate_backup_name(file_name: &str) -> Result<(), String> {
+    if file_name == CHANGE_PASSWORD_BACKUP_NAME {
+        return Ok(());
+    }
+    for prefix in [
+        format!("{}.invalid-", DB_NAME),
+        format!("{}.current-", DB_NAME),
+    ] {
+        if let Some(ts) = file_name.strip_prefix(&prefix) {
+            if !ts.is_empty() && ts.chars().all(|c| c.is_ascii_digit()) {
+                return Ok(());
+            }
+        }
+    }
+    Err("备份文件名非法".to_string())
+}
+
+/// 把文件名里的时间戳统一成毫秒
+///
+/// 历史隔离文件用的是秒（10 位），新生成的 current 用毫秒（13 位），按量级区分。
+fn normalize_ts(digits: &str) -> Option<u64> {
+    let value: u64 = digits.parse().ok()?;
+    Some(if value < 10_000_000_000 {
+        value * 1000
+    } else {
+        value
+    })
+}
+
+/// 文件的修改时间（Unix 毫秒；取不到返回 0）
+fn modified_ms(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 列出所有可恢复的历史副本（按时间倒序）
+pub fn list_backups(app_dir: &Path) -> Vec<BackupEntry> {
+    let mut entries: Vec<BackupEntry> = Vec::new();
+
+    let invalid_prefix = format!("{}.invalid-", DB_NAME);
+    let current_prefix = format!("{}.current-", DB_NAME);
+
+    if let Ok(dir) = std::fs::read_dir(app_dir) {
+        for item in dir.flatten() {
+            let file_name = item.file_name().to_string_lossy().to_string();
+            let (kind, prefix) = if file_name.starts_with(&invalid_prefix) {
+                ("quarantine", invalid_prefix.as_str())
+            } else if file_name.starts_with(&current_prefix) {
+                ("current", current_prefix.as_str())
+            } else {
+                continue;
+            };
+
+            // 跳过附属文件：-wal / -shm / .meta.json 不是独立的库
+            if file_name.ends_with(META_SNAPSHOT_SUFFIX)
+                || file_name.ends_with("-wal")
+                || file_name.ends_with("-shm")
+            {
+                continue;
+            }
+
+            let ts = file_name.strip_prefix(prefix).unwrap_or("");
+            if ts.is_empty() || !ts.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+
+            let path = app_dir.join(&file_name);
+            let size_bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if size_bytes == 0 {
+                // 0 字节残留没有恢复价值，列出来只会误导用户
+                continue;
+            }
+            let snapshot = app_dir.join(format!(
+                "{}.invalid-{}{}",
+                DB_NAME, ts, META_SNAPSHOT_SUFFIX
+            ));
+
+            entries.push(BackupEntry {
+                file_name: file_name.clone(),
+                kind: kind.to_string(),
+                created_at_ms: normalize_ts(ts).unwrap_or_else(|| modified_ms(&path)),
+                size_bytes,
+                has_meta_snapshot: kind == "quarantine" && snapshot.exists(),
+            });
+        }
+    }
+
+    // 改密前备份（固定文件名）
+    let bak = app_dir.join("backup").join(format!("{}.bak", DB_NAME));
+    if bak.exists() {
+        let size_bytes = std::fs::metadata(&bak).map(|m| m.len()).unwrap_or(0);
+        if size_bytes > 0 {
+            entries.push(BackupEntry {
+                file_name: CHANGE_PASSWORD_BACKUP_NAME.to_string(),
+                kind: "change_password".to_string(),
+                created_at_ms: modified_ms(&bak),
+                size_bytes,
+                has_meta_snapshot: false,
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+    entries
+}
+
+/// 从备份恢复数据库
+///
+/// 调用前提：**数据库连接已关闭**（Windows 下打开的文件无法替换），
+/// 由命令层先 `clear_aes_key` 再调用。
+///
+/// 流程：当前库改名保留 → 复制备份回主库位置 → 还原凭据快照（若有）→ 清理事务日志。
+/// 恢复后密钥与 meta 可能已变，调用方必须锁定应用，让用户用该库当时的主密码解锁。
+pub fn restore_backup(app_dir: &Path, file_name: &str) -> Result<(), String> {
+    validate_backup_name(file_name)?;
+
+    let (src, snapshot) = if file_name == CHANGE_PASSWORD_BACKUP_NAME {
+        (app_dir.join("backup").join(format!("{}.bak", DB_NAME)), None)
+    } else {
+        let ts = file_name
+            .strip_prefix(&format!("{}.invalid-", DB_NAME))
+            .or_else(|| file_name.strip_prefix(&format!("{}.current-", DB_NAME)))
+            .ok_or("备份文件名非法")?;
+        let snap = app_dir.join(format!(
+            "{}.invalid-{}{}",
+            DB_NAME, ts, META_SNAPSHOT_SUFFIX
+        ));
+        (
+            app_dir.join(file_name),
+            if file_name.contains(".invalid-") && snap.exists() {
+                Some(snap)
+            } else {
+                None
+            },
+        )
+    };
+
+    if !src.exists() {
+        return Err("备份文件不存在（可能已被移动或删除）".to_string());
+    }
+
+    // 1. 当前库先改名保留，恢复错了还能从列表里再恢复回来
+    let current = app_dir.join(DB_NAME);
+    if current.exists() {
+        let ts_now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let keep = app_dir.join(format!("{}.current-{}", DB_NAME, ts_now));
+        std::fs::rename(&current, &keep).map_err(|e| format!("暂存当前库失败: {e}"))?;
+        crate::acl::harden_backup_acl(&keep);
+        log::warn!("恢复前的当前库已另存: {:?}", keep);
+    }
+    // 旧的 WAL/SHM 与新库不配套，必须清掉，否则 SQLite 会尝试回放脏日志
+    for suffix in ["-wal", "-shm"] {
+        let side = app_dir.join(format!("{}{}", DB_NAME, suffix));
+        if side.exists() {
+            let _ = std::fs::remove_file(&side);
+        }
+    }
+
+    // 2. 复制（不移动）备份到主库位置：备份条目保留，支持反复回退
+    std::fs::copy(&src, &current).map_err(|e| format!("还原备份文件失败: {e}"))?;
+    if let Err(e) = crate::acl::harden_file_acl(&current) {
+        log::warn!("恢复后的主库 ACL 加固失败: {e}");
+    }
+
+    // 3. 有凭据快照则一并还原：没有它，恢复出来的库无法用任何密码解锁
+    match snapshot {
+        Some(snap) => {
+            let json = std::fs::read_to_string(&snap)
+                .map_err(|e| format!("读取凭据快照失败: {e}"))?;
+            crate::db_meta::write_meta_json(app_dir, &json)?;
+            log::warn!("已随备份还原凭据快照: {:?}", snap);
+        }
+        None => log::warn!("该备份没有凭据快照，恢复后需用与它配套的主密码解锁"),
+    }
+
+    // 4. 清掉可能残留的改密事务日志，否则下次启动会按旧日志把刚恢复的库再度回滚
+    let _ = crate::db_meta::delete_meta_journal(app_dir);
+
+    log::warn!("已从备份恢复数据库: {} -> {}", file_name, DB_NAME);
+    Ok(())
 }
 
 /// 迁移结构体
@@ -417,4 +664,106 @@ fn get_migrations() -> Vec<Migration> {
             ",
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 建一个干净的临时目录（带进程号，避免并发测试互相踩）
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "moyu-passwd-test-{}-{}",
+            name,
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 备份文件名白名单：只接受本模块自己生成的三类名字，拒绝路径穿越
+    #[test]
+    fn validate_backup_name_rejects_path_traversal() {
+        assert!(validate_backup_name("backup/moyu_passwd.db.bak").is_ok());
+        assert!(validate_backup_name("moyu_passwd.db.invalid-1690000000").is_ok());
+        assert!(validate_backup_name("moyu_passwd.db.current-1690000000000").is_ok());
+
+        assert!(validate_backup_name("../evil.db").is_err());
+        assert!(validate_backup_name("moyu_passwd.db.invalid-../../x").is_err());
+        assert!(validate_backup_name("moyu_passwd.db.invalid-").is_err());
+        assert!(validate_backup_name("moyu_passwd.db").is_err());
+        assert!(validate_backup_name("backup/other.db.bak").is_err());
+    }
+
+    /// 列表要跳过 -wal/-shm/.meta.json 和 0 字节残留，只给出真正可恢复的库
+    #[test]
+    fn list_backups_skips_sidecar_and_empty_files() {
+        let dir = temp_dir("list");
+        fs::write(dir.join(format!("{}.invalid-1700000000", DB_NAME)), b"old").unwrap();
+        fs::write(
+            dir.join(format!("{}.invalid-1700000000.meta.json", DB_NAME)),
+            b"{}",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(format!("{}.invalid-1700000000-wal", DB_NAME)),
+            b"wal",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(format!("{}.current-1700000000000", DB_NAME)),
+            b"cur",
+        )
+        .unwrap();
+        // 0 字节残留没有恢复价值
+        fs::write(dir.join(format!("{}.invalid-1700000001", DB_NAME)), b"").unwrap();
+
+        let list = list_backups(&dir);
+        assert_eq!(list.len(), 2, "应为 1 个隔离库 + 1 个 current");
+        assert!(list
+            .iter()
+            .any(|e| e.kind == "quarantine" && e.has_meta_snapshot));
+        assert!(list
+            .iter()
+            .any(|e| e.kind == "current" && !e.has_meta_snapshot));
+        assert!(list[0].created_at_ms >= list[1].created_at_ms, "应按时间倒序");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 恢复：主库换成备份内容，备份条目保留，原当前库另存可回退
+    ///
+    /// 注意：这里**故意不建 .meta.json 快照**——有快照时 restore 会写系统凭据管理器，
+    /// 测试环境绝不能碰用户真实的 meta。
+    #[test]
+    fn restore_backup_keeps_current_and_preserves_backup_entry() {
+        let dir = temp_dir("restore");
+        let current = dir.join(DB_NAME);
+        fs::write(&current, b"current-db").unwrap();
+        let backup_name = format!("{}.invalid-1700000000", DB_NAME);
+        let backup = dir.join(&backup_name);
+        fs::write(&backup, b"old-db").unwrap();
+
+        restore_backup(&dir, &backup_name).unwrap();
+
+        // 1. 主库已换成备份内容
+        assert_eq!(fs::read(&current).unwrap(), b"old-db");
+        // 2. 备份条目仍在（支持反复回退）
+        assert!(backup.exists());
+        // 3. 原当前库被另存为 current-*，内容完好
+        let kept: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!("{}.current-", DB_NAME))
+            })
+            .collect();
+        assert_eq!(kept.len(), 1, "原当前库应被另存一份");
+        assert_eq!(fs::read(kept[0].path()).unwrap(), b"current-db");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

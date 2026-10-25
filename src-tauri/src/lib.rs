@@ -330,6 +330,9 @@ pub fn run() {
             // 数据管理命令
             commands::export_data,
             commands::import_data,
+            // 备份与恢复命令（设置 → 备份页签）
+            commands::get_backups,
+            commands::restore_backup,
             // 快捷键命令
             commands::get_shortcuts,
             commands::save_shortcuts,

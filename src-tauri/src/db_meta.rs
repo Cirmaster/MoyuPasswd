@@ -312,6 +312,22 @@ pub fn delete_meta(app_dir: &Path) -> Result<(), String> {
     platform::delete_meta(app_dir, META_KEY)
 }
 
+/// 读取元数据原始 JSON（隔离旧库时做凭据快照用）
+///
+/// 与 `load_meta` 的区别：返回未经解析的原文，便于原样快照、原样还原，
+/// 避免「解析再序列化」在字段增删时丢失未知字段。
+///
+/// - `Ok(None)`：确认从未设置
+/// - `Err(_)`：读取失败（调用方不得当作「不存在」）
+pub fn read_meta_json(app_dir: &Path) -> Result<Option<String>, String> {
+    platform::read_meta(app_dir, META_KEY)
+}
+
+/// 用原始 JSON 覆盖写入元数据（恢复凭据快照用）
+pub fn write_meta_json(app_dir: &Path, json: &str) -> Result<(), String> {
+    platform::write_meta(app_dir, META_KEY, json)
+}
+
 // ==================== 修改主密码事务日志 ====================
 //
 // 协议（详见 commands::auth::change_master_password）：

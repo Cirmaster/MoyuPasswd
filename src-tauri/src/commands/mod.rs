@@ -7,11 +7,15 @@
 //! - `category`: 分类管理
 //! - `settings`: 设置管理
 
+//! - `data`: 数据导入导出
+//! - `backup`: 备份枚举与恢复（设置 → 备份页签）
+
 pub mod auth;
 pub mod password;
 pub mod category;
 pub mod settings;
 pub mod data;
+pub mod backup;
 pub mod shortcuts;
 pub mod countdown;
 pub mod heartbeat;
@@ -22,6 +26,7 @@ pub use password::*;
 pub use category::*;
 pub use settings::*;
 pub use data::*;
+pub use backup::*;
 pub use shortcuts::*;
 pub use countdown::*;
 pub use heartbeat::*;

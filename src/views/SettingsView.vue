@@ -28,6 +28,7 @@ import { useTheme } from '@/composables/useTheme'
 import { themes } from '@/themes/registry'
 import ThemePreview from '@/components/ThemePreview.vue'
 import WindowControls from '@/components/WindowControls.vue'
+import BackupPanel from '@/components/BackupPanel.vue'
 import { useShortcutStore } from '@/stores/shortcuts'
 import Toast from '@/components/Toast.vue'
 
@@ -727,6 +728,16 @@ const handleImport = async () => {
     showToast('error', '导入失败: ' + String(e))
   }
 }
+
+/**
+ * 备份面板的提示转发
+ *
+ * 备份页签复用本页的 Toast 实例，避免组件内再造一套提示，
+ * 也保证锁定前最后一条错误提示能正常显示。
+ */
+const handleBackupToast = (type: 'success' | 'error', message: string) => {
+  showToast(type, message)
+}
 </script>
 
 <template>
@@ -745,13 +756,14 @@ const handleImport = async () => {
     <!-- 内容区 -->
     <div class="max-w-3xl mx-auto p-6">
       <Tabs default-value="general">
-        <TabsList class="grid w-full grid-cols-6">
+        <TabsList class="grid w-full grid-cols-7">
           <TabsTrigger value="general">通用</TabsTrigger>
           <TabsTrigger value="appearance">外观</TabsTrigger>
           <TabsTrigger value="security">安全</TabsTrigger>
           <TabsTrigger value="password">密码</TabsTrigger>
           <TabsTrigger value="shortcuts">快捷键</TabsTrigger>
           <TabsTrigger value="data">数据</TabsTrigger>
+          <TabsTrigger value="backup">备份</TabsTrigger>
         </TabsList>
 
         <!-- 外观设置 -->
@@ -1321,6 +1333,19 @@ const handleImport = async () => {
                 <p class="text-sm text-muted-foreground">版本: 0.2.0</p>
                 <p class="text-sm text-muted-foreground">一个简单安全的密码管理工具</p>
               </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        <!-- 备份：历史库副本的枚举与恢复 -->
+        <TabsContent value="backup">
+          <Card>
+            <CardHeader>
+              <CardTitle>备份与恢复</CardTitle>
+              <CardDescription>从历史副本恢复密码库，或回退误恢复操作</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <BackupPanel @toast="handleBackupToast" />
             </CardContent>
           </Card>
         </TabsContent>
