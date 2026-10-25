@@ -3,7 +3,8 @@
 //! 管理"复制密码"后的状态：登记待粘贴的密码条目、过期控制、审计事件。
 //! 复制动作**不解密**，只记录 entry_id 和解密闭包，真正粘贴时才按需解密。
 //! 倒计时（TTL）内可多次粘贴，每次注入都重新解密并立即清零；
-//! 过期/锁定/再次复制/退出，以及用户按 Ctrl+C（复制别的东西）或 Esc（主动放弃）后作废。
+//! 过期/锁定/再次复制/退出，以及用户按 Ctrl+C（复制别的东西）、Esc（主动放弃）
+//! 或剪贴板出现新内容（右键复制等，见 hotkey 剪贴板哨兵）后作废。
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -157,33 +158,6 @@ pub fn get_for_inject() -> Option<(String, u64, DecryptFn)> {
         Some((p.entry_id.clone(), p.seq, Arc::clone(&p.decrypt_fn)))
     } else {
         None
-    }
-}
-
-/// 注入成功后 pending 的剩余有效期（秒）
-///
-/// 保留「倒计时内可多次粘贴」的重试能力，但把窗口压到 5 秒：注入后长期存活的
-/// pending 会在用户改用右键粘贴/复制时劫持随后的 Ctrl+V。
-/// 倒计时 UI 的剩余秒数必须与本值一致（inject.rs 注入成功后按本值重置圆点）。
-pub const POST_INJECT_TTL_SECS: u32 = 5;
-
-/// 注入成功后调用：把剩余有效期压缩到 5 秒
-///
-/// 倒计时内可多次粘贴是既有能力，但注入后长期存活的 pending 会在用户改用
-/// 右键粘贴/复制时劫持随后的 Ctrl+V（粘出来的是旧密码）。压缩窗口：
-/// 需要连按的场景 5 秒内仍可完成，之后自动作废。
-pub fn shorten_after_inject() {
-    let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(ref mut p) = *pending {
-        let short = Instant::now() + Duration::from_secs(POST_INJECT_TTL_SECS as u64);
-        if p.deadline > short {
-            p.deadline = short;
-            log::info!(
-                "[PENDING] 注入后压缩有效期至 {} 秒: seq={}",
-                POST_INJECT_TTL_SECS,
-                p.seq
-            );
-        }
     }
 }
 

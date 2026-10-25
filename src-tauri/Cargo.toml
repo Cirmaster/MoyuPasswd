@@ -58,3 +58,13 @@ pinyin = "0.11"
 # Windows API（用于获取全局鼠标位置、系统空闲时间、DPAPI 和凭据管理器）
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_SystemInformation", "Win32_System_Registry", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Credentials", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+
+# WebView2 内核设置：关闭浏览器专属快捷键（F3 查找栏等，见 browser_keys.rs）。
+# 版本必须与 tauri/wry 内部用的 webview2-com 对齐（Cargo.lock 里解析为 0.38.x），
+# 否则 with_webview 拿到的 COM 接口类型对不上
+webview2-com = "0.38"
+
+# webview2-com 的 COM 绑定实现的是 windows-core 0.61 的 Interface trait，
+# QueryInterface（cast 到 ICoreWebView2Settings3）要靠它；
+# 与上面 windows 0.58 自带的 core 是两个版本，Cargo 里可共存，不冲突
+windows-core = "0.61"

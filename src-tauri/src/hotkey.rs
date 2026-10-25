@@ -14,6 +14,7 @@ mod win_impl {
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
     use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     use windows::Win32::System::Threading::GetCurrentThreadId;
 
     /// 一次性钩子句柄
@@ -30,6 +31,40 @@ mod win_impl {
     /// 并发两次 activate 都通过检查时会起两个钩子线程，句柄/线程 ID 互相覆盖，
     /// deactivate 只收一个 → 全局键盘钩子永久驻留（keylogger 面常开）。
     static ACTIVATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 剪贴板哨兵基线序号（系统每换一次剪贴板内容就 +1）
+    ///
+    /// 会话期间序号一变就说明用户复制了新内容（右键/菜单复制不经 Ctrl+C，
+    /// 钩子收不到退出信号），此时应立即销毁粘贴状态，防旧密码劫持后续 Ctrl+V。
+    static CLIP_BASELINE: AtomicU32 = AtomicU32::new(0);
+
+    /// 读取当前剪贴板序号（0 = 读取失败/不可用）
+    fn clipboard_seq() -> u32 {
+        unsafe { GetClipboardSequenceNumber() }
+    }
+
+    /// 重置剪贴板哨兵基线到当前序号
+    ///
+    /// 「我们自己」写剪贴板（复制文本）后、以及每次会话建立时调用，
+    /// 之后出现的任何变化才视为「用户复制了新内容」。
+    pub fn rebase_clipboard_sentinel() {
+        CLIP_BASELINE.store(clipboard_seq(), Ordering::SeqCst);
+    }
+
+    /// 会话期间剪贴板是否出现过新内容（发现即重置基线，避免重复触发）
+    fn clipboard_changed() -> bool {
+        let cur = clipboard_seq();
+        // 读不到序号时跳过本轮，宁可漏判不误杀会话（该 API 基本不会失败）
+        if cur == 0 {
+            return false;
+        }
+        let base = CLIP_BASELINE.load(Ordering::SeqCst);
+        if cur != base {
+            CLIP_BASELINE.store(cur, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
 
     /// 取激活锁（毒化降级恢复，不连环 panic）
     fn lock_activate() -> std::sync::MutexGuard<'static, ()> {
@@ -48,6 +83,11 @@ mod win_impl {
             let mut guard = HOOK_APP.lock().unwrap_or_else(|e| e.into_inner());
             *guard = Some(app);
         }
+
+        // 哨兵基线对齐到「此刻」：复制流程刚写完剪贴板/刚登记 pending，
+        // 这之后的剪贴板变化才算用户复制了新内容（每次调用都重基，
+        // 钩子已激活时重复 activate 也覆盖，避免基线停在旧内容上）
+        rebase_clipboard_sentinel();
 
         // 全程持锁：检查 + 置位 + 启动不可分割
         let _guard = lock_activate();
@@ -136,6 +176,22 @@ mod win_impl {
                 }
                 if has_paste_state() {
                     idle_count = 0;
+                    // 剪贴板哨兵：会话期间剪贴板出现新内容（右键/菜单复制等不经
+                    // Ctrl+C 的复制）→ 立即销毁粘贴状态——倒计时收窗、pending 作废，
+                    // 防旧密码劫持随后的 Ctrl+V
+                    if clipboard_changed() {
+                        log::info!("[HOOK] 剪贴板出现新内容，销毁粘贴状态");
+                        match get_hook_app() {
+                            Some(app) => {
+                                crate::commands::countdown::cancel_paste_state(
+                                    &app,
+                                    "clipboard-changed",
+                                    false,
+                                );
+                            }
+                            None => crate::pending::revoke("clipboard-changed"),
+                        }
+                    }
                 } else {
                     idle_count += 1;
                     // 连续 2 秒无粘贴状态（pending 过期/作废、倒计时关闭）→ 自动卸钩
@@ -197,22 +253,43 @@ mod win_impl {
             if is_keydown && kb.vkCode == 'V' as u32 && is_ctrl_pressed() {
                 log::info!("[HOOK] 检测到 Ctrl+V");
 
-                // 检查：有待粘贴密码 && 前台不是我们自己的窗口
+                // 检查：有待粘贴密码就拦截。
+                // 自己的窗口同样拦截：密码不进剪贴板，放行只会在本应用内贴出空/旧内容；
+                // 应用内表单（如新建条目里粘贴刚复制的密码）也走注入。
+                // 锁屏/解锁框不受影响：lockdown 已作废 pending。
                 let has_pending = crate::pending::get_active().is_some();
-                let is_our_window = is_foreground_our_window();
 
-                if has_pending && !is_our_window {
-                    log::info!("[HOOK] 拦截 Ctrl+V，触发注入");
+                if has_pending {
+                    // 剪贴板哨兵兜底（轮询间隔内可能漏判）：剪贴板已换过新内容时，
+                    // 本次 Ctrl+V 还给系统做普通粘贴，异步销毁残留会话
+                    if clipboard_changed() {
+                        log::info!("[HOOK] 剪贴板已换新内容，放行 Ctrl+V 并销毁粘贴状态");
+                        let app = get_hook_app();
+                        std::thread::spawn(move || {
+                            match app {
+                                Some(app) => {
+                                    crate::commands::countdown::cancel_paste_state(
+                                        &app,
+                                        "clipboard-changed",
+                                        false,
+                                    );
+                                }
+                                None => crate::pending::revoke("clipboard-changed"),
+                            }
+                        });
+                    } else {
+                        log::info!("[HOOK] 拦截 Ctrl+V，触发注入");
 
-                    // 触发注入（在独立线程执行，避免阻塞钩子）
-                    std::thread::spawn(|| {
-                        crate::inject::trigger_inject();
-                    });
+                        // 触发注入（在独立线程执行，避免阻塞钩子）
+                        std::thread::spawn(|| {
+                            crate::inject::trigger_inject();
+                        });
 
-                    // 吞掉这次按键（不传给系统）
-                    return LRESULT(1);
+                        // 吞掉这次按键（不传给系统）
+                        return LRESULT(1);
+                    }
                 } else {
-                    log::info!("[HOOK] 不拦截：pending={}, 前台是我们={}", has_pending, is_our_window);
+                    log::info!("[HOOK] 不拦截：无待粘贴密码");
                 }
             }
 
@@ -277,26 +354,6 @@ mod win_impl {
         }
         false
     }
-
-    /// 检查前台窗口是否是我们自己的窗口
-    fn is_foreground_our_window() -> bool {
-        unsafe {
-            let foreground = GetForegroundWindow();
-            if foreground.is_invalid() {
-                return false;
-            }
-
-            // 获取前台窗口的进程 ID
-            let mut pid: u32 = 0;
-            GetWindowThreadProcessId(foreground, Some(&mut pid));
-
-            // 比较是否是我们自己的进程
-            let current_pid = std::process::id();
-            let result = pid == current_pid;
-            log::debug!("[HOOK] 前台 PID={}, 我们 PID={}, 是我们={}", pid, current_pid, result);
-            result
-        }
-    }
 }
 
 #[cfg(not(windows))]
@@ -307,6 +364,11 @@ mod non_windows {
     }
 
     pub fn deactivate() {
+        // 无操作
+    }
+
+    /// 非 Windows 平台无剪贴板序号，哨兵空操作
+    pub fn rebase_clipboard_sentinel() {
         // 无操作
     }
 }

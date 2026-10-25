@@ -53,6 +53,9 @@ pub mod state;
 /// webview 心跳看门狗（崩溃/卡死自动重载；见 watchdog.rs）
 pub mod watchdog;
 
+/// WebView2 浏览器快捷键关闭（F3 查找栏、Ctrl+P 打印、F5 刷新等；见 browser_keys.rs）
+pub mod browser_keys;
+
 /// 统一响应格式模块（所有命令返回 { code, message, data } 包裹）
 pub mod response;
 
@@ -142,6 +145,13 @@ pub fn run() {
             // 启动 webview 心跳看门狗：网页崩溃/卡死时自动重载（自绘标题栏模式下
             // 界面按钮会随网页一起失效，自愈是第一道保命线）
             watchdog::spawn(app.handle().clone());
+
+            // 关闭浏览器专属快捷键（F3 查找栏、Ctrl+P 打印、F5 刷新等，见 browser_keys.rs）。
+            // 这里覆盖启动时已建的窗口（主窗口）；quick-search / countdown 是运行时建窗，
+            // 在各自建窗后单独调用
+            for window in app.webview_windows().into_values() {
+                browser_keys::disable_browser_keys(&window);
+            }
 
             // 初始化审计模块
             {

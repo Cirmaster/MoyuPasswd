@@ -388,12 +388,8 @@ pub fn trigger_inject() {
     });
 
     if success {
-        // 注入成功后压缩 pending 剩余有效期（见 pending::shorten_after_inject）
-        crate::pending::shorten_after_inject();
-        // 同步倒计时 UI：圆点重置为与 pending 一致的剩余秒数再倒。
-        // 不同步的话圆点还按原 TTL 走，pending 过期后再按 Ctrl+V 不会被钩子拦截，
-        // 软件退化成普通粘贴、把剪贴板里的旧内容粘出来（用户以为还能注入）
-        notify_countdown_reset(crate::pending::POST_INJECT_TTL_SECS);
+        // pending 在整个倒计时内有效（多字段可反复 Ctrl+V），
+        // 会话结束靠 TTL 到期 / Ctrl+C / Esc / 剪贴板哨兵（见 hotkey.rs）
         log::info!("[INJECT] ========== 注入完成 ==========");
     } else {
         log::error!("[INJECT] ========== 注入失败 ==========");
@@ -405,7 +401,9 @@ pub fn trigger_inject() {
 /// 终端/Shell 类进程：注入的密码可能回显在屏幕上或进 shell 历史文件（明文落盘）。
 /// 注意 Windows 11 默认终端宿主是 WindowsTerminal.exe（cmd/powershell 都跑在它里面），
 /// 归因拿到的是宿主进程名，因此宿主也必须在名单里才拦得住。
-fn default_blacklist() -> Vec<String> {
+///
+/// pub 给设置页展示/回退共用（get_settings 与 load_blacklist 必须同语义）。
+pub fn default_blacklist() -> Vec<String> {
     [
         "cmd.exe",
         "powershell.exe",
@@ -522,14 +520,6 @@ fn notify_terminal_confirm(process_name: &str) {
             "terminal-inject-confirm",
             serde_json::json!({ "process": process_name }),
         );
-    }
-}
-
-/// 重置倒计时窗口的剩余秒数（注入成功后把圆点压到与 pending 一致的短窗口）
-fn notify_countdown_reset(seconds: u32) {
-    if let Some(app) = get_app_handle() {
-        use tauri::Emitter;
-        let _ = app.emit("reset-countdown", serde_json::json!({ "seconds": seconds }));
     }
 }
 

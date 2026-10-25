@@ -232,6 +232,8 @@ fn show_quick_search(app: &tauri::AppHandle) {
         .build()
         {
             Ok(window) => {
+                // 新建窗口：关闭 WebView2 浏览器专属快捷键（F3 查找栏等，见 browser_keys.rs）
+                crate::browser_keys::disable_browser_keys(&window);
                 let _ = window.set_focus();
                 let _ = window.emit("window-shown", ());
             }

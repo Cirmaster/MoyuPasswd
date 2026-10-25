@@ -227,6 +227,9 @@ pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle)
             .build()
             .map_err(|e| e.to_string())?;
 
+            // 新建窗口：关闭 WebView2 浏览器专属快捷键（F3 查找栏等，见 browser_keys.rs）
+            crate::browser_keys::disable_browser_keys(&_window);
+
             log::info!("Countdown window created");
         }
 

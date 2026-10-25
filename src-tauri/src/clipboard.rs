@@ -177,6 +177,9 @@ pub async fn copy_text_to_clipboard(
         // 此时绝不能提前返回——必须走到下面的清除调度，否则明文永久残留；
         // 软失败时把清除时间压到 5 秒兜底。
         let excluded = write_text_excluded(&app, &text)?;
+        // 自己刚写入的剪贴板不算「用户复制了新内容」：立刻把哨兵基线对齐到新序号，
+        // 否则哨兵会把本次复制误判成外部复制、把刚开的倒计时会话杀掉
+        crate::hotkey::rebase_clipboard_sentinel();
         if !excluded {
             log::warn!("剪贴板排除标记设置失败，压缩自动清除时间兜底");
         }

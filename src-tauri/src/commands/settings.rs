@@ -43,6 +43,10 @@ pub struct Settings {
     /// 用于向以管理员身份运行的目标窗口注入密码）
     #[serde(default)]
     pub run_as_admin: bool,
+    /// 注入排除名单（逗号分隔的进程名，如终端类；命中需二次确认）。
+    /// 空 = 恢复默认名单（防误清空裸奔），与 inject::load_blacklist 同语义
+    #[serde(default)]
+    pub inject_blacklist: String,
 }
 
 impl Default for Settings {
@@ -60,6 +64,7 @@ impl Default for Settings {
             show_on_startup: true,
             allow_terminal_inject: false,
             run_as_admin: false,
+            inject_blacklist: crate::inject::default_blacklist().join(", "),
         }
     }
 }
@@ -79,6 +84,7 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     "show_on_startup",
     "allow_terminal_inject",
     "run_as_admin",
+    "inject_blacklist",
     "shortcuts",
 ];
 
@@ -120,6 +126,23 @@ fn validate_setting(key: &str, value: &str) -> Result<(), String> {
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
             if !ok {
                 return Err(format!("{key} 取值非法: {value:?}"));
+            }
+        }
+        "inject_blacklist" => {
+            // 逗号分隔的进程名（空名单合法 = 恢复默认）；每段限长、
+            // 字符集与 Windows 进程名一致（字母数字 . - _），防塞脚本/路径
+            for item in value.split(',') {
+                let item = item.trim();
+                if item.is_empty() {
+                    continue;
+                }
+                let ok = item.len() <= 64
+                    && item
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+                if !ok {
+                    return Err(format!("inject_blacklist 含非法进程名: {item:?}"));
+                }
             }
         }
         "auto_start" | "close_to_tray" | "show_password_strength" | "show_on_startup"
@@ -195,6 +218,19 @@ pub async fn get_settings(state: State<'_, AppState>) -> ApiResult<Settings> {
                 "show_on_startup" => settings.show_on_startup = value == "true",
                 "allow_terminal_inject" => settings.allow_terminal_inject = value == "true",
                 "run_as_admin" => settings.run_as_admin = value == "true",
+                "inject_blacklist" => {
+                    // 与 inject::load_blacklist 同语义：解析后为空同样回退默认名单
+                    let list: Vec<&str> = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    settings.inject_blacklist = if list.is_empty() {
+                        crate::inject::default_blacklist().join(", ")
+                    } else {
+                        list.join(", ")
+                    };
+                }
                 _ => {}
             }
         }
@@ -426,6 +462,7 @@ pub async fn save_settings(
             ("show_on_startup", settings.show_on_startup.to_string()),
             ("allow_terminal_inject", settings.allow_terminal_inject.to_string()),
             ("run_as_admin", settings.run_as_admin.to_string()),
+            ("inject_blacklist", settings.inject_blacklist),
         ];
 
         // 逐项校验（键白名单 + 值域），任一非法整体拒绝

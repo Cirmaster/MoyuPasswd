@@ -80,6 +80,7 @@ onMounted(async () => {
       show_on_startup: boolean
       allow_terminal_inject: boolean
       run_as_admin: boolean
+      inject_blacklist: string
     }>('get_settings')
 
     // 应用通用设置
@@ -88,6 +89,7 @@ onMounted(async () => {
     settings.value.closeToTray = savedSettings.close_to_tray ?? true
     settings.value.showOnStartup = savedSettings.show_on_startup ?? true
     settings.value.runAsAdmin = savedSettings.run_as_admin ?? false
+    settings.value.injectBlacklist = savedSettings.inject_blacklist ?? ''
 
     // 应用安全设置
     security.value.autoLockTime = savedSettings.auto_lock_time
@@ -170,6 +172,8 @@ const settings = ref({
   showOnStartup: true,
   /** 启动时是否以管理员身份运行（写系统兼容层，下次启动弹 UAC 生效） */
   runAsAdmin: false,
+  /** 注入排除名单（逗号分隔的进程名；空 = 恢复默认名单） */
+  injectBlacklist: '',
 })
 
 /** 当前进程是否已以管理员身份运行（仅设置项提示用） */
@@ -572,6 +576,7 @@ const persistSettings = async () => {
         show_on_startup: settings.value.showOnStartup,
         allow_terminal_inject: security.value.allowTerminalInject,
         run_as_admin: settings.value.runAsAdmin,
+        inject_blacklist: settings.value.injectBlacklist,
       },
     })
     showToast('success', '设置已保存')
@@ -991,6 +996,18 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                   type="checkbox"
                   class="h-4 w-4"
                 />
+              </div>
+
+              <!-- 注入排除名单 -->
+              <div class="space-y-2">
+                <Label>注入排除名单（进程名，逗号分隔）</Label>
+                <Input
+                  v-model="settings.injectBlacklist"
+                  placeholder="cmd.exe, powershell.exe, ..."
+                />
+                <p class="text-sm text-muted-foreground">
+                  名单内窗口不做直接注入，需按两次 Ctrl+V 确认（默认含终端类，防密码进命令行历史/回显）；清空则恢复默认名单。开启上方开关后名单整体失效
+                </p>
               </div>
 
               <!-- 系统快速解锁 -->
