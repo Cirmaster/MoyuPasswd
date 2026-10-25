@@ -10,7 +10,10 @@
     "test:unit": "vitest",
     "build-only": "vite build",
     "type-check": "vue-tsc --build",
-    "release": "tauri build"
+    "release": "tauri build",
+    "release:all": "node scripts/build-release.mjs",
+    "release:webview2": "node scripts/build-release.mjs webview2",
+    "release:lite": "node scripts/build-release.mjs lite"
   },
   "dependencies": {
     "@lucide/vue": "^1.37.0",

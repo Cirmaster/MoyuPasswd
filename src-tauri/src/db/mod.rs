@@ -585,7 +585,10 @@ fn get_migrations() -> Vec<Migration> {
                 -- 插入默认设置
                 INSERT OR IGNORE INTO settings (key, value) VALUES ('auto_lock_time', '5');
                 INSERT OR IGNORE INTO settings (key, value) VALUES ('clipboard_clear_time', '30');
-                INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'system');
+                -- 明暗模式默认深色：与前端 useTheme / index.html 防闪脚本的默认值保持一致。
+                -- 这里不能写 'system'——设置页的兜底逻辑会把本行当作用户偏好读走，
+                -- 导致首次安装后一进设置页主题就跳成「跟随系统」
+                INSERT OR IGNORE INTO settings (key, value) VALUES ('theme', 'dark');
                 INSERT OR IGNORE INTO settings (key, value) VALUES ('language', 'zh-CN');
             ",
         },

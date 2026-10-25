@@ -44,7 +44,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            theme: "system".to_string(),
+            // 明暗模式默认深色，与前端 useTheme 的默认值一致；
+            // 若与前端不一致，首装后进设置页会把默认值误当用户偏好盖掉前端主题
+            theme: "dark".to_string(),
             language: "zh-CN".to_string(),
             auto_lock_time: 5,
             clipboard_clear_time: 30,

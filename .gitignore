@@ -40,3 +40,10 @@ __screenshots__/
 
 .idea/
 .pnpm-store/
+
+# WebView2 固定版本运行时（fixedRuntime 打包用，体积 180MB+，不进版本库）
+src-tauri/webview2-runtime/
+src-tauri/Microsoft.WebView2.FixedVersionRuntime.*.cab
+
+# 发布安装包收集目录（scripts/build-release.mjs 产出）
+/release/
