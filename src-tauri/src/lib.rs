@@ -44,6 +44,9 @@ pub mod idle;
 /// 系统认证模块
 pub mod system_auth;
 
+/// 管理员身份模块（提权检测 + 启动时以管理员运行开关）
+pub mod elevate;
+
 /// 应用状态模块
 pub mod state;
 
@@ -325,6 +328,7 @@ pub fn run() {
             commands::get_setting,
             commands::save_setting,
             commands::save_settings,
+            commands::is_elevated,
             commands::set_auto_start,
             commands::is_auto_start_enabled,
             // 数据管理命令

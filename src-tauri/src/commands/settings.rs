@@ -39,6 +39,10 @@ pub struct Settings {
     /// 是否允许向终端注入密码（默认拒绝，命中黑名单需二次确认）
     #[serde(default)]
     pub allow_terminal_inject: bool,
+    /// 启动时以管理员身份运行（写系统兼容层标记，下次启动弹 UAC 提权；
+    /// 用于向以管理员身份运行的目标窗口注入密码）
+    #[serde(default)]
+    pub run_as_admin: bool,
 }
 
 impl Default for Settings {
@@ -55,6 +59,7 @@ impl Default for Settings {
             show_password_strength: true,
             show_on_startup: true,
             allow_terminal_inject: false,
+            run_as_admin: false,
         }
     }
 }
@@ -73,6 +78,7 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     "show_password_strength",
     "show_on_startup",
     "allow_terminal_inject",
+    "run_as_admin",
     "shortcuts",
 ];
 
@@ -117,7 +123,7 @@ fn validate_setting(key: &str, value: &str) -> Result<(), String> {
             }
         }
         "auto_start" | "close_to_tray" | "show_password_strength" | "show_on_startup"
-        | "allow_terminal_inject" => {
+        | "allow_terminal_inject" | "run_as_admin" => {
             if value != "true" && value != "false" {
                 return Err(format!("{key} 只能是 true/false"));
             }
@@ -188,6 +194,7 @@ pub async fn get_settings(state: State<'_, AppState>) -> ApiResult<Settings> {
                 "show_password_strength" => settings.show_password_strength = value == "true",
                 "show_on_startup" => settings.show_on_startup = value == "true",
                 "allow_terminal_inject" => settings.allow_terminal_inject = value == "true",
+                "run_as_admin" => settings.run_as_admin = value == "true",
                 _ => {}
             }
         }
@@ -299,6 +306,10 @@ pub async fn save_setting(
         if key == "auto_start" {
             sync_auto_start(&app, value == "true")?;
         }
+        // 管理员启动：写库与系统兼容层标记必须一致，否则开关不生效
+        if key == "run_as_admin" {
+            sync_run_as_admin(value == "true")?;
+        }
 
         Ok(())
 
@@ -316,6 +327,58 @@ fn sync_auto_start(app: &tauri::AppHandle, enable: bool) -> Result<(), String> {
     } else {
         manager.disable().map_err(|e| e.to_string())
     }
+}
+
+/// 把系统兼容层里的「以管理员身份运行」标记同步为目标值
+///
+/// 与 sync_auto_start 同理：库里的设置值和实际生效的标记必须一致，
+/// 否则 UI 显示开了、下次启动却仍是普通权限。写入失败直接报错，不静默。
+fn sync_run_as_admin(enable: bool) -> Result<(), String> {
+    crate::elevate::set_run_as_admin(enable)
+}
+
+/// 解锁后按库里的设置补同步「以管理员身份运行」标记（自愈，失败不影响解锁）
+///
+/// 该标记以 exe 路径为键，而开关可能在别的实例里拨的：
+/// dev 与安装包路径不同（dev 里拨开标记还写不进，见 elevate.rs）、
+/// 更新换安装路径也会失配。解锁拿到库后按当前 exe 路径补写/清理，
+/// 保证无论开关在哪里拨的，下次启动都按设置生效。
+pub fn sync_run_as_admin_from_db(state: &AppState) {
+    let enabled = {
+        let db = match state.get_db() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        // 先落局部变量再收尾：让 db 守卫的借用在块尾表达式求值后立即结束
+        let value = db.conn().query_row(
+            "SELECT value FROM settings WHERE key = 'run_as_admin'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        // 没有记录 = 默认关闭，走清理路径把历史标记删掉
+        value.map(|v| v == "true").unwrap_or(false)
+    };
+    if let Err(e) = sync_run_as_admin(enabled) {
+        log::warn!("解锁后同步管理员启动标记失败: {e}");
+    }
+}
+
+/// 查询当前进程是否以管理员身份运行
+///
+/// 设置页展示用：解释「启动时以管理员身份运行」开关为何需要下次启动才生效。
+///
+/// # 前端调用
+///
+/// ```typescript
+/// const elevated = await invoke('is_elevated');
+/// ```
+#[tauri::command]
+pub async fn is_elevated(state: State<'_, AppState>) -> ApiResult<bool> {
+    respond(|| -> Result<bool, String> {
+        // 解锁门禁：与其余设置查询保持一致（设置页本身解锁后才可见）
+        crate::commands::auth::require_unlocked(&state)?;
+        Ok(crate::elevate::is_elevated())
+    })
 }
 
 /// 批量保存设置
@@ -362,6 +425,7 @@ pub async fn save_settings(
             ("show_password_strength", settings.show_password_strength.to_string()),
             ("show_on_startup", settings.show_on_startup.to_string()),
             ("allow_terminal_inject", settings.allow_terminal_inject.to_string()),
+            ("run_as_admin", settings.run_as_admin.to_string()),
         ];
 
         // 逐项校验（键白名单 + 值域），任一非法整体拒绝
@@ -387,6 +451,9 @@ pub async fn save_settings(
 
         // 开机自启：写库与注册表必须一致（此前只写库，UI 显示与实际不符）
         sync_auto_start(&app, settings.auto_start)?;
+
+        // 管理员启动：写库与系统兼容层标记必须一致，否则开关不生效
+        sync_run_as_admin(settings.run_as_admin)?;
 
         Ok(())
 

@@ -79,6 +79,7 @@ onMounted(async () => {
       show_password_strength: boolean
       show_on_startup: boolean
       allow_terminal_inject: boolean
+      run_as_admin: boolean
     }>('get_settings')
 
     // 应用通用设置
@@ -86,6 +87,7 @@ onMounted(async () => {
     settings.value.autoStart = savedSettings.auto_start
     settings.value.closeToTray = savedSettings.close_to_tray ?? true
     settings.value.showOnStartup = savedSettings.show_on_startup ?? true
+    settings.value.runAsAdmin = savedSettings.run_as_admin ?? false
 
     // 应用安全设置
     security.value.autoLockTime = savedSettings.auto_lock_time
@@ -109,6 +111,13 @@ onMounted(async () => {
       settings.value.autoStart = false
     }
 
+    // 获取当前进程身份（管理员/普通；允许失败，仅用于设置项提示）
+    try {
+      adminElevated.value = await invoke<boolean>('is_elevated')
+    } catch (adminError) {
+      console.warn('获取管理员身份失败:', adminError)
+    }
+
     // 获取系统认证状态
     try {
       const [available, enabled] = await Promise.all([
@@ -125,6 +134,9 @@ onMounted(async () => {
     await shortcutStore.loadShortcuts()
   } catch (e) {
     console.error('加载设置失败:', e)
+  } finally {
+    // 初始值就位后才开启自动保存（加载期间的赋值变化不回写）
+    autoSaveReady = true
   }
 })
 
@@ -156,7 +168,12 @@ const settings = ref({
   closeToTray: true,
   /** 启动时是否显示主窗口 */
   showOnStartup: true,
+  /** 启动时是否以管理员身份运行（写系统兼容层，下次启动弹 UAC 生效） */
+  runAsAdmin: false,
 })
+
+/** 当前进程是否已以管理员身份运行（仅设置项提示用） */
+const adminElevated = ref(false)
 
 /**
  * 安全设置
@@ -524,11 +541,25 @@ const resetShortcuts = async () => {
 }
 
 /**
- * 保存通用设置
+ * 设置自动保存：任何设置项变化后防抖写回后端，用户无需点保存按钮。
+ * - 防抖 600ms：数字输入连续敲键只落一次库；开关/下拉松手即存
+ * - 初始加载完成前不触发：否则进页面会把读来的值原样回写一遍
+ * - 组件卸载时若有未落库的改动，立即补写一次，避免丢最后一次修改
+ *
+ * 注：开机自启 / 管理员启动的注册表同步由后端 save_settings 统一处理
+ * （sync_auto_start / sync_run_as_admin），前端不再单独调用。
  */
-const handleSaveGeneral = async () => {
+const AUTO_SAVE_DELAY_MS = 600
+
+/** 自动保存防抖计时器 */
+let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 初始值加载完成后才开启自动保存 */
+let autoSaveReady = false
+
+/** 把当前设置写回后端（真正的落库动作） */
+const persistSettings = async () => {
   try {
-    // 保存设置到数据库
     await invoke('save_settings', {
       settings: {
         theme: theme.value,
@@ -540,22 +571,36 @@ const handleSaveGeneral = async () => {
         show_password_strength: security.value.showPasswordStrength,
         show_on_startup: settings.value.showOnStartup,
         allow_terminal_inject: security.value.allowTerminalInject,
+        run_as_admin: settings.value.runAsAdmin,
       },
     })
-
-    // 设置开机自启（允许失败，不影响其他设置保存）
-    try {
-      await invoke('set_auto_start', { enable: settings.value.autoStart })
-    } catch (autoStartError) {
-      console.warn('设置开机自启失败（可能不支持）:', autoStartError)
-      // 不显示错误给用户，因为某些系统可能不支持
-    }
-
-    showToast('success', '通用设置已保存')
+    showToast('success', '设置已保存')
   } catch (e) {
     showToast('error', '保存失败: ' + String(e))
   }
 }
+
+/** 安排一次防抖自动保存（连续变化合并成一次落库） */
+const scheduleAutoSave = () => {
+  if (!autoSaveReady) return
+  if (autoSaveTimer) clearTimeout(autoSaveTimer)
+  autoSaveTimer = setTimeout(() => {
+    autoSaveTimer = null
+    void persistSettings()
+  }, AUTO_SAVE_DELAY_MS)
+}
+
+// 设置项任何变化都自动落库（外观页的明暗/色系切换走 handleSetTheme 即时保存，不在此列）
+watch([settings, security], scheduleAutoSave, { deep: true })
+
+// 离开页面时补写未落库的改动（防抖窗口内关闭页面不丢最后一次修改）
+onUnmounted(() => {
+  if (autoSaveTimer) {
+    clearTimeout(autoSaveTimer)
+    autoSaveTimer = null
+    void persistSettings()
+  }
+})
 
 /**
  * 切换系统认证状态
@@ -576,31 +621,6 @@ const toggleSystemAuth = async () => {
     showToast('error', String(e))
   } finally {
     systemAuth.value.loading = false
-  }
-}
-
-/**
- * 保存安全设置
- */
-const handleSaveSecurity = async () => {
-  try {
-    // 使用 save_settings 批量保存安全设置
-    await invoke('save_settings', {
-      settings: {
-        theme: theme.value,
-        language: settings.value.language,
-        auto_lock_time: clampSettingNumber(security.value.autoLockTime, 1, 60),
-        clipboard_clear_time: clampSettingNumber(security.value.clipboardClearTime, 10, 300),
-        auto_start: settings.value.autoStart,
-        close_to_tray: settings.value.closeToTray,
-        show_password_strength: security.value.showPasswordStrength,
-        show_on_startup: settings.value.showOnStartup,
-        allow_terminal_inject: security.value.allowTerminalInject,
-      },
-    })
-    showToast('success', '安全设置已保存')
-  } catch (e) {
-    showToast('error', '保存失败: ' + String(e))
   }
 }
 
@@ -841,7 +861,7 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
           <Card>
             <CardHeader>
               <CardTitle>通用设置</CardTitle>
-              <CardDescription>应用的基本配置</CardDescription>
+              <CardDescription>应用的基本配置，修改后自动保存</CardDescription>
             </CardHeader>
             <CardContent class="space-y-6">
               <!-- 语言 -->
@@ -864,6 +884,21 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                 </div>
                 <input
                   v-model="settings.autoStart"
+                  type="checkbox"
+                  class="h-4 w-4"
+                />
+              </div>
+
+              <!-- 启动时以管理员身份运行 -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>启动时以管理员身份运行</Label>
+                  <p class="text-sm text-muted-foreground">
+                    开启后每次启动弹 UAC 以管理员身份运行，用于向以管理员身份运行的窗口注入密码；下次启动生效<span v-if="adminElevated" class="text-primary-ink">（当前已是管理员身份）</span>
+                  </p>
+                </div>
+                <input
+                  v-model="settings.runAsAdmin"
                   type="checkbox"
                   class="h-4 w-4"
                 />
@@ -894,8 +929,6 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                   class="h-4 w-4"
                 />
               </div>
-
-              <Button @click="handleSaveGeneral">保存设置</Button>
             </CardContent>
           </Card>
         </TabsContent>
@@ -905,7 +938,7 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
           <Card>
             <CardHeader>
               <CardTitle>安全设置</CardTitle>
-              <CardDescription>配置安全相关的选项</CardDescription>
+              <CardDescription>配置安全相关的选项，修改后自动保存</CardDescription>
             </CardHeader>
             <CardContent class="space-y-6">
               <!-- 自动锁定时间 -->
@@ -977,8 +1010,6 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                   {{ systemAuth.loading ? '处理中...' : (systemAuth.enabled ? '已启用' : '启用') }}
                 </Button>
               </div>
-
-              <Button @click="handleSaveSecurity">保存设置</Button>
             </CardContent>
           </Card>
         </TabsContent>

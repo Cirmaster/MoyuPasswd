@@ -160,6 +160,13 @@ pub fn get_for_inject() -> Option<(String, u64, DecryptFn)> {
     }
 }
 
+/// 注入成功后 pending 的剩余有效期（秒）
+///
+/// 保留「倒计时内可多次粘贴」的重试能力，但把窗口压到 5 秒：注入后长期存活的
+/// pending 会在用户改用右键粘贴/复制时劫持随后的 Ctrl+V。
+/// 倒计时 UI 的剩余秒数必须与本值一致（inject.rs 注入成功后按本值重置圆点）。
+pub const POST_INJECT_TTL_SECS: u32 = 5;
+
 /// 注入成功后调用：把剩余有效期压缩到 5 秒
 ///
 /// 倒计时内可多次粘贴是既有能力，但注入后长期存活的 pending 会在用户改用
@@ -168,10 +175,14 @@ pub fn get_for_inject() -> Option<(String, u64, DecryptFn)> {
 pub fn shorten_after_inject() {
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut p) = *pending {
-        let short = Instant::now() + Duration::from_secs(5);
+        let short = Instant::now() + Duration::from_secs(POST_INJECT_TTL_SECS as u64);
         if p.deadline > short {
             p.deadline = short;
-            log::info!("[PENDING] 注入后压缩有效期至 5 秒: seq={}", p.seq);
+            log::info!(
+                "[PENDING] 注入后压缩有效期至 {} 秒: seq={}",
+                POST_INJECT_TTL_SECS,
+                p.seq
+            );
         }
     }
 }

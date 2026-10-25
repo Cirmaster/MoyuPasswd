@@ -125,6 +125,11 @@ const clearClipboard = async () => {
 
 /**
  * 关闭窗口
+ *
+ * 归 0 / 取消后的收窗动作。主路径 win.close() 真正销毁窗口（不留隐藏壳，
+ * 下次复制创建全新窗口，杜绝残留状态）；失败时退回后端 hide_countdown 兜底——
+ * 它是应用自带命令（Rust 侧收窗 + 停光标跟随），不受窗口插件权限约束，
+ * 也不依赖前端动态 import 的窗口 API，保证圆点一定能消失。
  */
 const closeWindow = async () => {
 
@@ -143,12 +148,12 @@ const closeWindow = async () => {
     await win.close()
   } catch (e) {
     console.error('Failed to close window:', e)
-    // 尝试隐藏
+    // 兜底：走后端命令收窗（不依赖窗口 API 权限与动态 import）
     try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window')
-      await getCurrentWindow().hide()
+      const { invoke } = await import('@/lib/api')
+      await invoke('hide_countdown')
     } catch (e2) {
-      console.error('Failed to hide window:', e2)
+      console.error('Failed to hide countdown window:', e2)
     }
   }
 }
