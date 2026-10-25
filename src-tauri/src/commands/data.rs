@@ -284,6 +284,13 @@ pub async fn export_data(
             return Err("应用未解锁".to_string());
         }
 
+        // 导出文件是全量明文（密码/备注/敏感字段全部解密后打包），是整个系统泄露后果
+        // 最重的产物。此前只查非空，用户用 "1" 也能导出——Argon2 对 1 位口令的暴破
+        // 成本几乎为零。复用主密码同一套强度校验（含弱口令黑名单），
+        // 并把错误文案里的「主密码」换成「导出密码」，避免提示误导。
+        crate::commands::auth::validate_password_strength(&export_password)
+            .map_err(|e| e.replace("主密码", "导出密码"))?;
+
         // 获取 AES 密钥
         let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
 

@@ -135,7 +135,8 @@ mod win_impl {
             // 一次性把全部按键事件插入输入流，避免中途混入用户的物理按键
             let mut inputs: Vec<INPUT> = Vec::with_capacity(chars.len() * 2);
             for &ch in chars.iter() {
-                log::debug!("[INJECT] 构造字符 U+{:04X}", ch);
+                // 绝不能把 ch 写进日志：ch 就是密码的一个码点，debug 构建下日志会落盘
+                //（历史版本此处有一行 log::debug!("构造字符 U+{:04X}")，等于逐字符泄露密码）
 
                 // 按下键
                 inputs.push(INPUT {

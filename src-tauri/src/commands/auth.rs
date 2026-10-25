@@ -79,12 +79,14 @@ pub fn require_unlocked(state: &AppState) -> Result<(), String> {
     }
 }
 
-/// 校验主密码强度（后端兜底）
+/// 校验口令强度（后端兜底）
 ///
 /// 与前端规则一致（至少 6 个字符）并额外加固：
 /// 拒绝纯空白、拒绝超长输入（Argon2 对超长口令派生很慢）、拒绝常见弱口令。
 /// 前端校验可被绕过，后端必须独立校验。
-fn validate_password_strength(password: &str) -> Result<(), String> {
+/// 公开给 `pub(crate)`：导出密码（data.rs）复用同一套规则——导出文件是全量明文，
+/// 保护它的口令不能比主密码宽松。
+pub(crate) fn validate_password_strength(password: &str) -> Result<(), String> {
     if password.trim().is_empty() {
         return Err("主密码不能为纯空白".to_string());
     }
@@ -489,11 +491,18 @@ fn backup_database(app_dir: &Path, db: &db::Database) -> Result<(), String> {
     let bak_path = backup_dir.join(format!("{}.bak", db::DB_NAME));
     std::fs::copy(&db_path, &bak_path).map_err(|e| format!("备份数据库失败: {e}"))?;
 
+    // 备份同样要收紧 ACL：它保存的是「改密前的整库 + 旧密钥」副本，
+    // 用户改密的常见动机就是旧密码疑似泄露；备份若同机其他账户可读，
+    // 拿到备份 + 旧密码即可解密全部历史数据，等于改密没起作用。
+    crate::acl::harden_backup_acl(&bak_path);
+
     // checkpoint 后 WAL/SHM 通常已清空；若仍存在也一并备份
     for suffix in ["-wal", "-shm"] {
         let src = app_dir.join(format!("{}{}", db::DB_NAME, suffix));
         if src.exists() {
-            let _ = std::fs::copy(&src, backup_dir.join(format!("{}.bak{}", db::DB_NAME, suffix)));
+            let dst = backup_dir.join(format!("{}.bak{}", db::DB_NAME, suffix));
+            let _ = std::fs::copy(&src, &dst);
+            crate::acl::harden_backup_acl(&dst);
         }
     }
     log::info!("修改主密码前已备份数据库: {:?}", bak_path);
@@ -618,8 +627,19 @@ pub async fn has_master_password(state: State<'_, AppState>) -> ApiResult<bool> 
 ///
 /// 将密钥存入安全存储（插件会自动触发认证）。
 #[tauri::command]
-pub async fn enable_system_auth(state: State<'_, AppState>, app: tauri::AppHandle) -> ApiResult<()> {
+pub async fn enable_system_auth(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
+        // 仅主窗口 + 已解锁：往系统安全存储写入 64 字节主密钥属初始化级操作，
+        // 小窗（快速搜索/倒计时）不得触达
+        if window.label() != "main" {
+            return Err("该操作仅允许在主窗口执行".to_string());
+        }
+        require_unlocked(&state)?;
+
         // 检查系统认证是否可用
         if !crate::system_auth::is_available(&app) {
             return Err("当前系统不支持系统认证".to_string());
@@ -652,9 +672,21 @@ pub async fn enable_system_auth(state: State<'_, AppState>, app: tauri::AppHandl
 /// 禁用系统快速解锁
 ///
 /// 从系统安全存储中删除密钥。
+///
+/// 门禁：仅主窗口 + 已解锁。删除快速解锁凭据属「关闭安全功能」类操作，
+/// 锁定状态下若敞开，被注入的脚本可静默关掉用户的第二把钥匙。
 #[tauri::command]
-pub async fn disable_system_auth(state: State<'_, AppState>, app: tauri::AppHandle) -> ApiResult<()> {
+pub async fn disable_system_auth(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
+        if window.label() != "main" {
+            return Err("该操作仅允许在主窗口执行".to_string());
+        }
+        require_unlocked(&state)?;
+
         crate::system_auth::delete_key(&state.app_dir, &app)?;
         log::info!("系统快速解锁已禁用");
         Ok(())

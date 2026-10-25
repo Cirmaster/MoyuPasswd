@@ -117,6 +117,8 @@ fn quarantine_existing_db(app_dir: &Path) -> Result<(), String> {
         if src.exists() {
             let dst = app_dir.join(format!("{}.invalid-{}{}", DB_NAME, ts, suffix));
             fs::rename(&src, &dst).map_err(|e| format!("隔离旧数据库失败: {e}"))?;
+            // 隔离文件同样是可解密的历史库，ACL 必须与主库一致
+            crate::acl::harden_backup_acl(&dst);
             log::warn!("已隔离旧数据库文件: {:?} -> {:?}", src, dst);
         }
     }

@@ -275,8 +275,13 @@ impl AppState {
             *attempts += 1;
 
             if *attempts >= MAX_FAILED_ATTEMPTS {
-                let lock_exponent = (*attempts - MAX_FAILED_ATTEMPTS) as u64;
-                let lock_seconds = (LOCK_BASE_SECONDS * 2u64.pow(lock_exponent as u32))
+                // 指数必须夹取上限：`30 * 2^63` 会溢出 u64，release 构建（未开
+                // overflow-checks）按 wrapping 语义得到 0 —— 结果是「连续失败 68 次后
+                // 锁定时长归零、限速彻底失效」，debug 构建则直接 panic。
+                // 锁定上限 900s / 基础 30s = 30，翻倍 5 次即 960s 已超上限，再翻无意义。
+                let lock_exponent = (*attempts - MAX_FAILED_ATTEMPTS).min(5);
+                let lock_seconds = LOCK_BASE_SECONDS
+                    .saturating_mul(1u64 << lock_exponent)
                     .min(LOCK_MAX_SECONDS);
 
                 let until = now_ms() + lock_seconds * 1000;

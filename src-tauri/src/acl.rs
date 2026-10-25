@@ -17,6 +17,23 @@ pub fn harden_file_acl(path: &std::path::Path) -> Result<(), String> {
     }
 }
 
+/// 加固备份/隔离文件的 ACL（文件不存在时静默跳过，失败只记日志）
+///
+/// 与 `harden_file_acl` 的区别：备份文件可能因 checkpoint 无内容、拷贝失败等原因
+/// 并不存在，这里把「不存在」当正常情况，调用处不必逐个 exists 判断。
+///
+/// 为什么备份也要加固：`backup/*.bak` 是「改密前的整库 + 旧密钥」副本，
+/// `*.invalid-*` 是迁移时隔离的旧库。用户改密常因旧密码疑似泄露，
+/// 这些文件若同机其他账户可读，拿到备份 + 旧密码就能解开全部历史数据。
+pub fn harden_backup_acl(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    if let Err(e) = harden_file_acl(path) {
+        log::warn!("备份文件 ACL 加固失败（{:?}）: {e}", path);
+    }
+}
+
 #[cfg(windows)]
 mod win_impl {
     use std::path::Path;
@@ -46,15 +63,17 @@ mod win_impl {
             }
 
             let mut sid_buf = vec![0u8; size as usize];
-            GetTokenInformation(
+            let query = GetTokenInformation(
                 token,
                 TokenUser,
                 Some(sid_buf.as_mut_ptr() as *mut core::ffi::c_void),
                 size,
                 &mut size,
-            )
-            .map_err(|e| format!("GetTokenInformation 失败: {e}"))?;
+            );
+            // 无论成功与否都必须关句柄：此前失败路径直接 `?` 上抛，
+            // 每次调用泄漏一个进程令牌句柄
             let _ = CloseHandle(token);
+            query.map_err(|e| format!("GetTokenInformation 失败: {e}"))?;
 
             let token_user = &*(sid_buf.as_ptr() as *const TOKEN_USER);
             let user_sid: PSID = token_user.User.Sid;

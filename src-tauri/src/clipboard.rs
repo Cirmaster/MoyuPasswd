@@ -232,7 +232,7 @@ fn read_clipboard_clear_time(state: &crate::state::AppState) -> u32 {
 mod win_impl {
     use std::ptr;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Foundation::{GlobalFree, HANDLE};
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
     };
@@ -275,20 +275,32 @@ mod win_impl {
 
     unsafe fn read_unicode_text() -> Result<String, String> {
         use windows::Win32::System::DataExchange::GetClipboardData;
+        use windows::Win32::System::Memory::GlobalSize;
 
         let handle =
             GetClipboardData(CF_UNICODETEXT).map_err(|e| format!("读取剪贴板失败: {e}"))?;
         let hmem = windows::Win32::Foundation::HGLOBAL(handle.0);
+
+        // 先取真实分配大小：剪贴板内容由任意进程写入，NUL 终止符只是「写入方应遵守的
+        // 契约」而非保证。此前直接 while 扫描到 NUL，遇到不带终止符的恶意数据块会一路
+        // 越界读到未映射页 —— 访问违例属 SEH 级异常，catch_unwind 兜不住，进程直接崩。
+        let cap_bytes = GlobalSize(hmem);
+        if cap_bytes < 2 {
+            return Err("剪贴板数据为空或大小异常".to_string());
+        }
+        let max_units = cap_bytes / 2;
+
         let p = GlobalLock(hmem);
         if p.is_null() {
             return Err("锁定剪贴板内存失败".to_string());
         }
-        // 扫描到结尾 NUL 得到 UTF-16 长度
+        // 在容量范围内扫描 NUL；找不到就按容量截断，绝不越界
+        let units = p as *const u16;
         let mut len = 0usize;
-        while *(p as *const u16).add(len) != 0 {
+        while len < max_units && *units.add(len) != 0 {
             len += 1;
         }
-        let slice = std::slice::from_raw_parts(p as *const u16, len);
+        let slice = std::slice::from_raw_parts(units, len);
         let text = String::from_utf16_lossy(slice);
         let _ = GlobalUnlock(hmem);
         Ok(text)
@@ -305,20 +317,29 @@ mod win_impl {
     }
 
     unsafe fn write_unicode_text(text: &str) -> Result<(), String> {
-        // UTF-16 + 结尾 NUL
-        let mut utf16: Vec<u16> = text.encode_utf16().collect();
-        utf16.push(0);
+        // UTF-16 + 结尾 NUL；Zeroizing 保证本地副本用完清零（内容可能是用户名等敏感文本）
+        let utf16: zeroize::Zeroizing<Vec<u16>> = {
+            let mut v: Vec<u16> = text.encode_utf16().collect();
+            v.push(0);
+            zeroize::Zeroizing::new(v)
+        };
         let byte_len = utf16.len() * 2;
 
         let h = GlobalAlloc(GMEM_MOVEABLE, byte_len).map_err(|e| format!("分配内存失败: {e}"))?;
         let p = GlobalLock(h);
         if p.is_null() {
+            // 锁定失败必须释放刚分配的全局内存，否则 GMEM 句柄泄漏
+            let _ = GlobalFree(h);
             return Err("锁定内存失败".to_string());
         }
         ptr::copy_nonoverlapping(utf16.as_ptr() as *const u8, p as *mut u8, byte_len);
         let _ = GlobalUnlock(h);
 
-        SetClipboardData(CF_UNICODETEXT, HANDLE(h.0)).map_err(|e| format!("写入文本失败: {e}"))?;
+        // 失败路径同样要释放：SetClipboardData 成功即所有权移交系统，不再由我们释放
+        if let Err(e) = SetClipboardData(CF_UNICODETEXT, HANDLE(h.0)) {
+            let _ = GlobalFree(h);
+            return Err(format!("写入文本失败: {e}"));
+        }
         Ok(())
     }
 
@@ -338,12 +359,17 @@ mod win_impl {
         let h = GlobalAlloc(GMEM_MOVEABLE, 4).map_err(|e| format!("分配内存失败: {e}"))?;
         let p = GlobalLock(h);
         if p.is_null() {
+            let _ = GlobalFree(h);
             return Err("锁定内存失败".to_string());
         }
         *(p as *mut u32) = value;
         let _ = GlobalUnlock(h);
 
-        SetClipboardData(fmt, HANDLE(h.0)).map_err(|_| "写入排除格式失败".to_string())?;
+        if SetClipboardData(fmt, HANDLE(h.0)).is_err() {
+            // 失败路径必须释放，否则 GMEM 句柄泄漏
+            let _ = GlobalFree(h);
+            return Err("写入排除格式失败".to_string());
+        }
         Ok(())
     }
 }

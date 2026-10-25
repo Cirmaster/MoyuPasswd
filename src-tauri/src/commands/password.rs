@@ -328,13 +328,16 @@ pub(crate) fn normalize_tags(tags: &[String]) -> Vec<String> {
         if trimmed.is_empty() {
             continue;
         }
-        // 含控制字符的标签整体丢弃：\u{1f} 是 GROUP_CONCAT 的分隔符（TAG_SEPARATOR），
-        // 混入会让一个标签在解析时裂成多个，过滤/统计/改名全部错乱
-        if trimmed.chars().any(|c| c.is_control()) {
+        // 剔除控制字符，而不是整体丢弃标签：\u{1f} 是 GROUP_CONCAT 的分隔符
+        //（TAG_SEPARATOR），混入会让一个标签在解析时裂成多个，过滤/统计/改名全部错乱；
+        // 但用户只是粘贴了带换行的标签时，静默丢整条更让人困惑，清理后仍有内容就保留。
+        let raw_cleaned: String = trimmed.chars().filter(|c| !c.is_control()).collect();
+        let cleaned = raw_cleaned.trim();
+        if cleaned.is_empty() {
             continue;
         }
         // 按字符截断（中文标签 32 字符 = 96 字节，不能按字节切）
-        let truncated: String = trimmed.chars().take(MAX_TAG_CHARS).collect();
+        let truncated: String = cleaned.chars().take(MAX_TAG_CHARS).collect();
         // 大小写不敏感去重（Unicode 感知），保留首次出现的写法
         let key = truncated.to_lowercase();
         if !seen.insert(key) {
@@ -1981,7 +1984,7 @@ pub async fn copy_password_to_clipboard(
                 _ => e.to_string(),
             })?;
 
-        // 读取剪贴板清除时间设置（作为 pending TTL）
+        // 读取剪贴板清除时间设置
         let clear_time: u32 = conn
             .query_row(
                 "SELECT value FROM settings WHERE key = 'clipboard_clear_time'",
@@ -1993,7 +1996,19 @@ pub async fn copy_password_to_clipboard(
             )
             .unwrap_or(30);
 
-        log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s", id, clear_time);
+        // 待粘贴窗口（秒）：不能直接把 clear_time 当 TTL。
+        // - clear_time = 0 表示「不清除剪贴板」，会被 pending 的 max(1) 压成 1 秒，
+        //   用户几乎来不及按 Ctrl+V；
+        // - clear_time 很大（如 300）会让 pending 长期有效，期间任一前台窗口按 Ctrl+V
+        //   都会收到注入。
+        // 收敛到 10~300，0 用默认 30；返回值同时作为前端倒计时秒数，两者必须一致。
+        let pending_ttl: u32 = if clear_time == 0 {
+            30
+        } else {
+            clear_time.clamp(10, 300)
+        };
+
+        log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s, ttl={}s", id, clear_time, pending_ttl);
 
         // 创建解密闭包：不捕获密钥副本，调用时从状态现场取密钥。
         // 锁定后任何迟到的调用都会失败（fail closed），杜绝锁定后仍可解密注入。
@@ -2014,7 +2029,7 @@ pub async fn copy_password_to_clipboard(
         });
 
         // 登记待粘贴密码（带解密闭包）
-        let seq = crate::pending::register_with_decrypt(&id, clear_time, decrypt_fn);
+        let seq = crate::pending::register_with_decrypt(&id, pending_ttl, decrypt_fn);
 
         // 激活 Ctrl+V 钩子（传入句柄，钩子检测到 Ctrl+C / Esc 时销毁粘贴状态）
         crate::hotkey::activate(app);
@@ -2028,9 +2043,9 @@ pub async fn copy_password_to_clipboard(
             log::warn!("[CMD] 登记使用记录失败: id={}, err={}", id, e);
         }
 
-        log::info!("[CMD] copy_password_to_clipboard 完成: id={}, seq={}, ttl={}s", id, seq, clear_time);
+        log::info!("[CMD] copy_password_to_clipboard 完成: id={}, seq={}, ttl={}s", id, seq, pending_ttl);
 
-        Ok(clear_time)
+        Ok(pending_ttl)
 
     })}
 

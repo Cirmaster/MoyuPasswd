@@ -124,6 +124,13 @@ pub fn hash_master_password(password: &str) -> Result<PasswordHashResult, Crypto
 ///
 /// 如果验证过程失败，返回 `CryptoError::VerifyError`
 pub fn verify_master_password(password: &str, stored_hash: &str) -> Result<bool, CryptoError> {
+    // 超长输入直接判否：主密码在设置/修改时已限制 256 字符，此处 1024 是留足余量的
+    // 硬上限，用于挡住「灌 MB 级口令逼 Argon2 反复做无谓派生」的消耗型请求。
+    // 返回 Ok(false) 而非 Err：与「密码错误」表现一致，不给攻击者区分的信号。
+    if password.chars().count() > 1024 {
+        return Ok(false);
+    }
+
     // 解析存储的哈希值
     let parsed_hash = PasswordHash::new(stored_hash)
         .map_err(|e| CryptoError::VerifyError(e.to_string()))?;
