@@ -41,9 +41,54 @@ fn get_cursor_position() -> Option<(i32, i32)> {
     }
 }
 
-#[cfg(not(windows))]
+/// 获取全局鼠标位置（X11 query_pointer，相对根窗口的屏幕坐标）
+///
+/// Wayland 无全局光标查询接口（安全设计），返回 None 整体跳过跟随。
+/// 连接按线程缓存：跟随线程 16ms 一轮，逐次建连开销太大；查询失败时
+/// 丢弃连接下次重连（X 服务器重启等场景可自愈）。
+#[cfg(target_os = "linux")]
 fn get_cursor_position() -> Option<(i32, i32)> {
-    // 非 Windows 平台暂不支持
+    use std::cell::RefCell;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::ConnectionExt as _;
+
+    thread_local! {
+        static CONN: RefCell<Option<(x11rb::rust_connection::RustConnection, usize)>> =
+            RefCell::new(None);
+    }
+
+    if !crate::x11::is_x11_session() {
+        return None;
+    }
+
+    CONN.with(|cell| {
+        let need_connect = cell.borrow().is_none();
+        if need_connect {
+            *cell.borrow_mut() = crate::x11::connect();
+        }
+        // 查询期间只读借用，结束后再决定是否丢弃连接（避免借用冲突）
+        let reply = {
+            let slot = cell.borrow();
+            let Some((conn, screen)) = slot.as_ref() else {
+                return None;
+            };
+            let root = conn.setup().roots[*screen].root;
+            conn.query_pointer(root).ok().and_then(|c| c.reply().ok())
+        };
+        match reply {
+            Some(r) => Some((r.root_x as i32, r.root_y as i32)),
+            None => {
+                // 查询失败：连接可能已死（如 X 服务器重启），丢弃后下次重连
+                *cell.borrow_mut() = None;
+                None
+            }
+        }
+    })
+}
+
+/// 获取全局鼠标位置（其他平台桩：无光标位置 API，跟随跳过）
+#[cfg(not(any(windows, target_os = "linux")))]
+fn get_cursor_position() -> Option<(i32, i32)> {
     None
 }
 
@@ -67,6 +112,10 @@ fn show_without_activate(window: &tauri::WebviewWindow) {
 
 #[cfg(not(windows))]
 fn show_without_activate(window: &tauri::WebviewWindow) {
+    // X11 下 WM 会在窗口 map 时按焦点策略给焦点，把目标应用的输入抢走
+    //（Windows 用 SW_SHOWNA 规避的正是这件事）。set_accept_focus(false) 让
+    // 气泡永不接受键盘焦点，与 Windows 语义对齐；鼠标交互不受影响。
+    let _ = window.set_focusable(false);
     let _ = window.show();
 }
 
@@ -88,6 +137,13 @@ pub async fn start_follow_cursor(app: tauri::AppHandle) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
         // 停止并回收旧线程，避免重复启动导致多线程竞态
         stop_follow_cursor_internal();
+
+        // 光标跟随依赖系统光标位置：Windows API / X11 query_pointer 可用；
+        // Wayland（无全局光标查询）与未实现平台返回 None，跳过启动避免空转
+        if get_cursor_position().is_none() {
+            log::info!("当前平台/会话不支持光标跟随，跳过启动");
+            return Ok(());
+        }
 
         FOLLOW_CURSOR_RUNNING.store(true, Ordering::SeqCst);
 
@@ -226,6 +282,10 @@ pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle)
             .visible(true)
             .build()
             .map_err(|e| e.to_string())?;
+
+            // 气泡不接受键盘焦点（X11 下 WM map 时会给焦点，抢走目标应用输入），
+            // 对齐 Windows SW_SHOWNA 语义；见 show_without_activate
+            let _ = _window.set_focusable(false);
 
             // 新建窗口：关闭 WebView2 浏览器专属快捷键（F3 查找栏等，见 browser_keys.rs）
             crate::browser_keys::disable_browser_keys(&_window);

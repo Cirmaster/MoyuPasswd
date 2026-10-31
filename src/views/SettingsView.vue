@@ -18,6 +18,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { invoke } from '@/lib/api'
+import { isWindows } from '@/lib/platform'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { IconArrowLeft, IconCheckCircle, IconLoader, IconPencil } from '@/components/icons'
@@ -115,10 +116,13 @@ onMounted(async () => {
     }
 
     // 获取当前进程身份（管理员/普通；允许失败，仅用于设置项提示）
-    try {
-      adminElevated.value = await invoke<boolean>('is_elevated')
-    } catch (adminError) {
-      console.warn('获取管理员身份失败:', adminError)
+    // 非 Windows 无提权语义（is_elevated 恒 false），跳过
+    if (isWindows) {
+      try {
+        adminElevated.value = await invoke<boolean>('is_elevated')
+      } catch (adminError) {
+        console.warn('获取管理员身份失败:', adminError)
+      }
     }
 
     // 获取系统认证状态
@@ -895,8 +899,8 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                 />
               </div>
 
-              <!-- 启动时以管理员身份运行 -->
-              <div class="flex items-center justify-between">
+              <!-- 启动时以管理员身份运行（Windows 专属：非 Windows 无 UAC/提权语义，后端为空操作） -->
+              <div v-if="isWindows" class="flex items-center justify-between">
                 <div>
                   <Label>启动时以管理员身份运行</Label>
                   <p class="text-sm text-muted-foreground">

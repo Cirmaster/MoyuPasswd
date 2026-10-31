@@ -2,15 +2,20 @@
 //!
 //! 在 Windows 上把数据库文件的安全描述符替换为仅当前用户可访问，
 //! 并阻止从父目录继承权限，防止同机其他账户读取密码库文件。
-//! 非 Windows 平台为无操作。
+//! Unix（Linux/macOS）上退化为 chmod 0600（仅当前用户可读写），
+//! 挡不住目录继承之类的高级场景，但足以隔离同机其他普通账户。
 
-/// 收紧文件 ACL：仅当前用户可访问（Windows），失败不致命，由调用方记录日志。
+/// 收紧文件 ACL：仅当前用户可访问，失败不致命，由调用方记录日志。
 pub fn harden_file_acl(path: &std::path::Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         win_impl::harden_file_acl(path)
     }
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        unix_impl::harden_file_acl(path)
+    }
+    #[cfg(not(any(windows, unix)))]
     {
         let _ = path;
         Ok(())
@@ -31,6 +36,20 @@ pub fn harden_backup_acl(path: &std::path::Path) {
     }
     if let Err(e) = harden_file_acl(path) {
         log::warn!("备份文件 ACL 加固失败（{:?}）: {e}", path);
+    }
+}
+
+#[cfg(unix)]
+mod unix_impl {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    /// chmod 0600：仅当前用户可读写
+    ///
+    /// 覆盖数据库、审计日志、元数据、备份等所有经 `harden_file_acl` 的文件。
+    pub fn harden_file_acl(path: &Path) -> Result<(), String> {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod 0600 失败: {e}"))
     }
 }
 

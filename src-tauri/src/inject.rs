@@ -222,12 +222,180 @@ mod win_impl {
     }
 }
 
-#[cfg(not(windows))]
-mod non_windows {
-    /// 目标进程信息（非 Windows 桩）
+#[cfg(target_os = "linux")]
+mod x11_impl {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xtest::ConnectionExt as _;
+
+    /// 目标进程信息（hwnd 为 X11 窗口 id，字段与 win_impl 对齐）
+    pub struct TargetProcess {
+        pub pid: u32,
+        pub name: String,
+        pub path: String,
+        pub hwnd: u32,
+    }
+
+    /// 获取前台窗口对应的进程（X11 实现）
     ///
-    /// 字段与 `win_impl::TargetProcess` 对齐，保证共用的 `trigger_inject`
-    /// 在任意平台都能编译；`hwnd` 仅为占位，不承载真实窗口句柄。
+    /// 归因链：EWMH `_NET_ACTIVE_WINDOW` → `_NET_WM_PID` → /proc 进程路径/名，
+    /// 与 Windows 版「窗口 → PID → QueryFullProcessImageNameW」同构。
+    /// Wayland 会话整体 fail closed（is_x11_session 判定），防止注入过期窗口。
+    pub fn get_target_process() -> Option<TargetProcess> {
+        if !crate::x11::is_x11_session() {
+            log::warn!("[INJECT] 非 X11 会话，无法归因（Wayland 无全局窗口查询）");
+            return None;
+        }
+        let (conn, screen_num) = crate::x11::connect()?;
+        let root = conn.setup().roots[screen_num].root;
+
+        let active = crate::x11::get_cardinal(&conn, root, "_NET_ACTIVE_WINDOW")?;
+        if active == 0 {
+            log::warn!("[INJECT] X11 无前台窗口");
+            return None;
+        }
+        let pid = crate::x11::get_cardinal(&conn, active, "_NET_WM_PID").unwrap_or(0);
+
+        // PID → 进程路径/名；解析失败留空串，由 trigger_inject 拒绝注入（fail closed）
+        let mut path = String::new();
+        let mut name = String::new();
+        if pid > 0 {
+            path = std::fs::read_link(format!("/proc/{pid}/exe"))
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            name = std::path::Path::new(&path)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| {
+                    // exe 链接读不到（权限/已退出）时退回 comm
+                    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default()
+                });
+        }
+
+        log::info!("[INJECT] X11 前台窗口={}, PID={}, name={}", active, pid, name);
+        Some(TargetProcess {
+            pid,
+            name,
+            path,
+            hwnd: active,
+        })
+    }
+
+    /// XTest 注入文本
+    ///
+    /// 注意事项（对齐 Windows 版踩坑记录）：
+    /// 1. 不动焦点：触发注入时目标窗口本来就是前台，X11 下同样不去碰焦点
+    /// 2. 先合成释放修饰键：用户按 Ctrl+V 触发时 Ctrl 还物理按着，
+    ///    不释放会被目标应用当成 Ctrl+组合键消费
+    /// 3. XTest 没有 Unicode 直注（对不齐 Windows 的 KEYEVENTF_UNICODE），
+    ///    字符必须按当前键盘映射折算 keycode；先整体解析、任一字符映射不到
+    ///    就整次放弃，绝不打半截密码
+    ///
+    /// # Arguments
+    /// * `text` - 要注入的文本
+    /// * `target_hwnd` - 目标窗口 id（归因时记录）
+    /// * `target_pid` - 归因时的目标进程 ID（注入前复核，防窗口易主）
+    pub fn inject_text(text: &str, target_hwnd: u32, target_pid: u32) -> bool {
+        if !crate::x11::is_x11_session() {
+            log::error!("[INJECT] 非 X11 会话，注入不可用");
+            return false;
+        }
+        let (conn, screen_num) = match crate::x11::connect() {
+            Some(c) => c,
+            None => return false,
+        };
+        let root = conn.setup().roots[screen_num].root;
+
+        // 复核前台窗口归属（对齐 Windows 双复核语义）
+        let active = crate::x11::get_cardinal(&conn, root, "_NET_ACTIVE_WINDOW").unwrap_or(0);
+        if active != target_hwnd {
+            log::warn!("[INJECT] 前台窗口已不是目标窗口，放弃注入");
+            return false;
+        }
+        let current_pid = crate::x11::get_cardinal(&conn, active, "_NET_WM_PID").unwrap_or(0);
+        if target_pid == 0 || current_pid != target_pid {
+            log::warn!(
+                "[INJECT] 目标窗口已易主（pid {} -> {}），放弃注入",
+                target_pid,
+                current_pid
+            );
+            return false;
+        }
+
+        // 先解析全部字符 → (keycode, shift)，任一失败整次放弃
+        //（不能把 ch 写进日志：ch 就是密码的一个码点）
+        let mut events: Vec<(u8, bool)> = Vec::with_capacity(text.len());
+        for ch in text.chars() {
+            let keysym = crate::x11::char_to_keysym(ch);
+            match crate::x11::key_for_keysym(&conn, keysym) {
+                Some(k) => events.push(k),
+                None => {
+                    log::error!("[INJECT] 字符无法映射到当前键盘布局（非 ASCII/AltGr 级），放弃注入");
+                    return false;
+                }
+            }
+        }
+        let shift_kc = crate::x11::key_for_keysym(&conn, 0xffe1 /* XK_Shift_L */).map(|(kc, _)| kc);
+
+        // 释放修饰键，避免注入字符被目标应用当成组合键
+        release_modifiers(&conn);
+
+        // 逐字符按下/抬起（按需 Shift）；发送完一次性 flush
+        for (kc, shift) in &events {
+            if *shift {
+                if let Some(sk) = shift_kc {
+                    fake_key(&conn, sk, true);
+                }
+            }
+            fake_key(&conn, *kc, true);
+            fake_key(&conn, *kc, false);
+            if *shift {
+                if let Some(sk) = shift_kc {
+                    fake_key(&conn, sk, false);
+                }
+            }
+        }
+        if let Err(e) = conn.flush() {
+            log::error!("[INJECT] XTest 发送失败: {e}");
+            return false;
+        }
+
+        log::info!("[INJECT] X11 注入完成，共 {} 个字符", events.len());
+        true
+    }
+
+    /// XTest 合成按键事件（press=true 按下 / false 抬起）
+    ///
+    /// FakeInput 的 type 字段用 X11 核心事件码：2=KeyPress、3=KeyRelease
+    fn fake_key(conn: &impl x11rb::connection::Connection, keycode: u8, press: bool) {
+        let ty = if press { 2u8 } else { 3u8 };
+        // time=0（CurrentTime）、root/坐标=0、deviceid=0（核心键盘）
+        let _ = conn.xtest_fake_input(ty, keycode, 0, 0, 0, 0, 0);
+    }
+
+    /// 合成释放 Ctrl/Shift/Alt/Super（对齐 Windows 版 release_modifiers 语义）
+    fn release_modifiers(conn: &impl x11rb::connection::Connection) {
+        // XK_Shift_L/R、XK_Control_L/R、XK_Alt_L/R(Meta)、XK_Super_L/R
+        const MODIFIER_KEYSYMS: &[u32] = &[
+            0xffe1, 0xffe2, 0xffe3, 0xffe4, 0xffe9, 0xffea, 0xffeb, 0xffec,
+        ];
+        let mut sent = 0;
+        for &ks in MODIFIER_KEYSYMS {
+            if let Some((kc, _)) = crate::x11::key_for_keysym(conn, ks) {
+                fake_key(conn, kc, false);
+                sent += 1;
+            }
+        }
+        let _ = conn.flush();
+        log::info!("[INJECT] 已合成释放修饰键 {} 个", sent);
+    }
+}
+
+/// 非 Windows 且非 Linux 平台（macOS 等）桩：注入待实现
+#[cfg(not(any(windows, target_os = "linux")))]
+mod non_windows {
+    /// 目标进程信息（字段与 `win_impl::TargetProcess` 对齐）
     pub struct TargetProcess {
         pub pid: u32,
         pub name: String,
@@ -236,13 +404,13 @@ mod non_windows {
     }
 
     pub fn get_target_process() -> Option<TargetProcess> {
-        log::warn!("非 Windows 平台进程归因待实现");
+        log::warn!("该平台进程归因待实现");
         None
     }
 
-    /// 注入文本（非 Windows 桩：签名与 `win_impl::inject_text` 对齐，始终失败）
+    /// 注入文本（桩：签名与 `win_impl::inject_text` 对齐，始终失败）
     pub fn inject_text(_text: &str, _target_hwnd: u32, _target_pid: u32) -> bool {
-        log::error!("非 Windows 平台注入待实现");
+        log::error!("该平台注入待实现");
         false
     }
 }
@@ -250,7 +418,10 @@ mod non_windows {
 #[cfg(windows)]
 use win_impl::*;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+use x11_impl::*;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 use non_windows::*;
 
 /// 触发密码注入（钩子/热键回调）
@@ -405,10 +576,12 @@ pub fn trigger_inject() {
 /// 终端/Shell 类进程：注入的密码可能回显在屏幕上或进 shell 历史文件（明文落盘）。
 /// 注意 Windows 11 默认终端宿主是 WindowsTerminal.exe（cmd/powershell 都跑在它里面），
 /// 归因拿到的是宿主进程名，因此宿主也必须在名单里才拦得住。
+/// Linux 名单同理覆盖各桌面的终端（X11 注入链路用；其他平台无害，进程名不会撞）。
 ///
 /// pub 给设置页展示/回退共用（get_settings 与 load_blacklist 必须同语义）。
 pub fn default_blacklist() -> Vec<String> {
     [
+        // Windows 终端 / Shell
         "cmd.exe",
         "powershell.exe",
         "pwsh.exe",
@@ -417,6 +590,23 @@ pub fn default_blacklist() -> Vec<String> {
         "bash.exe",
         "mintty.exe",
         "wsl.exe",
+        // Linux 终端模拟器（含 GNOME 宿主进程）
+        "xterm",
+        "uxterm",
+        "urxvt",
+        "st",
+        "kitty",
+        "alacritty",
+        "foot",
+        "gnome-terminal",
+        "gnome-terminal-server",
+        "konsole",
+        "xfce4-terminal",
+        "lxterminal",
+        "mate-terminal",
+        "tilix",
+        "terminator",
+        "deepin-terminal",
     ]
     .iter()
     .map(|s| s.to_string())

@@ -68,3 +68,15 @@ webview2-com = "0.38"
 # QueryInterface（cast 到 ICoreWebView2Settings3）要靠它；
 # 与上面 windows 0.58 自带的 core 是两个版本，Cargo 里可共存，不冲突
 windows-core = "0.61"
+
+# 原生对话框（致命错误弹窗，见 lib.rs show_fatal_error）：Linux 走 GTK3
+#（复用进程内已有 GTK），macOS 走 NSAlert。只进非 Windows 构建，
+# Windows 的 MessageBoxW 路径保持原样不受影响
+[target.'cfg(not(windows))'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
+
+# X11 注入链路（仅 Linux）：EWMH 归因 + XTest 注入 + Ctrl+V 抓取
+#（x11.rs / inject.rs::x11_impl / hotkey.rs::x11_impl，纯 Rust 协议实现，无 C 依赖；
+#  xtest 扩展是注入的合成按键通道，feature 门控需显式开启）
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.13", features = ["xtest"] }

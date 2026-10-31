@@ -356,18 +356,322 @@ mod win_impl {
     }
 }
 
-#[cfg(not(windows))]
+/// X11 实现（仅 Linux）
+///
+/// Linux 没有 WH_KEYBOARD_LL 对应物，Ctrl+V 触发改用 XGrabKey：
+/// 粘贴状态（pending/倒计时）期间被动抓取 Ctrl+V 组合键，语义与 Windows
+/// 钩子一致——复制时激活、状态结束自动卸载、期间 Ctrl+V 触发注入。
+/// 组合键抓取是「消费」型（按键到不了应用），因此无待注入密码的场景
+///（文本复制会话）要用 XTest 回放 Ctrl+V，把粘贴还给应用。
+/// 剪贴板哨兵用 CLIPBOARD selection 属主变化近似 Windows 的剪贴板序号。
+/// Wayland 无此能力，activate 直接跳过（is_x11_session 判定）。
+#[cfg(target_os = "linux")]
+mod x11_impl {
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{Allow, ConnectionExt as _, GrabMode, ModMask};
+    use x11rb::protocol::Event;
+
+    /// 是否已激活（抓取线程在跑）
+    static IS_ACTIVE: AtomicBool = AtomicBool::new(false);
+    /// 退出信号（deactivate 置位，线程在一个轮询间隔内自行清理退出）
+    static STOP: AtomicBool = AtomicBool::new(false);
+    /// 激活互斥（对齐 Windows 版：检查 + 置位 + 启动不可分割）
+    static ACTIVATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// 主应用句柄（销毁粘贴状态时取消倒计时窗口等 UI 操作）
+    static HOOK_APP: std::sync::Mutex<Option<tauri::AppHandle>> = std::sync::Mutex::new(None);
+    /// 剪贴板哨兵基线：CLIPBOARD selection 当前属主窗口（0 = 无属主）
+    ///
+    /// X11 没有 Windows 的剪贴板序号，用「属主窗口 id」近似：任何应用复制
+    /// 新内容都会接管 CLIPBOARD，属主即变。剪贴板管理器接管属主时可能误判
+    /// ——误判方向是「提前作废会话、退化为剪贴板粘贴」，安全且不误注入。
+    static CLIP_BASELINE: AtomicU32 = AtomicU32::new(0);
+
+    fn get_hook_app() -> Option<tauri::AppHandle> {
+        HOOK_APP.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn lock_activate() -> std::sync::MutexGuard<'static, ()> {
+        ACTIVATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 查询 CLIPBOARD selection 的属主窗口
+    fn clipboard_owner(conn: &impl Connection) -> Option<u32> {
+        let atom = crate::x11::intern(conn, "CLIPBOARD")?;
+        Some(conn.get_selection_owner(atom).ok()?.reply().ok()?.owner)
+    }
+
+    /// 重置哨兵基线到当前属主（自己写完剪贴板后调用，对齐 Windows 语义）
+    pub fn rebase_clipboard_sentinel() {
+        if let Some((conn, _)) = crate::x11::connect() {
+            if let Some(owner) = clipboard_owner(&conn) {
+                CLIP_BASELINE.store(owner, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// 会话期间剪贴板是否易主（发现即重置基线，避免重复触发）
+    fn clipboard_changed(conn: &impl Connection) -> bool {
+        let cur = match clipboard_owner(conn) {
+            Some(o) => o,
+            None => return false, // 查询失败跳过本轮，宁可漏判不误杀会话
+        };
+        let base = CLIP_BASELINE.load(Ordering::SeqCst);
+        if cur != base {
+            CLIP_BASELINE.store(cur, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
+    /// 是否存在待销毁的粘贴/倒计时状态（对齐 Windows 版同名逻辑）
+    fn has_paste_state() -> bool {
+        if crate::pending::has_active() {
+            return true;
+        }
+        if let Some(app) = get_hook_app() {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("countdown") {
+                return window.is_visible().unwrap_or(false);
+            }
+        }
+        false
+    }
+
+    /// 异步销毁粘贴状态（对齐 Windows 版的两种降级路径）
+    fn cancel_async(reason: &'static str, clear_clipboard: bool) {
+        std::thread::spawn(move || match get_hook_app() {
+            Some(app) => {
+                crate::commands::countdown::cancel_paste_state(&app, reason, clear_clipboard)
+            }
+            None => crate::pending::revoke(reason),
+        });
+    }
+
+    /// Ctrl+V 的 4 个抓取组合（覆盖 CapsLock(Lock) / NumLock(Mod2) 开关态）
+    fn grab_combos(conn: &impl Connection, root: u32, v_kc: u8) {
+        use ModMask as M;
+        let combos = [
+            M::CONTROL,
+            M::CONTROL | M::LOCK,
+            M::CONTROL | M::M2,
+            M::CONTROL | M::LOCK | M::M2,
+        ];
+        for mods in combos {
+            if let Err(e) = conn.grab_key(false, root, mods, v_kc, GrabMode::ASYNC, GrabMode::ASYNC)
+            {
+                log::warn!("[HOOK] X11 grab_key 失败: {e}");
+            }
+        }
+        let _ = conn.flush();
+    }
+
+    /// 解除抓取（含组合键触发后的隐式活动抓取）
+    fn ungrab_combos(conn: &impl Connection, root: u32, v_kc: u8) {
+        use ModMask as M;
+        let combos = [
+            M::CONTROL,
+            M::CONTROL | M::LOCK,
+            M::CONTROL | M::M2,
+            M::CONTROL | M::LOCK | M::M2,
+        ];
+        for mods in combos {
+            let _ = conn.ungrab_key(v_kc, root, mods);
+        }
+        // 关键：Ctrl+V 触发后键盘处于隐式活动抓取状态，不显式放开的话
+        // XTest 合成的按键会被重定向给抓取方（本客户端），目标窗口收不到注入
+        let _ = conn.ungrab_keyboard(0u32); // 0 = CurrentTime
+        let _ = conn.flush();
+    }
+
+    /// 抓取线程：Ctrl+V 事件分发 + 剪贴板哨兵 + 无状态自动卸载
+    fn worker() {
+        let (conn, screen_num) = match crate::x11::connect() {
+            Some(c) => c,
+            None => {
+                IS_ACTIVE.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+        let root = conn.setup().roots[screen_num].root;
+
+        // 'v' 的 keysym = 0x76（Ctrl 由抓取掩码约束）
+        let v_kc = match crate::x11::key_for_keysym(&conn, 0x76) {
+            Some((kc, _)) => kc,
+            None => {
+                log::error!("[HOOK] X11 键盘映射里找不到 'v'，无法抓取 Ctrl+V");
+                IS_ACTIVE.store(false, Ordering::SeqCst);
+                return;
+            }
+        };
+
+        log::info!("[HOOK] X11 Ctrl+V 监听线程已启动（keycode={v_kc}，抓取跟随 pending）");
+
+        let mut idle_ticks = 0u32;
+        let mut sentinel_ticks = 0u32;
+        // 抓取跟随 pending：只在有待注入密码时拦 Ctrl+V（对齐 Windows 钩子语义）。
+        // 文本复制会话（无 pending）不挂抓取，Ctrl+V 原生通过——不必回放，
+        // 也就没有「回放时按键已松开」的时序竞态。
+        let mut grabbed = false;
+        while !STOP.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+
+            while let Ok(Some(event)) = conn.poll_for_event() {
+                if let Event::KeyPress(kp) = event {
+                    if kp.detail == v_kc {
+                        handle_ctrl_v(&conn, root, v_kc, &mut grabbed);
+                    }
+                }
+            }
+
+            // 按 pending 状态挂/摘抓取
+            let should_grab = crate::pending::has_active();
+            if should_grab && !grabbed {
+                grab_combos(&conn, root, v_kc);
+                grabbed = true;
+                log::info!("[HOOK] 待注入密码就绪，抓取 Ctrl+V");
+            } else if !should_grab && grabbed {
+                ungrab_combos(&conn, root, v_kc);
+                grabbed = false;
+                log::info!("[HOOK] 待注入密码已消耗/作废，放行 Ctrl+V");
+            }
+
+            // 剪贴板哨兵（~1s 一轮，对齐 Windows 监视线程节奏）
+            sentinel_ticks += 1;
+            if sentinel_ticks >= 100 {
+                sentinel_ticks = 0;
+                if clipboard_changed(&conn) {
+                    log::info!("[HOOK] 剪贴板出现新内容，销毁粘贴状态");
+                    cancel_async("clipboard-changed", false);
+                }
+            }
+
+            // 一次性钩子语义：粘贴状态持续 2s 缺失即自动卸载（对齐 Windows）
+            if has_paste_state() {
+                idle_ticks = 0;
+            } else {
+                idle_ticks += 1;
+                if idle_ticks >= 200 {
+                    log::info!("[HOOK] X11 粘贴状态结束，自动卸载抓取");
+                    break;
+                }
+            }
+        }
+
+        if grabbed {
+            ungrab_combos(&conn, root, v_kc);
+        }
+        IS_ACTIVE.store(false, Ordering::SeqCst);
+        log::info!("[HOOK] X11 Ctrl+V 抓取已卸载");
+    }
+
+    /// Ctrl+V 触发处理（仅在有待注入密码时会被调用——抓取跟随 pending）
+    ///
+    /// 抓取是消费型的，「不该拦」的按键必须还回去：用 XAllowEvents(ReplayKeyboard)
+    /// 把触发按键原样回放给焦点窗口（X11 为被动抓取设计的原语，物理修饰键状态
+    /// 天然正确）。注意 ReplayKeyboard 必须在隐式抓取存续期内（按键松开前）发出，
+    /// 所以事件轮询间隔不能太长。
+    /// 三种情况：
+    /// 1. 无待注入密码（pending 刚被消耗/作废）→ 回放，把粘贴还给应用
+    /// 2. 剪贴板已换新内容 → 异步销毁会话 + 回放（对齐 Windows「放行做普通粘贴」）
+    /// 3. 正常 → 解开抓取、注入（注入后由循环按 pending 决定是否重新抓取）
+    fn handle_ctrl_v(conn: &impl Connection, root: u32, v_kc: u8, grabbed: &mut bool) {
+        log::info!("[HOOK] X11 检测到 Ctrl+V");
+        let active = crate::x11::get_cardinal(conn, root, "_NET_ACTIVE_WINDOW").unwrap_or(0);
+        log::info!("[HOOK] 当前前台窗口={}", active);
+
+        if crate::pending::get_active().is_none() {
+            log::info!("[HOOK] 不拦截：无待粘贴密码，回放 Ctrl+V");
+            replay_key(conn);
+            return;
+        }
+
+        if clipboard_changed(conn) {
+            log::info!("[HOOK] 剪贴板已换新内容，销毁粘贴状态并回放本次 Ctrl+V");
+            cancel_async("clipboard-changed", false);
+            replay_key(conn);
+            return;
+        }
+
+        log::info!("[HOOK] 拦截 Ctrl+V，触发注入");
+        ungrab_combos(conn, root, v_kc);
+        *grabbed = false;
+        crate::inject::trigger_inject();
+    }
+
+    /// 回放触发按键给焦点窗口（XAllowEvents(ReplayKeyboard)）
+    ///
+    /// 必须在隐式抓取存续期内调用（按键松开前）；失败记日志——
+    /// 那次按键会被吞掉，但下一次 Ctrl+V 恢复正常。
+    fn replay_key(conn: &impl Connection) {
+        let result = conn
+            .allow_events(Allow::REPLAY_KEYBOARD, 0u32)
+            .map_err(|e| e.to_string())
+            .and_then(|cookie| cookie.check().map_err(|e| e.to_string()));
+        match result {
+            Ok(()) => log::info!("[HOOK] Ctrl+V 已回放给焦点窗口"),
+            Err(e) => log::warn!("[HOOK] 回放 Ctrl+V 失败（按键可能已松开）: {e}"),
+        }
+    }
+
+    /// 激活 Ctrl+V 抓取（一次性，对齐 Windows 版 activate 契约）
+    ///
+    /// # Arguments
+    /// * `app` - 应用句柄（销毁粘贴状态时要用）
+    pub fn activate(app: tauri::AppHandle) {
+        {
+            let mut guard = HOOK_APP.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(app);
+        }
+
+        // 哨兵基线对齐到「此刻」（对齐 Windows：自己刚写完剪贴板/刚登记 pending）
+        rebase_clipboard_sentinel();
+
+        // Wayland 无全局输入接口，不抓取（剪贴板粘贴体验不受影响）
+        if !crate::x11::is_x11_session() {
+            log::warn!("非 X11 会话（Wayland），不支持 Ctrl+V 触发注入，本次仅剪贴板粘贴");
+            return;
+        }
+
+        let _guard = lock_activate();
+        // 若上一个抓取线程还在清理，等它退出，避免新旧交叠
+        for _ in 0..20 {
+            if !IS_ACTIVE.load(Ordering::SeqCst) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if IS_ACTIVE.load(Ordering::SeqCst) {
+            log::warn!("抓取已激活，忽略重复激活");
+            return;
+        }
+        IS_ACTIVE.store(true, Ordering::SeqCst);
+        STOP.store(false, Ordering::SeqCst);
+        std::thread::spawn(worker);
+    }
+
+    /// 反激活：置停止信号，抓取线程自行清理退出（最多一个轮询间隔）
+    pub fn deactivate() {
+        if !IS_ACTIVE.load(Ordering::SeqCst) {
+            return;
+        }
+        STOP.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 非 Windows 且非 Linux 平台（macOS 等）桩：不支持钩子
+#[cfg(not(any(windows, target_os = "linux")))]
 mod non_windows {
-    /// 非 Windows 平台：不支持钩子
+    /// 该平台：不支持钩子
     pub fn activate(_app: tauri::AppHandle) {
-        log::warn!("非 Windows 平台不支持 Ctrl+V 钩子");
+        log::warn!("该平台不支持 Ctrl+V 钩子");
     }
 
     pub fn deactivate() {
         // 无操作
     }
 
-    /// 非 Windows 平台无剪贴板序号，哨兵空操作
+    /// 该平台无剪贴板序号，哨兵空操作
     pub fn rebase_clipboard_sentinel() {
         // 无操作
     }
@@ -376,5 +680,8 @@ mod non_windows {
 #[cfg(windows)]
 pub use win_impl::*;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub use x11_impl::*;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub use non_windows::*;

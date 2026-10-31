@@ -32,6 +32,10 @@ pub mod hotkey;
 /// 密码注入模块
 pub mod inject;
 
+/// X11 平台工具（仅 Linux）：注入链路的会话判定 / EWMH 归因 / 键盘映射助手
+#[cfg(target_os = "linux")]
+pub mod x11;
+
 /// 审计模块
 pub mod audit;
 
@@ -86,10 +90,16 @@ fn show_fatal_error(message: &str) {
     }
 }
 
-/// 显示致命错误（非 Windows 平台退化为 stderr）
+/// 显示致命错误（非 Windows 平台：rfd 原生错误对话框，Linux GTK3 / macOS NSAlert）
 #[cfg(not(target_os = "windows"))]
 fn show_fatal_error(message: &str) {
     eprintln!("MoyuPasswd: {message}");
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("MoyuPasswd")
+        .set_description(message)
+        .set_buttons(rfd::MessageButtons::Ok)
+        .show();
 }
 
 /// 运行 Tauri 应用
