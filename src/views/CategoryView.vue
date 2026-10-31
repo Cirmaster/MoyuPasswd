@@ -19,6 +19,7 @@ import { storeToRefs } from 'pinia'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Card, CardContent } from '@/components/ui/card'
 import {
   Dialog,
@@ -190,6 +191,15 @@ const parentOptions = computed(() => {
     (node) => node.id !== selfId && !excluded.has(node.id),
   )
 })
+
+/** 父分类下拉选项（Select 组件格式；含「无（顶级分类）」空值项，按 depth 前缀缩进） */
+const parentSelectOptions = computed(() => [
+  { value: '', label: '无（顶级分类）' },
+  ...parentOptions.value.map((node) => ({
+    value: node.id,
+    label: `${'— '.repeat(node.depth)}${node.name}`,
+  })),
+])
 
 /**
  * 打开添加分类弹窗
@@ -630,20 +640,11 @@ const handleDeleteTag = async (name: string) => {
           </div>
           <div class="grid gap-2">
             <Label for="category-parent">父分类</Label>
-            <select
+            <Select
               id="category-parent"
               v-model="parentId"
-              class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            >
-              <option value="">无（顶级分类）</option>
-              <option
-                v-for="node in parentOptions"
-                :key="node.id"
-                :value="node.id"
-              >
-                {{ '— '.repeat(node.depth) }}{{ node.name }}
-              </option>
-            </select>
+              :options="parentSelectOptions"
+            />
             <p v-if="editingCategory && descendantIds.size > 0" class="text-xs text-muted-foreground">
               已自动排除该分类自身及其子分类
             </p>

@@ -224,20 +224,24 @@ mod win_impl {
 
 #[cfg(not(windows))]
 mod non_windows {
-    use super::*;
-    
+    /// 目标进程信息（非 Windows 桩）
+    ///
+    /// 字段与 `win_impl::TargetProcess` 对齐，保证共用的 `trigger_inject`
+    /// 在任意平台都能编译；`hwnd` 仅为占位，不承载真实窗口句柄。
     pub struct TargetProcess {
         pub pid: u32,
         pub name: String,
         pub path: String,
+        pub hwnd: u32,
     }
-    
+
     pub fn get_target_process() -> Option<TargetProcess> {
         log::warn!("非 Windows 平台进程归因待实现");
         None
     }
-    
-    pub fn inject_text(_text: &str) -> bool {
+
+    /// 注入文本（非 Windows 桩：签名与 `win_impl::inject_text` 对齐，始终失败）
+    pub fn inject_text(_text: &str, _target_hwnd: u32, _target_pid: u32) -> bool {
         log::error!("非 Windows 平台注入待实现");
         false
     }

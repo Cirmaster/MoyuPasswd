@@ -16,6 +16,7 @@ import { storeToRefs } from 'pinia'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -71,6 +72,14 @@ const categoryOptions = computed(() => {
     .filter((c) => c.id !== 'all' && c.id !== 'favorite')
     .map((c) => ({ id: c.id, name: c.name, depth: 0 }))
 })
+
+/** 分类下拉选项（Select 组件格式，按 depth 前缀缩进展示层级） */
+const categorySelectOptions = computed(() =>
+  categoryOptions.value.map((opt) => ({
+    value: opt.id,
+    label: `${'— '.repeat(opt.depth)}${opt.name}`,
+  })),
+)
 
 /** 表单数据 */
 const form = ref({
@@ -208,20 +217,11 @@ const handleOpenChange = (open: boolean) => {
             </div>
             <div class="grid gap-2">
               <Label for="quick-category">分类</Label>
-              <select
+              <Select
                 id="quick-category"
                 v-model="form.category"
-                class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-              >
-                <!-- 分类树按层级缩进（depth 前缀），层级不限 -->
-                <option
-                  v-for="opt in categoryOptions"
-                  :key="opt.id"
-                  :value="opt.id"
-                >
-                  {{ '— '.repeat(opt.depth) }}{{ opt.name }}
-                </option>
-              </select>
+                :options="categorySelectOptions"
+              />
             </div>
           </div>
 

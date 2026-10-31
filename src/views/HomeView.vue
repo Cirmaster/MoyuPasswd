@@ -30,6 +30,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { Select } from '@/components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -409,6 +410,15 @@ const categoryDialogName = ref('')
 /** 新增时的父分类（空串表示顶级分类） */
 const categoryDialogParentId = ref('')
 
+/** 父分类下拉选项（含「无（顶级分类）」空值项；层级按 depth 前缀缩进） */
+const categoryParentOptions = computed(() => [
+  { value: '', label: '无（顶级分类）' },
+  ...categoryTree.value.map((node) => ({
+    value: node.id,
+    label: `${'— '.repeat(node.depth)}${node.name}`,
+  })),
+])
+
 /** 正在重命名的分类 ID（新增模式为 null） */
 const categoryEditingId = ref<string | null>(null)
 
@@ -575,10 +585,11 @@ const selectSmartView = (id: 'all' | 'favorite' | 'recent') => {
 }
 
 /** 排序方式下拉变更（切换字段时由 Store 采用该字段的默认方向，方向仍可再用右侧箭头按钮调整） */
-const handleSortKeyChange = (event: Event) => {
-  const key = (event.target as HTMLSelectElement).value as SortKey
+const handleSortKeyChange = (value: string | number | undefined) => {
+  if (value === undefined) return
+  const key = value as SortKey
   if (!SORT_OPTIONS.some((option) => option.value === key)) return
-  // 仅当用户切到不同字段时 change 才会触发，此时不带 order：新字段默认 title 升序、其余降序
+  // 仅当用户切到不同字段时才会触发，此时不带 order：新字段默认 title 升序、其余降序
   setSort(key)
 }
 
@@ -588,8 +599,9 @@ const toggleSortOrder = () => {
 }
 
 /** 每页条数变更（Store 内部会重置到第 1 页） */
-const handlePageSizeChange = (event: Event) => {
-  const size = Number((event.target as HTMLSelectElement).value)
+const handlePageSizeChange = (value: string | number | undefined) => {
+  if (value === undefined) return
+  const size = Number(value)
   if (!Number.isFinite(size)) return
   setPageSize(size)
 }
@@ -1073,20 +1085,13 @@ onMounted(async () => {
             </div>
 
             <!-- 排序方式：更新时间 / 创建时间 / 名称 / 最近使用 / 使用频率 -->
-            <select
-              :value="sortBy"
-              class="h-9 shrink-0 rounded-md border border-input bg-card px-2 text-sm outline-none focus-visible:ring-ring/50 focus-visible:ring-3"
+            <Select
+              :model-value="sortBy"
+              :options="SORT_OPTIONS"
+              class="h-9 w-36 shrink-0 px-2"
               title="排序方式"
-              @change="handleSortKeyChange"
-            >
-              <option
-                v-for="option in SORT_OPTIONS"
-                :key="option.value"
-                :value="option.value"
-              >
-                {{ option.label }}
-              </option>
-            </select>
+              @update:model-value="handleSortKeyChange"
+            />
 
             <!-- 升降序切换 -->
             <Button
@@ -1316,19 +1321,12 @@ onMounted(async () => {
           <div v-if="totalFiltered > 0" class="flex items-center gap-3">
             <label class="flex items-center gap-1.5 text-muted-foreground">
               每页
-              <select
-                :value="pageSize"
-                class="h-8 rounded-md border border-input bg-card px-1.5 text-sm outline-none focus-visible:ring-ring/50 focus-visible:ring-3"
-                @change="handlePageSizeChange"
-              >
-                <option
-                  v-for="size in PAGE_SIZE_OPTIONS"
-                  :key="size"
-                  :value="size"
-                >
-                  {{ size }}
-                </option>
-              </select>
+              <Select
+                :model-value="pageSize"
+                :options="PAGE_SIZE_OPTIONS.map((size) => ({ value: Number(size), label: String(size) }))"
+                class="h-8 w-24 px-2"
+                @update:model-value="handlePageSizeChange"
+              />
               条
             </label>
 
@@ -1402,20 +1400,11 @@ onMounted(async () => {
           </div>
           <div v-if="categoryDialogMode === 'add'" class="grid gap-2">
             <Label for="home-category-parent">父分类</Label>
-            <select
+            <Select
               id="home-category-parent"
               v-model="categoryDialogParentId"
-              class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-            >
-              <option value="">无（顶级分类）</option>
-              <option
-                v-for="node in categoryTree"
-                :key="node.id"
-                :value="node.id"
-              >
-                {{ '— '.repeat(node.depth) }}{{ node.name }}
-              </option>
-            </select>
+              :options="categoryParentOptions"
+            />
           </div>
         </div>
         <DialogFooter>

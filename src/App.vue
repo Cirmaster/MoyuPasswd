@@ -22,6 +22,7 @@ import { useAutoLock } from '@/composables/useAutoLock'
 import { startWebviewHeartbeat } from '@/composables/useWebviewHeartbeat'
 import { usePasswordStore } from '@/stores/password'
 import { disableContextMenu } from '@/lib/windowSetup'
+import WindowResizeHandles from '@/components/WindowResizeHandles.vue'
 
 /** 主题管理 */
 const { initTheme } = useTheme()
@@ -87,4 +88,6 @@ onUnmounted(() => {
 
 <template>
   <RouterView />
+  <!-- 无边框窗口的边缘缩放热区（Linux/X11 下无系统缩放边缘，需要自绘） -->
+  <WindowResizeHandles />
 </template>

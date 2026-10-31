@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { IconArrowLeft, IconCheckCircle, IconLoader, IconPencil } from '@/components/icons'
 import { Label } from '@/components/ui/label'
+import { Select } from '@/components/ui/select'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTheme } from '@/composables/useTheme'
@@ -872,13 +873,13 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
               <!-- 语言 -->
               <div class="space-y-2">
                 <Label>语言</Label>
-                <select
+                <Select
                   v-model="settings.language"
-                  class="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm"
-                >
-                  <option value="zh-CN">简体中文</option>
-                  <option value="en-US">English</option>
-                </select>
+                  :options="[
+                    { value: 'zh-CN', label: '简体中文' },
+                    { value: 'en-US', label: 'English' },
+                  ]"
+                />
               </div>
 
               <!-- 开机自启 -->
@@ -1363,14 +1364,15 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                 </div>
                 <div class="flex items-center gap-2">
                   <!-- id 冲突策略：默认跳过已存在条目，绝不静默覆盖 -->
-                  <select
+                  <Select
                     v-model="importConflictPolicy"
-                    class="text-sm border rounded-md px-2 py-1.5 bg-card"
+                    :options="[
+                      { value: 'skip', label: '跳过已存在' },
+                      { value: 'replace', label: '覆盖已存在' },
+                    ]"
+                    class="h-8 w-32 px-2"
                     title="与现有条目 id 冲突时的处理方式"
-                  >
-                    <option value="skip">跳过已存在</option>
-                    <option value="replace">覆盖已存在</option>
-                  </select>
+                  />
                   <Button variant="outline" @click="handleImport">导入</Button>
                 </div>
               </div>

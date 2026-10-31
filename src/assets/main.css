@@ -124,6 +124,24 @@
     overscroll-behavior: none;
   }
 
+  /* 原生控件（select 弹出列表/滚动条/表单控件）的明暗由 UA 按 color-scheme
+   * 渲染，不跟 CSS 主题走。不声明的话 Linux/WebKitGTK 下 <option> 弹层
+   * 永远是系统浅色底，深色主题里会弹出刺眼的白色菜单 */
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  /* 部分 WebKitGTK 版本对 color-scheme 的弹层支持不全，再显式给 option
+   * 上主题色兜底（option 是 DOM 子元素，能继承主题变量） */
+  select option {
+    background-color: var(--card);
+    color: var(--card-foreground);
+  }
+
   /* ==================== 滚动条美化 ====================
    * 细圆角滚动条，颜色取主题变量，亮/暗模式自动跟随切换。
    * Firefox 用 scrollbar-width/scrollbar-color，Chromium(WebView2) 用伪元素。 */
