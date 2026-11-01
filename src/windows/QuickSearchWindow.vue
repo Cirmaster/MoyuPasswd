@@ -377,6 +377,7 @@ const copyAndClose = async (text: string): Promise<boolean> => {
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
 
     // 启动全局倒计时窗口（显示在屏幕中央），使用设置中的清除时间
+    //（x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标；见 scale.rs）
     const x = window.screen.width / 2
     const y = window.screen.height / 2
     await invoke('show_countdown', { seconds: clipboardClearTime.value, x, y })
@@ -421,6 +422,7 @@ const copyPasswordByIdAndClose = async (id: string) => {
     toast.value = { show: true, type: 'success', message: '密码就绪，倒计时内按 Ctrl+V 粘贴' }
 
     // 启动全局倒计时窗口
+    //（x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标；见 scale.rs）
     const x = window.screen.width / 2
     const y = window.screen.height / 2
     await invoke('show_countdown', { seconds: clearTime, x, y })

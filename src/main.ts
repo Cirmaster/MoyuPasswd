@@ -18,9 +18,13 @@
 // 导入全局样式（包含 Tailwind CSS 和主题变量）
 import './assets/main.css'
 import { disableContextMenu } from './lib/windowSetup'
+import { syncRenderScale } from './lib/renderScale'
 
 // 禁用浏览器默认右键菜单
 disableContextMenu()
+
+// 渲染缩放自检上报（窗口缩放模型；见 src-tauri/src/scale.rs）
+syncRenderScale()
 
 // Vue 核心
 import { createApp } from 'vue'

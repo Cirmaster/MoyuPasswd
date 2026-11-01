@@ -23,20 +23,20 @@ let timer: ReturnType<typeof setInterval> | null = null
 /** 提示条自动收起计时器 */
 let hintTimer: ReturnType<typeof setTimeout> | null = null
 
-/** 圆点原始尺寸（提示条收起时恢复） */
-const DOT_SIZE = { width: 16, height: 16 }
-
-/** 提示条尺寸 */
-const HINT_SIZE = { width: 200, height: 24 }
+// 圆点/提示条设计尺寸常量统一在 src-tauri/src/window_sizes.rs 管理
+//（COUNTDOWN_DOT_* / COUNTDOWN_HINT_*），经 scale.rs 换算成物理尺寸应用；
+// 前端不传裸数值
 
 /**
- * 调整窗口尺寸（圆点 ⇄ 提示条）
+ * 切换气泡形态并调整窗口尺寸（圆点 ⇄ 提示条）
+ *
+ * 设计尺寸由后端 window_sizes.rs 常量统一管理，按渲染缩放换算成
+ * 物理尺寸应用（见 scale.rs 缩放模型）；前端不传裸数值。
  */
-const resizeWindow = async (size: { width: number; height: number }) => {
+const setCountdownExpanded = async (expanded: boolean) => {
   try {
-    const { getCurrentWindow } = await import('@tauri-apps/api/window')
-    const { LogicalSize } = await import('@tauri-apps/api/dpi')
-    await getCurrentWindow().setSize(new LogicalSize(size.width, size.height))
+    const { invoke } = await import('@/lib/api')
+    await invoke('set_countdown_expanded', { expanded })
   } catch (e) {
     console.warn('调整窗口尺寸失败:', e)
   }
@@ -47,7 +47,7 @@ const resizeWindow = async (size: { width: number; height: number }) => {
  */
 const showConfirmHint = async () => {
   confirmHint.value = true
-  await resizeWindow(HINT_SIZE)
+  await setCountdownExpanded(true)
 
   if (hintTimer) clearTimeout(hintTimer)
   hintTimer = setTimeout(() => {
@@ -65,7 +65,7 @@ const hideConfirmHint = async () => {
   }
   if (confirmHint.value) {
     confirmHint.value = false
-    await resizeWindow(DOT_SIZE)
+    await setCountdownExpanded(false)
   }
 }
 
@@ -83,7 +83,7 @@ const startCountdown = (seconds: number = 10) => {
   // 每次显示强制复位为圆点尺寸：治愈任何卡住的窗口尺寸
   // （提示条扩窗后复位失败等场景；圆点内容钉左上角，尺寸对了就贴着光标）
   hideConfirmHint()
-  resizeWindow(DOT_SIZE)
+  setCountdownExpanded(false)
 
   remaining.value = seconds
 
@@ -263,6 +263,7 @@ html, body {
 }
 
 .countdown-circle {
+  /* 尺寸与 src-tauri/src/window_sizes.rs 的 COUNTDOWN_DOT_* 对应，两处需一致 */
   width: 16px;
   height: 16px;
   border-radius: 50%;
@@ -287,6 +288,7 @@ html, body {
 }
 
 .confirm-hint {
+  /* 高度与 src-tauri/src/window_sizes.rs 的 COUNTDOWN_HINT_HEIGHT 对应，两处需一致 */
   height: 24px;
   padding: 0 10px;
   border-radius: 12px;

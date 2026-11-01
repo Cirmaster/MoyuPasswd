@@ -11,6 +11,7 @@
 //! - `get_countdown_seconds`: 获取倒计时秒数
 
 use crate::response::{respond, ApiResult};
+use crate::window_sizes as ws;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -152,11 +153,13 @@ pub async fn start_follow_cursor(app: tauri::AppHandle) -> ApiResult<()> {
 
             while FOLLOW_CURSOR_RUNNING.load(Ordering::SeqCst) {
                 if let Some((x, y)) = get_cursor_position() {
-                    // 更新窗口位置（鼠标右下角偏移 15px）
+                    // 更新窗口位置（鼠标右下角偏移 CURSOR_FOLLOW_OFFSET 设计 px）。
+                    // 光标坐标是物理像素，偏移是设计 px，经 scale 换算后相加（见 scale.rs）
                     if let Some(window) = app.get_webview_window("countdown") {
+                        let off = crate::scale::design_offset(&window, ws::CURSOR_FOLLOW_OFFSET);
                         let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                            x: x + 15,
-                            y: y + 15,
+                            x: x + off,
+                            y: y + off,
                         }));
                     }
                 }
@@ -225,8 +228,9 @@ pub async fn get_countdown_seconds() -> ApiResult<u32> {
 /// # Arguments
 ///
 /// * `seconds` - 倒计时秒数
-/// * `x` - 鼠标 X 坐标（屏幕坐标）
-/// * `y` - 鼠标 Y 坐标（屏幕坐标）
+/// * `x` - 锚点 X 坐标（**CSS 逻辑屏幕坐标**，即前端 `event.screenX`；
+///   后端乘渲染缩放换算为物理坐标，见 scale.rs 缩放模型）
+/// * `y` - 锚点 Y 坐标（同上，`event.screenY`）
 /// * `app` - Tauri 应用句柄
 ///
 /// # 前端调用
@@ -242,39 +246,57 @@ pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle)
         // 存储倒计时秒数
         COUNTDOWN_SECONDS.store(seconds, Ordering::SeqCst);
 
-        // 计算窗口位置（鼠标右下角偏移 15px）
-        let window_x = x + 15.0;
-        let window_y = y + 15.0;
+        // 计算窗口位置（锚点右下角偏移 CURSOR_FOLLOW_OFFSET 设计 px）。
+        // x/y 是 CSS 逻辑坐标：set_position 路径换算为物理坐标，
+        // builder 路径换算为 tao 逻辑坐标（两条路径换算后等价，见 scale.rs）
+        let (ax, ay) = (x + ws::CURSOR_FOLLOW_OFFSET, y + ws::CURSOR_FOLLOW_OFFSET);
+        let anchor = crate::scale::design_to_physical_pos(&app, ax, ay);
 
         // 检查窗口是否已存在
         if let Some(window) = app.get_webview_window("countdown") {
             log::info!("Countdown window exists, updating position");
             // 窗口已存在，更新位置并显示
-            let _ = window.set_position(tauri::Position::Physical(tauri::PhysicalPosition {
-                x: window_x as i32,
-                y: window_y as i32,
-            }));
+            let _ = window.set_position(tauri::Position::Physical(anchor));
             // 发送重置事件
             let _ = window.emit("reset-countdown", serde_json::json!({ "seconds": seconds }));
             // 显示但不抢焦点
             show_without_activate(&window);
         } else {
             log::info!("Creating new countdown window");
-            // 创建新窗口 - 透明无边框，始终置顶，无阴影
+            // 设计尺寸登记（渲染缩放变化时按此重排；见 scale.rs）
+            crate::scale::register_design(
+                "countdown",
+                (ws::COUNTDOWN_DOT_WIDTH, ws::COUNTDOWN_DOT_HEIGHT),
+                Some((ws::COUNTDOWN_DOT_WIDTH, ws::COUNTDOWN_DOT_HEIGHT)),
+                Some((ws::COUNTDOWN_MAX_WIDTH, ws::COUNTDOWN_MAX_HEIGHT)),
+            );
+            // 创建新窗口 - 透明无边框，始终置顶，无阴影。
+            // 尺寸/位置经 scale 换算为 tao 逻辑值（tao 建窗再乘几何缩放后
+            // = 设计尺寸 × 渲染缩放，维持「CSS 视口 ≡ 设计尺寸」；见 scale.rs）
+            let (dw, dh) =
+                crate::scale::tao_logical_size(ws::COUNTDOWN_DOT_WIDTH, ws::COUNTDOWN_DOT_HEIGHT);
+            let (mx, my) = crate::scale::tao_logical_size(
+                ws::COUNTDOWN_MAX_WIDTH,
+                ws::COUNTDOWN_MAX_HEIGHT,
+            );
+            let (px, py) = crate::scale::tao_logical_pos(ax, ay);
             let _window = tauri::WebviewWindowBuilder::new(
                 &app,
                 "countdown",
                 tauri::WebviewUrl::App("countdown.html".into())
             )
             .title("")
-            .inner_size(16.0, 16.0)
-            .min_inner_size(16.0, 16.0)
+            .inner_size(dw, dh)
+            .min_inner_size(dw, dh)
             // 上限放宽：终端二次确认提示时前端会把小圆点扩成提示条（见 CountdownWindow.vue）
-            .max_inner_size(320.0, 48.0)
-            .resizable(false)
+            .max_inner_size(mx, my)
+            // resizable 必须为 true：GTK3 对 resizable(false) 窗口的初始尺寸与
+            // 程序化 resize 都不可靠（实测高度被冻结在 200px）。气泡无边框无缩放
+            // 控件，用户无从手动缩放，尺寸约束由上面的 min/max 提示锁定
+            .resizable(true)
             .decorations(false)
             .always_on_top(true)
-            .position(window_x, window_y)
+            .position(px, py)
             .transparent(true)
             .skip_taskbar(true)
             .shadow(false)

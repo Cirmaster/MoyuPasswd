@@ -63,6 +63,12 @@ pub mod browser_keys;
 /// 统一响应格式模块（所有命令返回 { code, message, data } 包裹）
 pub mod response;
 
+/// 窗口「设计尺寸」常量（单一来源；见 window_sizes.rs 的维护约定）
+pub mod window_sizes;
+
+/// 窗口缩放换算模块（设计尺寸 ↔ 物理尺寸唯一入口；见 scale.rs 的缩放模型）
+pub mod scale;
+
 /// Tauri 命令模块
 pub mod commands;
 
@@ -162,6 +168,10 @@ pub fn run() {
             for window in app.webview_windows().into_values() {
                 browser_keys::disable_browser_keys(&window);
             }
+
+            // 窗口缩放换算：登记设计尺寸并按渲染缩放应用窗口物理尺寸。
+            // 必须在主窗口 show() 之前完成——用户看不到尺寸跳动（见 scale.rs）
+            scale::init(app.handle());
 
             // 初始化审计模块
             {
@@ -372,6 +382,9 @@ pub fn run() {
             clipboard::copy_text_to_clipboard,
             // 窗口管理命令
             commands::minimize_to_tray,
+            // 窗口缩放换算命令（设计尺寸模型；见 scale.rs）
+            scale::sync_render_scale,
+            scale::set_countdown_expanded,
             // webview 心跳（watchdog 自愈链路的输入端）
             commands::webview_heartbeat,
             // 空闲检测命令
@@ -420,6 +433,11 @@ pub fn run() {
                             let _ = window.hide();
                         }
                     }
+                }
+                tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                    // 几何缩放变化（拖到另一台显示器 / 改系统缩放）：按登记的
+                    // 设计尺寸重排窗口，维持「CSS 视口 ≡ 设计尺寸」不变量（见 scale.rs）
+                    scale::apply_all(window.app_handle());
                 }
                 _ => {}
             }

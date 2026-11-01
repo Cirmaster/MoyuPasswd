@@ -215,14 +215,43 @@ fn show_quick_search(app: &tauri::AppHandle) {
         let _ = window.set_always_on_top(true);
         let _ = window.emit("window-shown", ());
     } else {
+        // 设计尺寸登记（渲染缩放变化时按此重排；见 scale.rs）。
+        // min = max = 设计尺寸：锁定窗口大小（替代 resizable(false)，
+        // GTK3 对 resizable(false) 窗口的初始尺寸/程序化 resize 不可靠，
+        // 见 countdown.rs 同类注释）
+        crate::scale::register_design(
+            "quick-search",
+            (
+                crate::window_sizes::QUICK_SEARCH_WIDTH,
+                crate::window_sizes::QUICK_SEARCH_HEIGHT,
+            ),
+            Some((
+                crate::window_sizes::QUICK_SEARCH_WIDTH,
+                crate::window_sizes::QUICK_SEARCH_HEIGHT,
+            )),
+            Some((
+                crate::window_sizes::QUICK_SEARCH_WIDTH,
+                crate::window_sizes::QUICK_SEARCH_HEIGHT,
+            )),
+        );
+        // 设计尺寸 → tao 逻辑尺寸：tao 建窗再乘几何缩放 = 设计 × 渲染缩放（见 scale.rs）
+        let (qw, qh) = crate::scale::tao_logical_size(
+            crate::window_sizes::QUICK_SEARCH_WIDTH,
+            crate::window_sizes::QUICK_SEARCH_HEIGHT,
+        );
         match tauri::WebviewWindowBuilder::new(
             app,
             "quick-search",
             tauri::WebviewUrl::App("quick-search.html".into()),
         )
         .title("快速搜索")
-        .inner_size(600.0, 450.0)
-        .resizable(false)
+        .inner_size(qw, qh)
+        // min = max = 设计尺寸：锁定窗口大小（与 register_design 的登记一致）
+        .min_inner_size(qw, qh)
+        .max_inner_size(qw, qh)
+        // resizable 必须为 true + min/max 提示锁定尺寸（GTK3 对 resizable(false)
+        // 窗口的初始尺寸不可靠；见 register_design 注释）
+        .resizable(true)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)

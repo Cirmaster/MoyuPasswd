@@ -80,3 +80,7 @@ rfd = { version = "0.15", default-features = false, features = ["gtk3"] }
 #  xtest 扩展是注入的合成按键通道，feature 门控需显式开启）
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", features = ["xtest"] }
+
+# GTK3 设置读取（scale.rs 文字 DPI 缩放推断：gtk-xft-dpi；与 tauri/tao/rfd 内部
+# 用的 gtk 0.18 同一 crate 实例，进程内本就链接 GTK3，不引入新原生依赖）
+gtk = "0.18"

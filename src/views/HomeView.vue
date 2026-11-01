@@ -691,6 +691,7 @@ const copyToClipboard = async (text: string, event?: MouseEvent) => {
     showToast('success', '已复制')
 
     // 获取鼠标位置并显示全局倒计时窗口
+    //（x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标；见 scale.rs）
     const x = event?.screenX ?? window.screen.width / 2
     const y = event?.screenY ?? window.screen.height / 2
     await invoke('show_countdown', { seconds: clipboardClearTime.value, x, y })
@@ -711,6 +712,7 @@ const copyToClipboard = async (text: string, event?: MouseEvent) => {
  */
 const copyPasswordViaBackend = async (id: string, event?: MouseEvent) => {
   try {
+    // x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标（见 scale.rs）
     const x = event?.screenX ?? window.screen.width / 2
     const y = event?.screenY ?? window.screen.height / 2
     const clearTime = await invoke<number>('copy_password_to_clipboard', { id })
