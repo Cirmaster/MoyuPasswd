@@ -87,6 +87,15 @@ const toast = ref({
 })
 
 /**
+ * 密码交付方式（启动时查一次，见 onMounted）
+ *
+ * - `inject`：注入会话，点复制＝登记待粘贴，倒计时内按 Ctrl+V
+ * - `dnd`：Wayland，没有注入也没有剪贴板回退，点复制＝放进拖拽池
+ * - `none`：两者都不可用
+ */
+const delivery = ref<'inject' | 'dnd' | 'none'>('inject')
+
+/**
  * 独立小窗的搜索结果类型
  *
  * 对应后端 get_passwords 的返回结构，本次新增：
@@ -371,9 +380,25 @@ const handleUnlock = async () => {
  * @param text - 要复制的文本
  * @returns 是否复制成功（用于决定是否记录使用）
  */
-const copyAndClose = async (text: string): Promise<boolean> => {
+const copyAndClose = async (
+  text: string,
+  title?: string,
+  subtitle?: string,
+): Promise<boolean> => {
   try {
-    await invoke('copy_text_to_clipboard', { text, clearAfter: clipboardClearTime.value })
+    // title / subtitle 只影响浮窗里的展示；Wayland 下后端会把文本改放进浮窗
+    await invoke('copy_text_to_clipboard', {
+      text,
+      clearAfter: clipboardClearTime.value,
+      title,
+      subtitle,
+    })
+
+    // Wayland：后端改道进浮窗，没有剪贴板也就没有倒计时窗口
+    if (delivery.value === 'dnd') {
+      await getCurrentWindow().hide()
+      return true
+    }
     toast.value = { show: true, type: 'success', message: '已复制到剪贴板' }
 
     // 启动全局倒计时窗口（显示在屏幕中央），使用设置中的清除时间
@@ -405,27 +430,52 @@ const copyAndClose = async (text: string): Promise<boolean> => {
  * @param item - 结果条目
  */
 const copyUsernameByIdAndClose = async (item: QuickSearchResult) => {
-  const copied = await copyAndClose(item.username)
+  const copied = await copyAndClose(item.username, item.title, '用户名')
   if (copied) {
     void invoke('touch_password_usage', { id: item.id }).catch(() => {})
   }
 }
 
 /**
- * 登记待粘贴密码后关闭窗口（前端不接触明文，密码不进系统剪贴板）
- * 倒计时内在目标窗口按 Ctrl+V，由后端解密并注入
+ * 点「复制密码」：按交付方式分流，两条路都不让前端接触明文
+ *
+ * - **注入会话**（Windows / X11）：登记待粘贴密码后关窗，倒计时内按 Ctrl+V；
+ *   无注入能力的会话由后端回退「写剪贴板 + 自动清除」（mode="clipboard"）。
+ * - **Wayland（dnd）**：放进**拖拽池**后关窗，用户从池里拖到目标——
+ *   密码全程不进剪贴板，也不经过 webview。
  * @param id - 密码 ID
  */
 const copyPasswordByIdAndClose = async (id: string) => {
+  // Wayland：既不能注入、也不回退剪贴板，唯一通道是拖拽池。
+  // 点复制＝放进池子，然后收起本弹窗——池子是 overlay 层置顶的，
+  // 留着弹窗只会挡住用户要拖过去的目标窗口。
+  if (delivery.value === 'dnd') {
+    try {
+      await invoke('add_to_dnd_pool', { id })
+      await getCurrentWindow().hide()
+    } catch (e) {
+      // 失败就把窗口留着，让用户能看到原因并重试
+      toast.value = { show: true, type: 'error', message: String(e) }
+    }
+    return
+  }
+
   try {
-    const clearTime = await invoke<number>('copy_password_to_clipboard', { id })
-    toast.value = { show: true, type: 'success', message: '密码就绪，倒计时内按 Ctrl+V 粘贴' }
+    const { ttl, mode } = await invoke<{ ttl: number; mode: string }>(
+      'copy_password_to_clipboard',
+      { id },
+    )
+    toast.value = {
+      show: true,
+      type: 'success',
+      message: mode === 'clipboard' ? '已复制密码到剪贴板，倒计时后自动清除' : '密码就绪，倒计时内按 Ctrl+V 粘贴',
+    }
 
     // 启动全局倒计时窗口
     //（x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标；见 scale.rs）
     const x = window.screen.width / 2
     const y = window.screen.height / 2
-    await invoke('show_countdown', { seconds: clearTime, x, y })
+    await invoke('show_countdown', { seconds: ttl, x, y })
     await invoke('start_follow_cursor')
 
     // 延迟关闭窗口
@@ -482,8 +532,8 @@ const toggleDetail = async (item: { id: string }) => {
  * 复制单个字段值并关闭窗口（与复制用户名/密码行为一致）
  * @param text - 字段值文本
  */
-const copyFieldText = async (text: string) => {
-  await copyAndClose(text)
+const copyFieldText = async (text: string, label?: string) => {
+  await copyAndClose(text, '自定义字段', label)
 }
 
 /**
@@ -575,6 +625,15 @@ onMounted(async () => {
 
   // 实时检查解锁状态
   await checkUnlockStatus()
+
+  // 查一次交付方式：Wayland 下点复制要改成「放进拖拽池」（见 copyPasswordByIdAndClose）
+  try {
+    const caps = await invoke<{ delivery?: string }>('get_capabilities')
+    const mode = caps?.delivery
+    delivery.value = mode === 'dnd' || mode === 'none' ? mode : 'inject'
+  } catch (e) {
+    console.warn('读取交付能力失败，按注入方式处理:', e)
+  }
 
   // 监听锁定事件（来自主应用）
   await listen('app-locked', () => {
@@ -814,6 +873,7 @@ onMounted(async () => {
                 <!-- 复制密码（主操作档）：走 keycap 键帽令牌，各主题可给反差色（经典=同行动作色、暮光=点睛金），hover 用提亮表达 -->
                 <button
                   class="w-[76px] flex items-center justify-center text-xs font-medium transition bg-keycap text-keycap-foreground hover:brightness-125 active:brightness-110"
+                  :title="delivery === 'dnd' ? '复制密码，再从浮窗拖到目标输入框' : '复制密码'"
                   @click.stop="copyPasswordByIdAndClose(item.id)"
                 >
                   复制密码
@@ -846,7 +906,7 @@ onMounted(async () => {
                   <span
                     v-if="field.value"
                     class="shrink-0 px-1.5 py-0.5 rounded cursor-pointer transition-colors hover:bg-muted text-muted-foreground hover:text-foreground"
-                    @click.stop="copyFieldText(field.value)"
+                    @click.stop="copyFieldText(field.value, field.label)"
                   >
                     复制
                   </span>

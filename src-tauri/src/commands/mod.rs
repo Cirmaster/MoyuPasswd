@@ -19,6 +19,7 @@ pub mod backup;
 pub mod shortcuts;
 pub mod countdown;
 pub mod heartbeat;
+pub mod dnd;
 
 // 重新导出所有命令
 pub use auth::*;
@@ -30,3 +31,4 @@ pub use backup::*;
 pub use shortcuts::*;
 pub use countdown::*;
 pub use heartbeat::*;
+pub use dnd::*;

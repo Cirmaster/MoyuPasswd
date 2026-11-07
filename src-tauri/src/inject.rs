@@ -734,7 +734,7 @@ fn get_app_handle() -> Option<tauri::AppHandle> {
 }
 
 /// zeroize 明文（安全清零）
-fn zeroize_plaintext(mut plaintext: String) {
+pub(crate) fn zeroize_plaintext(mut plaintext: String) {
     // 将字符串内容清零
     unsafe {
         let bytes = plaintext.as_bytes_mut();

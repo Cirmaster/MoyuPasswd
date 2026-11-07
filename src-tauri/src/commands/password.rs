@@ -558,6 +558,38 @@ pub(crate) fn decrypt_password(aes_key: &[u8; 32], encrypted: &str) -> Result<St
     String::from_utf8(decrypted).map_err(|e| e.to_string())
 }
 
+/// 构造解密闭包（延迟解密）
+///
+/// 注入（`pending`）与拖放（`dnd`）两条交付路径共用，避免两处各写一份。
+/// **不捕获密钥副本**：每次调用都从 `AppState` 现场取密钥，因此锁定之后任何迟到的
+/// 调用都会失败（fail closed），杜绝「锁定前武装、锁定后仍能取出明文」。
+///
+/// # Arguments
+/// * `app` - 应用句柄（闭包里用它取 `AppState`）
+/// * `encrypted` - 密文（格式 `nonce_hex:ciphertext_hex`）
+///
+/// # Returns
+/// 可直接存进 `pending` / `dnd` 的 `DecryptFn`
+pub(crate) fn build_decrypt_fn(
+    app: &tauri::AppHandle,
+    encrypted: String,
+) -> crate::pending::DecryptFn {
+    let app_handle = app.clone();
+    std::sync::Arc::new(move |_entry_id: &str| -> Result<String, String> {
+        use tauri::Manager;
+        let state = app_handle.state::<AppState>();
+        if !state.is_unlocked() {
+            log::warn!("[DECRYPT] 应用已锁定，拒绝解密");
+            return Err("应用已锁定，无法解密".to_string());
+        }
+        let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
+        log::info!("[DECRYPT] 调用解密闭包，解密密文");
+        let plaintext = decrypt_password(&aes_key, &encrypted)?;
+        log::info!("[DECRYPT] 解密成功，长度={}", plaintext.len());
+        Ok(plaintext)
+    })
+}
+
 /// 根据密码 ID 解密密码（供 inject 模块调用）
 ///
 /// # Arguments
@@ -1928,6 +1960,16 @@ pub async fn get_password_stats(state: State<'_, AppState>) -> ApiResult<Passwor
 
     })}
 
+/// 复制密码的交付结果
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CopyPasswordResult {
+    /// 交付有效期（秒）：inject 模式 = pending TTL；clipboard 模式 = 剪贴板自动清除时间
+    pub ttl: u32,
+    /// 交付方式：`"inject"` = 倒计时内 Ctrl+V 注入（密码不进剪贴板）；
+    /// `"clipboard"` = 已写入剪贴板（倒计时后自动清除）
+    pub mode: String,
+}
+
 /// 解密密码并准备粘贴注入（延迟解密）
 ///
 /// 复制动作**不解密**，只登记待粘贴状态和解密闭包并激活 Ctrl+V 钩子。
@@ -1935,6 +1977,11 @@ pub async fn get_password_stats(state: State<'_, AppState>) -> ApiResult<Passwor
 /// 归因（识别目标进程）→ 调用闭包解密 → SendInput 注入 → 立即清零。
 /// 倒计时（TTL）内可多次 Ctrl+V 粘贴，每次都重新解密并立即清零；
 /// 密码不进系统剪贴板。
+///
+/// **交付方式分流**（[`crate::hotkey::injection_supported`]）：
+/// - Windows / Linux X11：`"inject"`，登记待粘贴 + Ctrl+V 注入（上述原语义）
+/// - Wayland 等无全局输入接口的会话：`"clipboard"`，立即解密写入剪贴板并
+///   安排自动清除——否则 pending 永远等不到 Ctrl+V，密码彻底交不出去
 ///
 /// # Arguments
 ///
@@ -1944,20 +1991,20 @@ pub async fn get_password_stats(state: State<'_, AppState>) -> ApiResult<Passwor
 ///
 /// # Returns
 ///
-/// 待粘贴有效期（秒）
+/// [`CopyPasswordResult`]（交付有效期秒数 + 交付方式，前端据此给出正确提示）
 ///
 /// # 前端调用
 ///
 /// ```typescript
-/// const clearTime = await invoke('copy_password_to_clipboard', { id: '123' });
+/// const { ttl, mode } = await invoke('copy_password_to_clipboard', { id: '123' });
 /// ```
 #[tauri::command]
 pub async fn copy_password_to_clipboard(
     id: String,
     state: State<'_, AppState>,
     app: tauri::AppHandle,
-) -> ApiResult<u32> {
-    respond(|| -> Result<u32, String> {
+) -> ApiResult<CopyPasswordResult> {
+    respond(|| -> Result<CopyPasswordResult, String> {
         log::info!("[CMD] copy_password_to_clipboard 被调用: id={}", id);
 
         // 检查是否已解锁
@@ -2008,33 +2055,33 @@ pub async fn copy_password_to_clipboard(
             clear_time.clamp(10, 300)
         };
 
-        log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s, ttl={}s", id, clear_time, pending_ttl);
-
         // 创建解密闭包：不捕获密钥副本，调用时从状态现场取密钥。
         // 锁定后任何迟到的调用都会失败（fail closed），杜绝锁定后仍可解密注入。
-        let encrypted_clone = encrypted.clone();
-        let app_handle = app.clone();
-        let decrypt_fn: crate::pending::DecryptFn = std::sync::Arc::new(move |_entry_id: &str| -> Result<String, String> {
-            use tauri::Manager;
-            let state = app_handle.state::<AppState>();
-            if !state.is_unlocked() {
-                log::warn!("[DECRYPT] 应用已锁定，拒绝解密");
-                return Err("应用已锁定，无法解密".to_string());
-            }
-            let aes_key = state.get_aes_key().ok_or("密钥不存在")?;
-            log::info!("[DECRYPT] 调用解密闭包，解密密文");
-            let plaintext = decrypt_password(&aes_key, &encrypted_clone)?;
-            log::info!("[DECRYPT] 解密成功，长度={}", plaintext.len());
-            Ok(plaintext)
-        });
+        let decrypt_fn = build_decrypt_fn(&app, encrypted);
 
+        // 交付方式分流：Windows / Linux X11 走 Ctrl+V 注入（密码不进剪贴板）。
+        //
+        // Wayland 下没有全局按键注入，**不再回退剪贴板**：那会把明文交给整个桌面
+        //（任何进程都能读，Klipper 还会落盘到 history2.lst），与本项目「密码不落剪贴板」
+        // 的立身之本直接冲突。改为明确报错，由前端引导用户走拖放交付（见 dnd.rs）。
+        if !crate::hotkey::injection_supported() {
+            log::warn!("[CMD] 无注入能力会话，拒绝 Ctrl+V 交付: id={}", id);
+            crate::pending::revoke("no-injection");
+            return Err(
+                "当前会话不支持自动粘贴，请改用拖放交付：把密码拖到目标输入框".to_string()
+            );
+        }
+
+        let ttl = pending_ttl;
+        let mode = "inject";
+        log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s, ttl={}s", id, clear_time, pending_ttl);
         // 登记待粘贴密码（带解密闭包）
         let seq = crate::pending::register_with_decrypt(&id, pending_ttl, decrypt_fn);
-
         // 激活 Ctrl+V 钩子（传入句柄，钩子检测到 Ctrl+C / Esc 时销毁粘贴状态）
-        crate::hotkey::activate(app);
+        crate::hotkey::activate(app.clone());
+        log::info!("[CMD] pending 登记完成: id={}, seq={}", id, seq);
 
-        // 成功登记待粘贴后顺带登记使用记录（注入成功/失败不影响登记结果，故失败只记日志）
+        // 成功交付后顺带登记使用记录（交付方式不影响登记结果，故失败只记日志）
         let now = chrono::Utc::now().timestamp_millis();
         if let Err(e) = conn.execute(
             "UPDATE passwords SET last_used_at = ?1, use_count = use_count + 1 WHERE id = ?2",
@@ -2043,9 +2090,12 @@ pub async fn copy_password_to_clipboard(
             log::warn!("[CMD] 登记使用记录失败: id={}, err={}", id, e);
         }
 
-        log::info!("[CMD] copy_password_to_clipboard 完成: id={}, seq={}, ttl={}s", id, seq, pending_ttl);
+        log::info!("[CMD] copy_password_to_clipboard 完成: id={}, mode={}, ttl={}s", id, mode, ttl);
 
-        Ok(pending_ttl)
+        Ok(CopyPasswordResult {
+            ttl,
+            mode: mode.to_string(),
+        })
 
     })}
 

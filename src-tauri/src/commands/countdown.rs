@@ -243,6 +243,19 @@ pub async fn show_countdown(seconds: u32, x: f64, y: f64, app: tauri::AppHandle)
     respond(|| -> Result<(), String> {
         log::info!("show_countdown called: seconds={}, x={}, y={}", seconds, x, y);
 
+        // Wayland：不显示这个窗口。
+        //
+        // 它是靠 `set_position` 定位的（锚在光标右下角），而 Wayland 不允许客户端
+        // 设置窗口位置，`set_position` 是空操作，窗口会落在合成器决定的默认位置
+        // —— 实测就是屏幕正中，很挡视线。光标跟随同样不可用（拿不到全局光标坐标，
+        // 见 start_follow_cursor）。与其弹一个钉在中间的窗，不如不弹。
+        //
+        // 剪贴板的自动清除仍在进行（由后端定时器负责），只是不再有可视倒计时。
+        if crate::x11::is_wayland_session() {
+            log::info!("Wayland 会话：跳过倒计时窗口（位置不可控，会挡在屏幕中央）");
+            return Ok(());
+        }
+
         // 存储倒计时秒数
         COUNTDOWN_SECONDS.store(seconds, Ordering::SeqCst);
 

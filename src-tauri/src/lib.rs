@@ -72,6 +72,12 @@ pub mod scale;
 /// Tauri 命令模块
 pub mod commands;
 
+/// 拖放交付模块（Wayland 下密码不进剪贴板的唯一通道；见 dnd.rs）
+pub mod dnd;
+
+/// 拖拽池窗口（Wayland 下「点复制入池、从池里拖」的载体；见 pool_window.rs）
+pub mod pool_window;
+
 use state::AppState;
 use tauri::Manager;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -169,6 +175,15 @@ pub fn run() {
                 browser_keys::disable_browser_keys(&window);
             }
 
+            // 拖放交付（Wayland）：在主窗口的 webview 上装拖放处理器。
+            // 只在主窗口装——快速搜索窗是运行时建窗且 Wayland 下唤不起来（全局快捷键缺失）
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(main) = app.get_webview_window("main") {
+                    dnd::install_gtk_handlers(&main, app.handle().clone());
+                }
+            }
+
             // 窗口缩放换算：登记设计尺寸并按渲染缩放应用窗口物理尺寸。
             // 必须在主窗口 show() 之前完成——用户看不到尺寸跳动（见 scale.rs）
             scale::init(app.handle());
@@ -233,11 +248,13 @@ pub fn run() {
 
             // 创建系统托盘菜单
             let show_item = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
+            let pool_item = MenuItemBuilder::with_id("pool", "显示/隐藏密码浮窗").build(app)?;
             let lock_item = MenuItemBuilder::with_id("lock", "锁定").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
             let menu = MenuBuilder::new(app)
                 .item(&show_item)
+                .item(&pool_item)
                 .item(&lock_item)
                 .separator()
                 .item(&quit_item)
@@ -256,6 +273,9 @@ pub fn run() {
                                 let _ = window.set_focus();
                             }
                         }
+                        "pool" => {
+                            pool_window::toggle(app);
+                        }
                         "lock" => {
                             let state = app.state::<AppState>();
                             // 统一锁定入口（含清剪贴板，与命令锁定/空闲锁定语义一致）
@@ -263,6 +283,8 @@ pub fn run() {
                         }
                         "quit" => {
                             crate::pending::revoke("quit");
+                            // 退出前把池子和它的窗口一起收掉，别留下一个孤儿浮层
+                            pool_window::shutdown(app);
                             crate::hotkey::deactivate();
                             if let Err(e) = crate::clipboard::clear_now(app) {
                                 log::warn!("退出时清空剪贴板失败: {e}");
@@ -344,6 +366,11 @@ pub fn run() {
             commands::toggle_favorite,
             commands::copy_password_to_clipboard,
             commands::touch_password_usage,
+            // 交付能力与拖放交付（Wayland）
+            commands::get_capabilities,
+            commands::prepare_dnd_payload,
+            // 入浮窗（窗口本身是纯 GTK，见 pool_window.rs）
+            commands::add_to_dnd_pool,
             commands::get_tags,
             commands::rename_tag,
             commands::delete_tag,

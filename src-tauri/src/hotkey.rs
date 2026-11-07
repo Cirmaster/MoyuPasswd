@@ -71,6 +71,14 @@ mod win_impl {
         ACTIVATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// 当前会话支持「Ctrl+V 注入」交付方式（Windows 恒支持）
+    ///
+    /// 供 copy_password_to_clipboard 决定交付方式：false 时回退剪贴板交付，
+    /// 否则 pending 永远等不到 Ctrl+V，密码彻底交不出去。
+    pub fn injection_supported() -> bool {
+        true
+    }
+
     /// 激活 Ctrl+V 钩子（一次性）
     ///
     /// 粘贴状态（pending / 倒计时）结束后由监视线程自动卸载钩子，不常驻。
@@ -614,6 +622,13 @@ mod x11_impl {
         }
     }
 
+    /// 当前会话支持「Ctrl+V 注入」交付方式（仅 X11；Wayland 无全局输入接口）
+    ///
+    /// 供 copy_password_to_clipboard 决定交付方式：false 时回退剪贴板交付。
+    pub fn injection_supported() -> bool {
+        crate::x11::is_x11_session()
+    }
+
     /// 激活 Ctrl+V 抓取（一次性，对齐 Windows 版 activate 契约）
     ///
     /// # Arguments
@@ -665,6 +680,11 @@ mod non_windows {
     /// 该平台：不支持钩子
     pub fn activate(_app: tauri::AppHandle) {
         log::warn!("该平台不支持 Ctrl+V 钩子");
+    }
+
+    /// 该平台不支持「Ctrl+V 注入」交付方式（回退剪贴板交付）
+    pub fn injection_supported() -> bool {
+        false
     }
 
     pub fn deactivate() {

@@ -37,8 +37,12 @@ X11 会话下整条链路已实现（`x11.rs` + `inject.rs::x11_impl` + `hotkey.
 | Esc / Ctrl+C 取消 | 钩子监听 | **不支持**（监听需 XRecord；Ctrl+C 场景由哨兵兜底，Esc 只能等 TTL/关倒计时） |
 
 已知限制（fail closed，回退剪贴板粘贴，不会打错目标）：
-- **Wayland 会话整链路禁用**：无全局窗口查询/输入合成接口（安全设计），
-  `is_x11_session()` 判定后归因/注入/抓取全部跳过；
+- **Wayland 会话注入链路禁用**：无全局窗口查询/输入合成接口（安全设计），
+  `is_x11_session()` 判定后归因/注入/抓取全部跳过。**密码交付已回退剪贴板**
+  （2026-11-04）：`copy_password_to_clipboard` 按 `hotkey::injection_supported()`
+  分流——无注入能力的会话直接写剪贴板并安排自动清除（`mode="clipboard"`），
+  有注入能力的会话维持「登记 pending + Ctrl+V 注入」（`mode="inject"`），
+  前端按 mode 区分提示语；否则 Wayland 下 pending 永远等不到 Ctrl+V，密码交不出去；
 - **非 ASCII 密码字符**（及 AltGr 级布局字符）注入失败：XTest 无 Unicode 直注，
   字符映射不到当前键盘布局时整次放弃（绝不打半截密码）；
 - **剪贴板管理器**（Klipper 等）接管 CLIPBOARD 属主可能提前作废会话——误判方向安全
@@ -133,6 +137,19 @@ X11 会话下整条链路已实现（`x11.rs` + `inject.rs::x11_impl` + `hotkey.
   新增 `scale.rs`/`window_sizes.rs`，Windows 行为零变化（见「窗口缩放模型」章节）。
 - **GTK3 `resizable(false)` 窗口尺寸不可靠**（初始尺寸/程序化 resize 被冻结在 200px）——
   倒计时气泡、快速搜索改 `resizable(true)` + min/max 尺寸提示锁定（见「窗口缩放模型」章节）。
+- **`scale.rs` 的 GTK 调用在非主线程 panic**（2026-11-04）—— `text_scale()` 直接读
+  `gtk::Settings::default()`，而 `show_countdown` 等 async 命令跑在 tokio 线程，
+  触发 GTK 主线程断言（"GTK may only be used from the main thread."），倒计时气泡建不出来、
+  复制报「内部错误」。修复：gtk-xft-dpi 基线只在主线程刷新缓存（`refresh_text_scale_base`，
+  时机 = setup / sync_render_scale / gtk-xft-dpi 变化回调），热路径一律读缓存。
+  GTK 调用只能出现在主线程（setup、sync 命令、事件回调），async 命令/工作线程严禁触碰。
+- **密码列复制按钮被裁掉**（2026-11-04）—— Linux 字体的 `•` 字形比 Windows 宽，
+  `••••` + 强度条 + 按钮超出固定列宽（104px），`overflow-hidden` 把末尾的复制按钮裁掉。
+  修复：列宽 104→120px，且 `••••`/强度条允许收缩（`min-w-0` + `shrink`），
+  复制按钮 `shrink-0` 殿后永不被裁。
+- **Wayland 上密码交不出去**（2026-11-04）—— 复制密码只登记 Ctrl+V 注入 pending，
+  Wayland 无注入能力时 pending 永远不触发。修复见问题 1 的交付方式分流
+  （`mode="inject" | "clipboard"`）。
 
 ## 窗口缩放模型（高分屏/DPI，2026-11-01）
 

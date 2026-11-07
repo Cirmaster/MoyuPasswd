@@ -70,28 +70,47 @@ fn to_physical_pos(design: f64, scale: f64) -> i32 {
 
 // ==================== 渲染缩放 R ====================
 
-/// 文字 DPI 缩放（含前端校正系数）
+/// 文字 DPI 缩放的推断基线（gtk-xft-dpi ÷ 1024 ÷ 96，≤0 按 1.0）
 ///
-/// Linux（WebKitGTK）：gtk-xft-dpi / 1024 / 96；其余平台恒 1.0。
+/// **只在主线程刷新**（见 [`refresh_text_scale_base`]），其余线程只读缓存：
+/// `gtk::Settings::default()` 带 GTK 主线程断言，在 tokio 命令线程（如
+/// async 的 `show_countdown`）/光标跟随线程里调用会 panic
+/// （"GTK may only be used from the main thread."），故热路径绝不碰 GTK。
+static TEXT_SCALE_BASE: Mutex<f64> = Mutex::new(1.0);
+
+/// 从 GTK 读取文字 DPI 缩放基线写入缓存（**仅主线程调用**）
+///
+/// 刷新时机：启动 setup（scale::init）、前端 sync_render_scale 自检、
+/// gtk-xft-dpi 变化回调——三者都在主线程。
+#[cfg(target_os = "linux")]
+fn refresh_text_scale_base() {
+    use gtk::prelude::ObjectExt as _;
+    let dpi: i32 = gtk::Settings::default()
+        .and_then(|s| s.property_value("gtk-xft-dpi").get::<i32>().ok())
+        .unwrap_or(-1);
+    let inferred = if dpi <= 0 {
+        1.0
+    } else {
+        dpi as f64 / 1024.0 / 96.0
+    };
+    *TEXT_SCALE_BASE.lock() = inferred;
+}
+
+#[cfg(not(target_os = "linux"))]
+fn refresh_text_scale_base() {
+    // 非 Linux 无独立文字 DPI 缩放，基线恒 1.0
+}
+
+/// 文字 DPI 缩放（含前端校正系数）——任何线程可调用（只读缓存，不碰 GTK）
 #[cfg(target_os = "linux")]
 fn text_scale() -> f64 {
-    let inferred = {
-        use gtk::prelude::ObjectExt as _;
-        let dpi: i32 = gtk::Settings::default()
-            .and_then(|s| s.property_value("gtk-xft-dpi").get::<i32>().ok())
-            .unwrap_or(-1);
-        if dpi <= 0 {
-            1.0
-        } else {
-            dpi as f64 / 1024.0 / 96.0
-        }
-    };
-    inferred * (*TEXT_SCALE_CORRECTION.lock())
+    (*TEXT_SCALE_BASE.lock()) * (*TEXT_SCALE_CORRECTION.lock())
 }
 
 #[cfg(not(target_os = "linux"))]
 fn text_scale() -> f64 {
-    1.0
+    // 无独立文字 DPI 缩放，基线恒 1.0；前端校正系数（安全网）仍生效
+    *TEXT_SCALE_CORRECTION.lock()
 }
 
 /// 指定窗口的渲染缩放 R = window.scale_factor() × 文字 DPI 缩放
@@ -242,6 +261,9 @@ pub fn apply_all(app: &AppHandle) {
 /// 必须在 setup 中、主窗口 `show()` **之前**调用（窗口可见前完成尺寸换算，
 /// 用户看不到尺寸跳动）。
 pub fn init(app: &AppHandle) {
+    // 主线程刷新文字 DPI 基线缓存（此后任何线程只读缓存；见 TEXT_SCALE_BASE）
+    refresh_text_scale_base();
+
     register_design(
         "main",
         (ws::MAIN_WIDTH, ws::MAIN_HEIGHT),
@@ -257,6 +279,8 @@ pub fn init(app: &AppHandle) {
             let app_handle = app.clone();
             settings.connect_notify(Some("gtk-xft-dpi"), move |_, _| {
                 log::info!("gtk-xft-dpi 变化，按新渲染缩放重排窗口");
+                // 回调在主线程：顺带刷新文字 DPI 基线缓存
+                refresh_text_scale_base();
                 apply_all(&app_handle);
             });
         }
@@ -292,6 +316,8 @@ pub fn sync_render_scale(
         if !scale.is_finite() || scale <= 0.0 {
             return Err(format!("非法渲染缩放值: {scale}"));
         }
+        // 同步命令跑在主线程：顺带刷新文字 DPI 基线缓存，保证推断值用的是最新设置
+        refresh_text_scale_base();
         let inferred = render_scale(&window);
         if (inferred - scale).abs() <= 0.01 {
             log::debug!("渲染缩放自检通过: R={scale}");

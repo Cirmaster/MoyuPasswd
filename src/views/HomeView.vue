@@ -26,6 +26,7 @@ import { ref, computed, onMounted, onUnmounted, type Component } from 'vue'
 import { useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { invoke } from '@/lib/api'
+import { setDragGhost } from '@/lib/dragGhost'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -196,6 +197,16 @@ const showQuickAdd = ref(false)
 
 /** 剪贴板清除时间（秒），从设置中读取 */
 const clipboardClearTime = ref(30)
+
+/**
+ * 当前会话的密码交付方式（由后端能力判定，见 Rust 的 get_capabilities）
+ * - `inject`：全局按键注入（Windows / Linux X11），点复制后倒计时内按 Ctrl+V
+ * - `dnd`：拖放交付（Linux Wayland），把密码拖到目标输入框
+ * - `none`：都不支持
+ * 初始按 `inject` 渲染，拿到真实值后按需切换（避免首屏闪一下拖拽把手）
+ */
+const delivery = ref<'inject' | 'dnd' | 'none'>('inject')
+
 
 /** Toast 提示状态 */
 const toast = ref({
@@ -685,10 +696,24 @@ const categoryLabel = (id: string): string => categoryNameById.value[id] ?? id
  * @param text - 要复制的文本
  * @param event - 鼠标事件（用于获取位置）
  */
-const copyToClipboard = async (text: string, event?: MouseEvent) => {
+const copyToClipboard = async (
+  text: string,
+  event?: MouseEvent,
+  title?: string,
+  subtitle?: string,
+) => {
   try {
-    await invoke('copy_text_to_clipboard', { text, clearAfter: clipboardClearTime.value })
+    // title / subtitle 只用于浮窗里的展示；Wayland 下后端会把文本改放进浮窗
+    await invoke('copy_text_to_clipboard', {
+      text,
+      clearAfter: clipboardClearTime.value,
+      title,
+      subtitle,
+    })
     showToast('success', '已复制')
+
+    // Wayland：后端已改道进浮窗，不写剪贴板，也就没有倒计时窗口和光标跟随
+    if (delivery.value === 'dnd') return
 
     // 获取鼠标位置并显示全局倒计时窗口
     //（x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标；见 scale.rs）
@@ -706,28 +731,122 @@ const copyToClipboard = async (text: string, event?: MouseEvent) => {
 
 /**
  * 通过后端登记待粘贴密码（不进系统剪贴板）
- * 前端全程不接触明文；倒计时内在目标窗口按 Ctrl+V 由后端解密并注入
+ * 前端全程不接触明文；倒计时内在目标窗口按 Ctrl+V 由后端解密并注入。
+ * Wayland 下没有按键注入，且**不会**回退写剪贴板（那等于把密码交给整个桌面），
+ * 改为提示用户走拖放交付（见下方 dnd* 系列函数）。
  * @param id - 密码项 ID
  * @param event - 鼠标事件（用于定位倒计时窗口）
  */
 const copyPasswordViaBackend = async (id: string, event?: MouseEvent) => {
+  // Wayland：唯一的交付通道是拖放。点「复制」的语义变成「放进拖拽池」——
+  // 池子会出现在屏幕上，用户再从池里把这一条拖到目标输入框。
+  // 这里不解密、不写剪贴板，只是让后端记下「这条待交付」。
+  if (delivery.value === 'dnd') {
+    try {
+      const { count } = await invoke<{ count: number }>('add_to_dnd_pool', { id })
+      showToast(
+        'success',
+        count > 1
+          ? `已复制 ${count} 条，拖到目标输入框即可`
+          : '已复制，拖到目标输入框即可',
+      )
+    } catch (e) {
+      console.error('复制失败:', e)
+      showToast('error', String(e))
+    }
+    return
+  }
+  if (delivery.value === 'none') {
+    showToast('error', '当前会话不支持密码交付')
+    return
+  }
   try {
     // x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标（见 scale.rs）
     const x = event?.screenX ?? window.screen.width / 2
     const y = event?.screenY ?? window.screen.height / 2
-    const clearTime = await invoke<number>('copy_password_to_clipboard', { id })
+    const { ttl } = await invoke<{ ttl: number; mode: string }>(
+      'copy_password_to_clipboard',
+      { id },
+    )
     showToast('success', '密码就绪，倒计时内按 Ctrl+V 粘贴')
     // 后端已登记使用记录（last_used_at/use_count，契约 4.3）；
     // 刷新当前页与统计，让「最近使用」视图/计数与使用频率排序立即反映本次使用
     void loadPasswords()
     void loadStats()
     // 启动倒计时和光标跟随
-    await invoke('show_countdown', { seconds: clearTime, x, y })
+    await invoke('show_countdown', { seconds: ttl, x, y })
     await invoke('start_follow_cursor')
   } catch (e) {
     console.error('复制密码失败:', e)
     showToast('error', String(e))
   }
+}
+
+// ==================== 拖放交付（Wayland） ====================
+
+// ==================== 整行拖拽交付（Wayland） ====================
+//
+// 池子是"暂存区"，但很多时候用户只想拖一次——那就直接从列表行上拖走，
+// 不必先点复制再跑到池子里找。两个入口语义不同，不冲突：
+//   点复制 → 入池（可反复拖、可暂存）
+//   直接拖行 → 一次性交付
+
+/** 当前已武装的行（未武装成功时不允许起拖） */
+const dndRowPendingId = ref<string | null>(null)
+
+/**
+ * 拖拽时的占位串
+ *
+ * 不能是空串：WebKitGTK 对空内容不会声明任何 MIME，目标就不会来取数据，
+ * Rust 侧填密码的逻辑一次都不会触发。真密码随后由 `drag-data-get` 覆盖。
+ */
+const DND_PLACEHOLDER = 'moyu-passwd-pending'
+
+/**
+ * 按下行即武装（只登记条目与解密闭包，解密发生在 Rust 取数据那一刻）
+ *
+ * 必须在 pointerdown 而不是 dragstart：invoke 是异步的，而 dragstart 里
+ * 设置数据必须同步完成，等不到 IPC 返回。
+ */
+const armRowDnd = async (id: string) => {
+  if (delivery.value !== 'dnd') return
+  // 同步占位再发 IPC：等 invoke 回来再设标记会让「按下即拖」必然失败
+  dndRowPendingId.value = id
+  try {
+    await invoke('prepare_dnd_payload', { id })
+  } catch (e) {
+    dndRowPendingId.value = null
+    console.error('拖放准备失败:', e)
+  }
+}
+
+/**
+ * 鼠标移入行就预武装
+ *
+ * `prepare_dnd_payload` 是异步 IPC：等 pointerdown 才发，手快时 drag-begin 里
+ * `is_armed()` 仍为 false，Rust 不接管数据，拖出去就是空/占位串。
+ */
+const prearmRowDnd = (id: string) => {
+  if (delivery.value !== 'dnd') return
+  void armRowDnd(id)
+}
+
+/** 开始拖动整行 */
+const handleRowDndStart = (event: DragEvent, id: string, title: string) => {
+  if (!event.dataTransfer || dndRowPendingId.value !== id) {
+    // 没武装成功就别拖：否则目标会粘出占位串，用户以为成功
+    event.preventDefault()
+    return
+  }
+  event.dataTransfer.setData('text/plain', DND_PLACEHOLDER)
+  event.dataTransfer.effectAllowed = 'copy'
+  // 幽灵固定在光标右下方，别盖住目标输入框的插入点
+  setDragGhost(event, title)
+}
+
+/** 拖动结束：后端在 drag-end 里收尾，这里只清本地标记 */
+const handleRowDndEnd = () => {
+  dndRowPendingId.value = null
 }
 
 // ==================== 弹窗 / 窗口操作 ====================
@@ -801,6 +920,16 @@ onMounted(async () => {
     console.warn('加载设置失败:', e)
   }
 
+  // 交付能力：Wayland 下没有按键注入，密码只能靠拖放交出去（见 Rust 的 get_capabilities）。
+  // 读失败时按默认的注入方式渲染——X11/Windows 用户不受影响，Wayland 用户会在点复制时
+  // 收到后端明确的错误提示，而不是看到一个假的「已复制」。
+  try {
+    const caps = await invoke<{ delivery: 'inject' | 'dnd' | 'none' }>('get_capabilities')
+    delivery.value = caps.delivery
+  } catch (e) {
+    console.warn('读取交付能力失败，按注入方式处理:', e)
+  }
+
   // 监听全局快捷键事件（保存 unlisten，卸载时统一清理，防止反复进出页面叠加监听）。
   // Ctrl+K 的快速搜索走独立小窗（后端全局快捷键直接开窗），不再发 show-quick-search 事件；
   // 内嵌搜索弹窗仅由主界面搜索入口打开。
@@ -819,6 +948,25 @@ onMounted(async () => {
   unlisteners.push(
     await listen('show-password-generator', () => {
       showGenerator.value = true
+    }),
+  )
+
+  // 拖放交付结果（后端在 GTK 的 drag-end 里判定目标是否接受后发来）
+  unlisteners.push(
+    // 池窗口会自己给反馈；主窗口这里保留一份，主窗口在前台时同样能看到结果
+    await listen<{ delivered: boolean; served: boolean }>('dnd-result', (event) => {
+      const { delivered, served } = event.payload ?? { delivered: false, served: false }
+      if (delivered) {
+        showToast('success', '密码已交付到目标输入框')
+        // 后端已记使用记录，这里只刷新展示
+        void loadPasswords()
+        void loadStats()
+      } else if (!served) {
+        // 数据根本没被取走：这不是「目标拒收」，是拖放链路没走通，别让用户以为换个输入框就行
+        showToast('error', '拖放未生效（目标没有取走数据），请重试')
+      } else {
+        showToast('error', '这个窗口不接受拖放，换个输入框试试')
+      }
     }),
   )
 })
@@ -1152,7 +1300,9 @@ onMounted(async () => {
               <!-- 名称吃剩余宽度；其余列定宽，总宽适配 900px 窗口下的内容区 -->
               <col />
               <col class="w-[20%]" />
-              <col class="w-[104px]" />
+              <!-- 密码列 = •••• + 强度条 + 复制按钮；Linux 字体 • 字形偏宽，列宽须给足，
+                   且单元格内容允许收缩（bullet/强度条优先让位），保证复制按钮永不被裁 -->
+              <col class="w-[120px]" />
               <col class="w-[80px]" />
               <col class="w-[84px]" />
               <!-- 操作列 = 两个 icon 按钮 72px + 间距 4px + 单元格 p-2 内边距 16px，再留 4px 余量 -->
@@ -1174,6 +1324,13 @@ onMounted(async () => {
                 v-for="item in pagedPasswords"
                 :key="item.id"
                 class="group"
+                :draggable="delivery === 'dnd'"
+                :class="delivery === 'dnd' ? 'cursor-grab active:cursor-grabbing select-none' : ''"
+                :title="delivery === 'dnd' ? '按住这一行拖到目标输入框（也可以点右侧按钮复制）' : undefined"
+                @pointerenter="prearmRowDnd(item.id)"
+                @pointerdown="armRowDnd(item.id)"
+                @dragstart="handleRowDndStart($event, item.id, item.title)"
+                @dragend="handleRowDndEnd"
               >
                 <!-- 名称：收藏星标 + 标题 + 最多 3 个标签小徽章（超出 +N） -->
                 <TableCell class="font-medium overflow-hidden">
@@ -1224,27 +1381,31 @@ onMounted(async () => {
                       type="button"
                       class="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
                       title="复制用户名"
-                      @click="(e) => copyToClipboard(item.username, e)"
+                      @click="(e) => copyToClipboard(item.username, e, item.title, '用户名')"
                     >
                       <IconCopy class="h-4 w-4" />
                     </button>
                   </div>
                 </TableCell>
 
-                <!-- 密码（强度 + 复制；明文由后端倒计时注入，前端不接触） -->
+                <!-- 密码（强度 + 复制/拖放；明文由后端交付，前端不接触） -->
                 <TableCell class="overflow-hidden">
+                  <!-- 收缩优先级：•••• 与强度条让位（min-w-0 + shrink），复制/拖拽按钮（shrink-0）永不被裁 -->
                   <div class="flex items-center gap-2">
-                    <span class="shrink-0 text-muted-foreground">••••</span>
+                    <span class="min-w-0 truncate text-muted-foreground">••••</span>
                     <PasswordStrength
                       v-if="item.password_strength"
                       :level="item.password_strength"
                       compact
-                      class="w-10 shrink-0"
+                      class="w-10 min-w-0 shrink"
                     />
+                    <!-- 一个按钮两种语义：注入会话＝复制，Wayland＝放进拖拽池。
+                         不再有行内把手：一个动作两个入口会让用户不知道该拖哪个，
+                         而且 16px 的把手挤在表格行里本来就不好点（见拖拽池方案 §11） -->
                     <button
                       type="button"
                       class="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-                      title="复制密码"
+                      :title="delivery === 'dnd' ? '复制密码（再从浮窗拖到目标输入框）' : '复制密码'"
                       @click="(e) => copyPasswordViaBackend(item.id, e)"
                     >
                       <IconCopy class="h-4 w-4" />

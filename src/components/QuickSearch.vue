@@ -251,8 +251,12 @@ const copyUsername = async (item: PasswordItem) => {
  */
 const copyPasswordById = async (id: string) => {
   try {
-    await invoke('copy_password_to_clipboard', { id })
-    toast.value = { show: true, type: 'success', message: '密码已复制到剪贴板' }
+    const { mode } = await invoke<{ ttl: number; mode: string }>('copy_password_to_clipboard', { id })
+    toast.value = {
+      show: true,
+      type: 'success',
+      message: mode === 'clipboard' ? '已复制密码到剪贴板，倒计时后自动清除' : '密码就绪，倒计时内按 Ctrl+V 粘贴',
+    }
     // 后端已记录使用记录；刷新主列表当前页与统计（最近使用计数/排序即时生效）
     void passwordStore.loadPasswords()
     void passwordStore.loadStats()

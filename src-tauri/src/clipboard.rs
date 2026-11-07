@@ -150,6 +150,42 @@ pub fn invalidate_scheduled_clear() {
     CLEAR_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
+/// 写入敏感文本并安排自动清除（无注入能力会话的密码回退交付路径）
+///
+/// 与 [`copy_text_to_clipboard`] 的「写入 + 排除标记 + 指纹 + 兜底清除」同源，
+/// 供 `copy_password_to_clipboard` 在 Wayland 等无法 Ctrl+V 注入的会话直接交付密码。
+/// 调用方负责解锁门禁与 pending 语义（作废旧 pending 等）。
+///
+/// `seconds` 语义同 [`copy_text_to_clipboard`]：
+/// - `0`：不自动清除
+/// - `n`：n 秒后自动清空（软失败时压缩到最迟 5 秒）
+pub fn write_with_auto_clear(
+    app: &tauri::AppHandle,
+    text: &str,
+    seconds: u32,
+) -> Result<(), String> {
+    // 写入 + 历史/云同步排除标记。Ok(false) 是软失败：文本已在剪贴板但缺
+    // 排除标记，此时绝不能提前返回——必须走到下面的清除调度，否则明文永久残留
+    let excluded = write_text_excluded(app, text)?;
+    // 自己刚写入的剪贴板不算「用户复制了新内容」：哨兵基线对齐（对齐命令路径）
+    crate::hotkey::rebase_clipboard_sentinel();
+    if !excluded {
+        log::warn!("剪贴板排除标记设置失败，压缩自动清除时间兜底");
+    }
+    // 记录写入指纹：定时清除前比对，避免误删用户后续复制的无关内容
+    *lock_last_written() = Some(fingerprint(text));
+
+    let mut secs = if seconds == 0 { None } else { Some(seconds) };
+    // 软失败兜底：无论配置如何，最迟 5 秒必须清掉（内容已进剪贴板历史面）
+    if !excluded {
+        secs = Some(secs.unwrap_or(u32::MAX).min(5));
+    }
+    if let Some(seconds) = secs {
+        schedule_clear(app, seconds);
+    }
+    Ok(())
+}
+
 /// 复制文本到剪贴板（前端调用；排除历史与云端同步）
 ///
 /// `clear_after` 语义：
@@ -160,12 +196,42 @@ pub fn invalidate_scheduled_clear() {
 pub async fn copy_text_to_clipboard(
     text: String,
     clear_after: Option<u32>,
+    title: Option<String>,
+    subtitle: Option<String>,
     app: tauri::AppHandle,
     state: tauri::State<'_, crate::state::AppState>,
 ) -> ApiResult<()> {
     respond(|| -> Result<(), String> {
         // 解锁门禁：锁定状态下不允许写系统剪贴板（防剪贴板劫持：篡改用户复制的内容）
         crate::commands::auth::require_unlocked(&state)?;
+
+        // Wayland：**所有**文本复制都改走浮窗，与密码同一套交付方式。
+        //
+        // 放在这里而不是逐个前端入口去改：复制入口有四个（主窗口用户名、
+        // 快捷弹窗、内嵌搜索、密码生成器），前端漏掉任何一个都会表现为
+        // 「点了没反应」。后端改道才能保证不漏。
+        //
+        // 代价：文本以明文驻留浮窗，最长 POOL_TTL_SECS 秒（`Zeroizing` 保证清除）。
+        if crate::x11::is_wayland_session() {
+            // 用户意图已切到「复制文本」，作废之前登记的待粘贴密码
+            crate::pending::revoke("text-copy");
+
+            let title = title
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "已复制的文本".to_string());
+            let subtitle = subtitle.unwrap_or_default();
+            let id = crate::dnd::text_pool_id(&title, &subtitle, &text);
+
+            crate::dnd::pool_put(
+                &id,
+                &title,
+                &subtitle,
+                crate::dnd::PoolPayload::Plain(zeroize::Zeroizing::new(text)),
+            );
+            log::info!("[CLIP] Wayland：文本改放入浮窗, 池深={}", crate::dnd::pool_count());
+            crate::pool_window::reveal_with_fly_in(&app);
+            return Ok(());
+        }
 
         // 文本复制与密码注入共用 Ctrl+V 语义：用户改为复制文本（用户名/自定义字段等）
         // 说明意图已切换，必须作废之前登记的待粘贴密码——否则 Ctrl+V 钩子会继续拦截

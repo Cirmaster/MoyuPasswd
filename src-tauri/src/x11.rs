@@ -24,6 +24,18 @@ pub fn is_x11_session() -> bool {
     }
 }
 
+/// 是否 Wayland 会话
+///
+/// 与 [`is_x11_session`] 互补，用于交付能力判定（见 `commands::dnd::get_capabilities`）：
+/// Wayland 下没有全局按键注入，交付改走拖放。
+/// 判定：XDG_SESSION_TYPE 显式为 wayland；变量缺失时退回看 WAYLAND_DISPLAY 是否设置。
+pub fn is_wayland_session() -> bool {
+    match std::env::var("XDG_SESSION_TYPE") {
+        Ok(t) => t == "wayland",
+        Err(_) => std::env::var("WAYLAND_DISPLAY").is_ok(),
+    }
+}
+
 /// 建立 X 连接（失败记日志返回 None）
 pub fn connect() -> Option<(RustConnection, usize)> {
     match x11rb::connect(None) {

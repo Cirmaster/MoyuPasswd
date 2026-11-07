@@ -581,6 +581,10 @@ pub fn recover_interrupted_change(app_dir: &Path) {
 /// 5. 通知所有窗口已锁定
 pub fn lockdown(state: &AppState, app: &tauri::AppHandle, reason: &str) {
     crate::pending::revoke(reason);
+    // 拖放的两处收尾：作废在途武装（防「锁定前武装、锁定后仍能取出明文」），
+    // 清空拖拽池并收起池窗口（池里只剩条目元数据，但没理由留在屏幕上）
+    crate::dnd::revoke(reason);
+    crate::pool_window::shutdown(app);
     crate::hotkey::deactivate();
     state.clear_aes_key();
     if let Err(e) = crate::clipboard::clear_now(app) {
