@@ -1,8 +1,59 @@
 //! 密码注入模块
 //!
 //! 负责将密码注入到目标窗口：归因（识别目标进程）→ 解密 → SendInput → zeroize
+//!
+//! 注入失败不再只是「吞掉按键 + 写一行看不见的日志」：失败原因会带回调用方，
+//! 通过 `inject-result` 事件告知前端（倒计时气泡扩成提示条）。
+//!
+//! **失败不自动写剪贴板**：剪贴板任何进程都能读，自动改投属于程序单方面降级。
+//! 提示条给出「放入剪贴板」入口，用户点一下才走
+//! `commands::copy_pending_password_to_clipboard`（一次点击一次授权，见 `fail` 的注释）。
 
 use std::time::SystemTime;
+
+use crate::pending::AuditAction;
+
+/// 注入失败原因（全平台共用）
+///
+/// 早先这里返回 `bool`，调用方无法区分「没打到目标窗口」和「系统拒绝模拟输入」，
+/// 失败只能写一行日志（release 构建根本没装 logger），用户侧表现为按键被吞。
+///
+/// 失败原因决定后续处置：目标窗口没了可以降级到剪贴板交付，平台不支持只能报错，
+/// 而系统错误码（如 UIPI 拒绝 = 5）是排障的唯一线索。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectError {
+    /// 前台窗口已不是归因时的目标窗口（用户切走了）
+    TargetGone,
+    /// 目标窗口句柄被复用给其他进程（归因后原窗口已销毁）
+    TargetReused,
+    /// 事件没进输入流；`u32` 为系统错误码（0 = 平台没有对应错误码）
+    SendInputFailed(u32),
+    /// 字符无法映射到当前键盘布局（X11 特有：XTest 没有 Unicode 直注）
+    KeymapUnmappable,
+    /// 当前平台或会话不支持注入（Wayland / macOS 桩）
+    Unsupported,
+}
+
+impl InjectError {
+    /// 稳定原因码：审计与前端提示都按它映射文案，文案可以改，码不能改
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TargetGone => "target_gone",
+            Self::TargetReused => "target_reused",
+            Self::SendInputFailed(_) => "send_input_failed",
+            Self::KeymapUnmappable => "keymap_unmappable",
+            Self::Unsupported => "unsupported",
+        }
+    }
+
+    /// 系统错误码（仅 SendInput 失败时有；0 视为没有）
+    pub fn os_error(&self) -> Option<u32> {
+        match self {
+            Self::SendInputFailed(code) if *code != 0 => Some(*code),
+            _ => None,
+        }
+    }
+}
 
 #[cfg(windows)]
 mod win_impl {
@@ -15,6 +66,8 @@ mod win_impl {
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows::core::PWSTR;
+
+    use super::InjectError;
 
     /// 目标进程信息
     pub struct TargetProcess {
@@ -100,15 +153,19 @@ mod win_impl {
     /// * `target_pid` - 归因时的目标进程 ID（注入前复核，防句柄复用）
     ///
     /// # Returns
-    /// 是否注入成功
-    pub fn inject_text(text: &str, target_hwnd: HWND, target_pid: u32) -> bool {
+    /// 成功 = 全部按键事件已进输入流；失败带回具体原因（见 [`InjectError`]）
+    pub fn inject_text(
+        text: &str,
+        target_hwnd: HWND,
+        target_pid: u32,
+    ) -> Result<(), InjectError> {
         log::info!("[INJECT] 开始注入文本: 长度={}, 目标窗口={:?}", text.len(), target_hwnd);
 
         unsafe {
             // 确认目标窗口仍是前台，防止把密码打进别的应用
             if GetForegroundWindow() != target_hwnd {
                 log::warn!("[INJECT] 前台窗口已不是目标窗口，放弃注入");
-                return false;
+                return Err(InjectError::TargetGone);
             }
 
             // 复核 hwnd 归属进程：归因后目标窗口可能已销毁、句柄被复用给其他进程，
@@ -121,7 +178,7 @@ mod win_impl {
                     target_pid,
                     current_pid
                 );
-                return false;
+                return Err(InjectError::TargetReused);
             }
 
             // 释放修饰键，避免注入字符被目标应用当成组合键
@@ -173,13 +230,17 @@ mod win_impl {
                 *item = std::mem::zeroed();
             }
             if sent != inputs.len() as u32 {
-                log::error!("[INJECT] SendInput 失败: 发送={}/{}, 错误={}",
-                    sent, inputs.len(), std::io::Error::last_os_error());
-                return false;
+                // 这里最常见的是 UIPI 拒绝：进程被降为低完整性、或目标窗口权限更高，
+                // SendInput 返回 0 且 GetLastError = ERROR_ACCESS_DENIED(5)。
+                // 错误码要原样带回，前端/审计才能区分「被系统拦了」和「窗口没了」
+                let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+                log::error!("[INJECT] SendInput 失败: 发送={}/{}, 错误码={}",
+                    sent, inputs.len(), code);
+                return Err(InjectError::SendInputFailed(code));
             }
 
             log::info!("[INJECT] 所有字符注入完成，共 {} 个字符", chars.len());
-            true
+            Ok(())
         }
     }
 
@@ -226,6 +287,8 @@ mod win_impl {
 mod x11_impl {
     use x11rb::connection::Connection;
     use x11rb::protocol::xtest::ConnectionExt as _;
+
+    use super::InjectError;
 
     /// 目标进程信息（hwnd 为 X11 窗口 id，字段与 win_impl 对齐）
     pub struct TargetProcess {
@@ -296,14 +359,14 @@ mod x11_impl {
     /// * `text` - 要注入的文本
     /// * `target_hwnd` - 目标窗口 id（归因时记录）
     /// * `target_pid` - 归因时的目标进程 ID（注入前复核，防窗口易主）
-    pub fn inject_text(text: &str, target_hwnd: u32, target_pid: u32) -> bool {
+    pub fn inject_text(text: &str, target_hwnd: u32, target_pid: u32) -> Result<(), InjectError> {
         if !crate::x11::is_x11_session() {
             log::error!("[INJECT] 非 X11 会话，注入不可用");
-            return false;
+            return Err(InjectError::Unsupported);
         }
         let (conn, screen_num) = match crate::x11::connect() {
             Some(c) => c,
-            None => return false,
+            None => return Err(InjectError::Unsupported),
         };
         let root = conn.setup().roots[screen_num].root;
 
@@ -311,7 +374,7 @@ mod x11_impl {
         let active = crate::x11::get_cardinal(&conn, root, "_NET_ACTIVE_WINDOW").unwrap_or(0);
         if active != target_hwnd {
             log::warn!("[INJECT] 前台窗口已不是目标窗口，放弃注入");
-            return false;
+            return Err(InjectError::TargetGone);
         }
         let current_pid = crate::x11::get_cardinal(&conn, active, "_NET_WM_PID").unwrap_or(0);
         if target_pid == 0 || current_pid != target_pid {
@@ -320,7 +383,7 @@ mod x11_impl {
                 target_pid,
                 current_pid
             );
-            return false;
+            return Err(InjectError::TargetReused);
         }
 
         // 先解析全部字符 → (keycode, shift)，任一失败整次放弃
@@ -332,7 +395,7 @@ mod x11_impl {
                 Some(k) => events.push(k),
                 None => {
                     log::error!("[INJECT] 字符无法映射到当前键盘布局（非 ASCII/AltGr 级），放弃注入");
-                    return false;
+                    return Err(InjectError::KeymapUnmappable);
                 }
             }
         }
@@ -358,11 +421,12 @@ mod x11_impl {
         }
         if let Err(e) = conn.flush() {
             log::error!("[INJECT] XTest 发送失败: {e}");
-            return false;
+            // X11 协议层没有 GetLastError，错误码位置记 0
+            return Err(InjectError::SendInputFailed(0));
         }
 
         log::info!("[INJECT] X11 注入完成，共 {} 个字符", events.len());
-        true
+        Ok(())
     }
 
     /// XTest 合成按键事件（press=true 按下 / false 抬起）
@@ -395,6 +459,8 @@ mod x11_impl {
 /// 非 Windows 且非 Linux 平台（macOS 等）桩：注入待实现
 #[cfg(not(any(windows, target_os = "linux")))]
 mod non_windows {
+    use super::InjectError;
+
     /// 目标进程信息（字段与 `win_impl::TargetProcess` 对齐）
     pub struct TargetProcess {
         pub pid: u32,
@@ -409,9 +475,9 @@ mod non_windows {
     }
 
     /// 注入文本（桩：签名与 `win_impl::inject_text` 对齐，始终失败）
-    pub fn inject_text(_text: &str, _target_hwnd: u32, _target_pid: u32) -> bool {
+    pub fn inject_text(_text: &str, _target_hwnd: u32, _target_pid: u32) -> Result<(), InjectError> {
         log::error!("该平台注入待实现");
-        false
+        Err(InjectError::Unsupported)
     }
 }
 
@@ -424,6 +490,16 @@ use x11_impl::*;
 #[cfg(not(any(windows, target_os = "linux")))]
 use non_windows::*;
 
+/// 前台窗口的进程名（归因失败返回 None）
+///
+/// `pub(crate)`：「自动」交付模式要判断前台是不是剪贴板目标进程（见 auto_clipboard.rs），
+/// 必须与注入的终端黑名单用同一套归因、同一个进程名口径，各查各的迟早对不上。
+pub(crate) fn foreground_process_name() -> Option<String> {
+    get_target_process()
+        .map(|t| t.name)
+        .filter(|n| !n.is_empty())
+}
+
 /// 触发密码注入（钩子/热键回调）
 pub fn trigger_inject() {
     log::info!("[INJECT] ========== 开始注入流程 ==========");
@@ -435,59 +511,63 @@ pub fn trigger_inject() {
             x
         }
         None => {
-            log::warn!("[INJECT] 失败：无待粘贴密码（未复制或已过期）");
+            // 没有待粘贴密码：用户没复制过，或会话已过期/作废。
+            // 这是正常路径（会话结束后又按了一次 Ctrl+V），不提示也不降级
+            log::warn!("[INJECT] 无待粘贴密码（未复制或已过期），忽略本次 Ctrl+V");
             return;
         }
     };
+
+    // 失败收尾要同时写审计、发事件、可能降级，共用同一份上下文
+    let mut ctx = InjectCtx::new(seq, entry_id);
+
+    // 记一次触发（诊断用：会话到期时计数为 0 = 按键没到钩子，见 pending.rs）
+    crate::pending::note_inject_attempt();
 
     // 并发互斥：快速连按 Ctrl+V 时多线程同时 SendInput 会交织乱码；
     // 拿不到锁直接拒绝并记审计（不排队，避免密码被连续注入多次）
     let _guard = match INJECT_LOCK.try_lock() {
         Ok(g) => g,
         Err(_) => {
+            // 另一次注入正在进行，它自己会把结果报给前端；
+            // 这里再报一条只会让用户看到两条互相矛盾的提示
             log::warn!("[INJECT] 已有注入进行中，忽略本次请求");
-            crate::pending::record_audit(crate::pending::InjectAuditEvent {
-                ts: SystemTime::now(),
-                seq,
-                entry_id,
-                action: crate::pending::AuditAction::Denied("busy".to_string()),
-                target_pid: None,
-                target_name: None,
-                target_path: None,
-            });
+            ctx.audit(AuditAction::Denied("busy".to_string()));
             return;
         }
     };
 
     // 2. 归因：获取目标进程（窗口 → PID → 进程名/路径）
     log::info!("[INJECT] 步骤 2：归因");
-    let target = get_target_process();
-    let (target_pid, target_name, target_path, target_hwnd) = match target {
+    let target = match get_target_process() {
         Some(t) => {
             log::info!("[INJECT] 目标进程: pid={}, name={}, path={}, hwnd={:?}", t.pid, t.name, t.path, t.hwnd);
-            (Some(t.pid), t.name, Some(t.path), t.hwnd)
+            t
         }
         None => {
+            // 拿不到目标窗口：不注入（fail closed），也不猜用户想投到哪。
+            // 但要把失败原因报出去——用户可以在提示条上点「放入剪贴板」显式放宽
             log::warn!("[INJECT] 归因失败：无法获取目标进程");
+            fail(&ctx, "attribution_failed", None, None, true);
             return;
         }
     };
 
-    // 归因必须解析出真实进程名：解析失败时拒绝注入（fail closed），
+    ctx.target_pid = Some(target.pid);
+    ctx.target_path = Some(target.path.clone());
+    ctx.target_name = if target.name.is_empty() {
+        None
+    } else {
+        Some(target.name.clone())
+    };
+
+    // 归因必须解析出真实进程名：解析失败时不得注入（fail closed），
     // 防止用空名/伪名绕过黑名单
-    if target_name.is_empty() {
+    let Some(target_name) = ctx.target_name.clone() else {
         log::warn!("[INJECT] 归因失败：无法解析进程名，拒绝注入");
-        crate::pending::record_audit(crate::pending::InjectAuditEvent {
-            ts: SystemTime::now(),
-            seq,
-            entry_id,
-            action: crate::pending::AuditAction::Denied("attribution_failed".to_string()),
-            target_pid,
-            target_name: None,
-            target_path,
-        });
+        fail(&ctx, "attribution_failed", None, None, true);
         return;
-    }
+    };
 
     // 3. 策略检查（终端黑名单）
     // 默认拒绝向终端注入：密码落到命令行会进 shell 历史文件/回显在屏幕上。
@@ -499,15 +579,11 @@ pub fn trigger_inject() {
             log::warn!("[INJECT] 目标进程在黑名单中，等待二次确认: {}", target_name);
             arm_terminal_grant(&target_name);
             notify_terminal_confirm(&target_name);
-            crate::pending::record_audit(crate::pending::InjectAuditEvent {
-                ts: SystemTime::now(),
-                seq,
-                entry_id,
-                action: crate::pending::AuditAction::Denied("blacklisted_confirm_required".to_string()),
-                target_pid,
-                target_name: Some(target_name),
-                target_path,
-            });
+            ctx.audit(AuditAction::Denied(
+                "blacklisted_confirm_required".to_string(),
+            ));
+            // 这里既不降级也不发 inject-result：提示条已由 terminal-inject-confirm 显示，
+            // 而把密码放进剪贴板等于把终端保护整个绕开（终端里 Ctrl+Shift+V 照样能粘出来）
             return;
         }
         log::info!("[INJECT] 终端二次确认通过，放行注入: {}", target_name);
@@ -515,59 +591,152 @@ pub fn trigger_inject() {
 
     // 4. 调用解密闭包解密密码
     log::info!("[INJECT] 步骤 4：调用解密闭包");
-    let plaintext = match decrypt_fn(&entry_id) {
+    let plaintext = match decrypt_fn(&ctx.entry_id) {
         Ok(p) => {
             log::info!("[INJECT] 解密成功，长度={}", p.len());
             p
         }
         Err(e) => {
             log::error!("[INJECT] 解密密码失败: {}", e);
-            crate::pending::record_audit(crate::pending::InjectAuditEvent {
-                ts: SystemTime::now(),
-                seq,
-                entry_id,
-                action: crate::pending::AuditAction::Denied(format!("decrypt_failed: {}", e)),
-                target_pid,
-                target_name: Some(target_name),
-                target_path,
-            });
+            // 没有明文就没有可交付的内容：连「放入剪贴板」也给不出，can_fallback = false
+            fail(&ctx, "decrypt_failed", Some(e.clone()), None, false);
             return;
         }
     };
 
     // 5. 注入密码（SendInput 模拟键盘输入，不动焦点）
     log::info!("[INJECT] 步骤 5：SendInput 注入");
-    let success = inject_text(&plaintext, target_hwnd, target_pid.unwrap_or(0));
-    log::info!("[INJECT] SendInput 结果: {}", success);
-    let _ = target_path;
+    let outcome = inject_text(&plaintext, target.hwnd, target.pid);
+    log::info!(
+        "[INJECT] SendInput 结果: ok={}, code={}, os_error={:?}",
+        outcome.is_ok(),
+        outcome.as_ref().err().map(|e| e.code()).unwrap_or("ok"),
+        outcome.as_ref().err().and_then(|e| e.os_error())
+    );
 
-    // 6. 立即 zeroize 明文
+    // 6. 处理结果并立即 zeroize 明文
+    //    — 成功：记审计即可，不弹提示（字符已上屏，提示只是噪音）
+    //    — 失败：如实上报原因 + 提供「放入剪贴板」的授权入口，**不自动放宽**
+    match outcome {
+        Ok(()) => {
+            ctx.audit(AuditAction::Injected);
+            // pending 在整个倒计时内有效（多字段可反复 Ctrl+V），
+            // 会话结束靠 TTL 到期 / Ctrl+C / Esc / 剪贴板哨兵（见 hotkey.rs）
+            log::info!("[INJECT] ========== 注入完成 ==========");
+        }
+        Err(e) => {
+            log::error!(
+                "[INJECT] 注入失败: code={}, os_error={:?}",
+                e.code(),
+                e.os_error()
+            );
+            // pending 保留：用户可以直接再按一次 Ctrl+V 重试
+            fail(&ctx, e.code(), None, e.os_error(), true);
+            log::error!("[INJECT] ========== 注入失败 ==========");
+        }
+    }
     log::info!("[INJECT] 步骤 6：zeroize 清零");
     zeroize_plaintext(plaintext);
+}
 
-    // 7. 记审计事件
-    let action = if success {
-        crate::pending::AuditAction::Injected
-    } else {
-        crate::pending::AuditAction::Denied("inject_failed".to_string())
+/// 一次注入的目标信息与代数
+///
+/// 失败收尾要同时写审计、发事件、可能降级，三处都需要同一份上下文；
+/// 用结构体收拢，避免一路传五六个参数（也避免漏传目标信息导致审计对不上）。
+struct InjectCtx {
+    seq: u64,
+    entry_id: String,
+    target_pid: Option<u32>,
+    target_name: Option<String>,
+    target_path: Option<String>,
+}
+
+impl InjectCtx {
+    fn new(seq: u64, entry_id: String) -> Self {
+        Self {
+            seq,
+            entry_id,
+            target_pid: None,
+            target_name: None,
+            target_path: None,
+        }
+    }
+
+    /// 记一条审计事件（目标信息由上下文补齐；密码明文永不入审计）
+    fn audit(&self, action: AuditAction) {
+        crate::pending::record_audit(crate::pending::InjectAuditEvent {
+            ts: SystemTime::now(),
+            seq: self.seq,
+            entry_id: self.entry_id.clone(),
+            action,
+            target_pid: self.target_pid,
+            target_name: self.target_name.clone(),
+            target_path: self.target_path.clone(),
+        });
+    }
+}
+
+/// 注入结果事件载荷（发给前端的 `inject-result`）
+///
+/// 约定与 `dnd-result` 一致：只报「送没送到、为什么没送到」，绝不带明文。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct InjectResult {
+    /// 是否已把密码送进目标窗口
+    pub ok: bool,
+    /// 本次会话代数：前端「放入剪贴板」时回传，防止旧提示条对新会话授权
+    pub seq: u64,
+    /// 是否还能改为剪贴板交付
+    ///
+    /// 只有「密码已解密、目标没送到」或「归因失败（待粘贴槽仍在）」时为 true。
+    /// 注意：这只是**提供入口**，真正写入剪贴板必须由用户点击授权
+    /// （见 `copy_pending_password_to_clipboard`）。
+    pub can_fallback: bool,
+}
+
+/// 失败收尾：记审计 + 通知前端（**不写剪贴板**）
+///
+/// # 为什么不在这里兜底写剪贴板
+///
+/// 剪贴板任何进程都能读，而注入只把字符送进目标窗口。失败时自动改投剪贴板，
+/// 等于程序单方面把安全等级降了一档，且用户未必察觉。
+/// 所以这里只负责「让失败可见 + 告知还能怎么补救」，真正写剪贴板由用户在提示条上
+/// 点一下（`copy_pending_password_to_clipboard`），一次点击一次授权。
+///
+/// # Arguments
+/// * `code` - 稳定原因码，前端按它映射文案
+/// * `detail` - 写进审计的附加说明（如解密错误原文），**不含密码**
+/// * `can_fallback` - 是否还有「放入剪贴板」这条路（待粘贴槽里还有密码时才有）
+fn fail(
+    ctx: &InjectCtx,
+    code: &str,
+    detail: Option<String>,
+    os_error: Option<u32>,
+    can_fallback: bool,
+) {
+    // 系统错误码（UIPI 拒绝 = 5 等）并进审计动作：事件载荷不带它之后，
+    // 审计日志是唯一持久记录，排查环境问题（权限/拦截）就靠这一段
+    let mut text = match detail {
+        Some(d) => format!("{code}: {d}"),
+        None => code.to_string(),
     };
-
-    crate::pending::record_audit(crate::pending::InjectAuditEvent {
-        ts: SystemTime::now(),
-        seq,
-        entry_id,
-        action,
-        target_pid,
-        target_name: Some(target_name),
-        target_path,
+    if let Some(e) = os_error {
+        text.push_str(&format!(" (os_error={e})"));
+    }
+    ctx.audit(AuditAction::Denied(text));
+    emit_result(InjectResult {
+        ok: false,
+        seq: ctx.seq,
+        can_fallback,
     });
+}
 
-    if success {
-        // pending 在整个倒计时内有效（多字段可反复 Ctrl+V），
-        // 会话结束靠 TTL 到期 / Ctrl+C / Esc / 剪贴板哨兵（见 hotkey.rs）
-        log::info!("[INJECT] ========== 注入完成 ==========");
-    } else {
-        log::error!("[INJECT] ========== 注入失败 ==========");
+/// 把注入结果推给前端（倒计时气泡据此扩成提示条）
+fn emit_result(result: InjectResult) {
+    if let Some(app) = get_app_handle() {
+        use tauri::Emitter;
+        if let Err(e) = app.emit("inject-result", result) {
+            log::warn!("[INJECT] 发送 inject-result 失败: {e}");
+        }
     }
 }
 

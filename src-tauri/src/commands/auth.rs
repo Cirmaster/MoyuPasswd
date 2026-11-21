@@ -298,6 +298,9 @@ pub async fn verify_master_password(
             // 解锁成功后按设置补同步「以管理员身份运行」标记（跨实例/换路径自愈，失败不影响解锁）
             crate::commands::settings::sync_run_as_admin_from_db(&state);
 
+            // 解锁后校正日志级别（启动时读不到设置，只能按构建类型给默认值）
+            crate::commands::settings::apply_log_level_from_db(&state);
+
             Ok(true)
         } else {
             // 验证失败，记录并可能触发锁定
@@ -804,6 +807,9 @@ pub async fn unlock_with_system_auth(state: State<'_, AppState>, app: tauri::App
         if let Err(e) = crate::commands::shortcuts::reload_from_settings(&app, &state) {
             log::warn!("解锁后重注册快捷键失败: {e}");
         }
+
+        // 解锁后校正日志级别（与主密码解锁同一处理）
+        crate::commands::settings::apply_log_level_from_db(&state);
 
         log::info!("系统认证解锁成功");
         Ok(true)

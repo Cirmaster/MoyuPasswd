@@ -76,6 +76,7 @@ fn to_physical_pos(design: f64, scale: f64) -> i32 {
 /// `gtk::Settings::default()` 带 GTK 主线程断言，在 tokio 命令线程（如
 /// async 的 `show_countdown`）/光标跟随线程里调用会 panic
 /// （"GTK may only be used from the main thread."），故热路径绝不碰 GTK。
+#[cfg(target_os = "linux")]
 static TEXT_SCALE_BASE: Mutex<f64> = Mutex::new(1.0);
 
 /// 从 GTK 读取文字 DPI 缩放基线写入缓存（**仅主线程调用**）

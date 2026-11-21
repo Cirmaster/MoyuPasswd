@@ -32,8 +32,9 @@ pub const QUICK_SEARCH_HEIGHT: f64 = 450.0;
 pub const COUNTDOWN_DOT_WIDTH: f64 = 16.0;
 pub const COUNTDOWN_DOT_HEIGHT: f64 = 16.0;
 
-/// 倒计时气泡「终端二次确认提示条」态设计尺寸
-///（前端 CSS 的 .confirm-hint 同为 24px 高，两处需一致）
+/// 倒计时气泡「提示条」态设计尺寸
+///（前端 CSS 的 .hint-bar 同为 24px 高，两处需一致；提示条文案须控制在
+/// 宽度内，超了会被 overflow: hidden 裁掉）
 pub const COUNTDOWN_HINT_WIDTH: f64 = 200.0;
 pub const COUNTDOWN_HINT_HEIGHT: f64 = 24.0;
 

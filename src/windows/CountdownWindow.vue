@@ -3,19 +3,40 @@
 
   在鼠标位置显示的倒计时，用于剪贴板清除。
   点击数字取消倒计时并关闭窗口。
-  后端命中终端注入黑名单时发 terminal-inject-confirm 事件，
-  本窗口扩成提示条告知用户「再按 Ctrl+V 确认」。
+
+  两种情况下气泡会从圆点扩成提示条：
+  - 后端命中终端注入黑名单（terminal-inject-confirm）：告知用户「再按 Ctrl+V 确认」；
+  - 后端注入失败（inject-result）：这是注入链路的唯一可见反馈——注入失败时按键被吞、
+    屏幕上什么都不会发生。提示条会说明失败，并在可能时提供「点此放入剪贴板」入口。
 -->
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { disableContextMenu } from '@/lib/windowSetup'
 
+/** 注入结果事件载荷（与 Rust 的 inject::InjectResult 一一对应） */
+interface InjectResult {
+  /** 是否已把密码送进目标窗口 */
+  ok: boolean
+  /** 本次会话代数（「放入剪贴板」时回传，后端据此拒绝过期授权） */
+  seq: number
+  /** 是否还能改为剪贴板交付（只是提供入口，写入仍需用户点击） */
+  can_fallback: boolean
+}
+
+/** 提示条状态 */
+interface HintState {
+  /** 显示文案 */
+  text: string
+  /** 有值 = 可点击，点击后把该会话的待粘贴密码放入剪贴板 */
+  consentSeq?: number
+}
+
 /** 剩余秒数 */
 const remaining = ref(10)
 
-/** 终端二次确认提示（命中注入黑名单时后端触发） */
-const confirmHint = ref(false)
+/** 当前提示条（null = 显示倒计时圆点） */
+const hint = ref<HintState | null>(null)
 
 /** 计时器 */
 let timer: ReturnType<typeof setInterval> | null = null
@@ -43,36 +64,42 @@ const setCountdownExpanded = async (expanded: boolean) => {
 }
 
 /**
- * 显示终端二次确认提示条，5 秒后自动收起（与后端确认窗口 TTL 一致）
+ * 显示提示条，5 秒后自动收起
+ *
+ * 5 秒与后端终端二次确认窗口 TTL 一致；交付结果提示同样走这个节奏，
+ * 避免气泡长期占着屏幕（结果本身还有审计日志可查）。
  */
-const showConfirmHint = async () => {
-  confirmHint.value = true
+const showHint = async (state: HintState) => {
+  hint.value = state
   await setCountdownExpanded(true)
 
   if (hintTimer) clearTimeout(hintTimer)
   hintTimer = setTimeout(() => {
-    hideConfirmHint()
+    void hideHint()
   }, 5000)
 }
 
 /**
  * 收起提示条并恢复圆点尺寸
  */
-const hideConfirmHint = async () => {
+const hideHint = async () => {
   if (hintTimer) {
     clearTimeout(hintTimer)
     hintTimer = null
   }
-  if (confirmHint.value) {
-    confirmHint.value = false
+  if (hint.value) {
+    hint.value = null
     await setCountdownExpanded(false)
   }
 }
 
 /**
  * 开始倒计时
+ *
+ * 尺寸复位的 invoke 是异步的：必须先等它落地再展开提示条，
+ * 否则「复位成圆点」和「扩成提示条」两条命令会互相覆盖，提示条被裁成 16px。
  */
-const startCountdown = (seconds: number = 10) => {
+const startCountdown = async (seconds: number = 10) => {
 
   // 先停止之前的计时器
   if (timer) {
@@ -82,8 +109,8 @@ const startCountdown = (seconds: number = 10) => {
 
   // 每次显示强制复位为圆点尺寸：治愈任何卡住的窗口尺寸
   // （提示条扩窗后复位失败等场景；圆点内容钉左上角，尺寸对了就贴着光标）
-  hideConfirmHint()
-  setCountdownExpanded(false)
+  await hideHint()
+  await setCountdownExpanded(false)
 
   remaining.value = seconds
 
@@ -94,7 +121,7 @@ const startCountdown = (seconds: number = 10) => {
       stopCountdown()
       // 剪贴板清除由后端在复制时调度（copy_text_to_clipboard → schedule_clear），
       // 不依赖本窗口存活，前端只需关闭窗口
-      closeWindow()
+      void closeWindow()
     }
   }, 1000)
 }
@@ -166,6 +193,69 @@ const handleClick = async () => {
   await clearClipboard()
 }
 
+/** 授权请求是否在途（防连点重复写剪贴板） */
+let consentInFlight = false
+
+/**
+ * 用户点击提示条的「放入剪贴板」：把本次会话的待粘贴密码写进系统剪贴板
+ *
+ * 一次点击一次授权——后端不自动做这件事（剪贴板任何进程都能读，属于安全降级）。
+ * 传 seq 是为了让后端拒绝过期授权：提示条在屏幕上挂了 5 秒，期间用户可能已经复制了别的。
+ */
+const grantClipboardConsent = async (seq: number) => {
+  if (consentInFlight) return
+  consentInFlight = true
+  try {
+    const { invoke } = await import('@/lib/api')
+    const { ttl } = await invoke<{ ttl: number; mode: string }>(
+      'copy_pending_password_to_clipboard',
+      { seq },
+    )
+    // 倒计时的含义从「待粘贴 TTL」换成「剪贴板还剩多久清空」
+    if (ttl > 0) await startCountdown(ttl)
+    await showHint({ text: '密码已放入剪贴板，请按 Ctrl+V' })
+  } catch (e) {
+    await showHint({ text: '未能放入剪贴板，请重新复制' })
+    console.warn('改投剪贴板失败:', e)
+  } finally {
+    consentInFlight = false
+  }
+}
+
+/**
+ * 点击提示条
+ *
+ * - 有 consentSeq：放入剪贴板（用户授权）
+ * - 没有（终端二次确认提示）：只收起来，不要顺带清剪贴板
+ */
+const handleHintClick = async () => {
+  const current = hint.value
+  if (!current) return
+  if (current.consentSeq === undefined) {
+    await hideHint()
+    return
+  }
+  await grantClipboardConsent(current.consentSeq)
+}
+
+/**
+ * 处理注入结果（唯一能把「按键被吞」变成可见反馈的地方）
+ *
+ * - 成功：不提示。字符已经上屏，是比任何提示都可靠的反馈，弹条只是噪音；
+ * - 失败但还能改投剪贴板：提示条给出入口，等用户点击（不自动放宽）；
+ * - 彻底失败：只提示，别让用户以为密码已经过去了。
+ */
+const handleInjectResult = async (result: InjectResult | null | undefined) => {
+  if (!result || result.ok) return
+
+  if (result.can_fallback) {
+    await showHint({ text: '粘贴失败，点此放入剪贴板', consentSeq: result.seq })
+    return
+  }
+
+  await showHint({ text: '粘贴失败，请重新复制密码' })
+}
+
 /**
  * 初始化
  */
@@ -180,29 +270,33 @@ onMounted(async () => {
 
     // 从后端获取倒计时秒数并启动
     const seconds = await invoke<number>('get_countdown_seconds')
-    startCountdown(seconds)
+    void startCountdown(seconds)
 
     // 监听重置倒计时事件
     await listen<{ seconds: number }>('reset-countdown', (event) => {
-      hideConfirmHint()
-      startCountdown(event.payload.seconds || 10)
+      void startCountdown(event.payload.seconds || 10)
     })
 
     // 监听终端注入二次确认提示（命中黑名单时后端触发）
-    await listen<{ process: string }>('terminal-inject-confirm', (event) => {
-      showConfirmHint()
+    await listen<{ process: string }>('terminal-inject-confirm', () => {
+      void showHint({ text: '目标是终端，再按 Ctrl+V 确认' })
+    })
+
+    // 监听注入结果（失败时后端触发；成功不发，避免每次粘贴都弹一下）
+    await listen<InjectResult>('inject-result', (event) => {
+      void handleInjectResult(event.payload)
     })
 
     // 监听取消倒计时事件
     await listen('cancel-countdown', () => {
       stopCountdown()
-      closeWindow()
+      void closeWindow()
     })
 
     // 后端已完成清除（兜底），前端只需关闭窗口
     await listen('clipboard-cleared', () => {
       stopCountdown()
-      closeWindow()
+      void closeWindow()
     })
 
   } catch (e) {
@@ -221,9 +315,11 @@ onUnmounted(() => {
 
 <template>
   <div class="countdown-container" @click="handleClick">
-    <!-- 终端二次确认提示条 -->
-    <div v-if="confirmHint" class="confirm-hint">
-      目标是终端，再按 Ctrl+V 确认
+    <!-- 提示条：终端二次确认 / 交付结果。
+         可点击的（有 consentSeq）点了把密码放入剪贴板；
+         不可点击的只收起——不能顺带清剪贴板，降级后剪贴板里可能就是密码 -->
+    <div v-if="hint" class="hint-bar" @click.stop="handleHintClick()">
+      {{ hint.text }}
     </div>
     <!-- 默认倒计时圆点 -->
     <div v-else class="countdown-circle">
@@ -287,8 +383,9 @@ html, body {
   font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
-.confirm-hint {
-  /* 高度与 src-tauri/src/window_sizes.rs 的 COUNTDOWN_HINT_HEIGHT 对应，两处需一致 */
+.hint-bar {
+  /* 高度与 src-tauri/src/window_sizes.rs 的 COUNTDOWN_HINT_HEIGHT 对应，两处需一致；
+     宽度按 COUNTDOWN_HINT_WIDTH（200px）排版，文案须控制在 16 个汉字以内 */
   height: 24px;
   padding: 0 10px;
   border-radius: 12px;

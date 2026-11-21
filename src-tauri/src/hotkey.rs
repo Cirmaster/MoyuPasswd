@@ -13,9 +13,14 @@ mod win_impl {
     use std::ptr;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
     use windows::Win32::UI::WindowsAndMessaging::*;
-    use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::DataExchange::GetClipboardSequenceNumber;
     use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::core::PWSTR;
 
     /// 一次性钩子句柄
     static HOOK_HANDLE: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
@@ -37,6 +42,57 @@ mod win_impl {
     /// 会话期间序号一变就说明用户复制了新内容（右键/菜单复制不经 Ctrl+C，
     /// 钩子收不到退出信号），此时应立即销毁粘贴状态，防旧密码劫持后续 Ctrl+V。
     static CLIP_BASELINE: AtomicU32 = AtomicU32::new(0);
+
+    /// 「重装钩子」线程消息（投递给钩子线程，在它的消息循环里处理）
+    ///
+    /// 用 WM_APP 之后的自定义值：不与其他系统消息冲突，也不需要窗口句柄
+    /// （PostThreadMessageW 直接投递到线程队列）。
+    const WM_REARM: u32 = 0x8000 + 1;
+
+    /// 远控客户端前台守望线程的参数
+    ///
+    /// 低级键盘钩子按「后装先调用」执行。远控客户端（ToDesk 等）在**获得前台时**
+    /// 才安装自己的 WH_KEYBOARD_LL，把物理按键全部拦下转发给远端，于是比它先装的
+    /// 钩子一个都收不到（RemoteDictation 在真实 ToDesk 环境的实测：启动时装 0/37，
+    /// 远控到前台后重装 37/37）。
+    ///
+    /// 对策与它一致：
+    /// 1. 远控窗口刚切到前台时等 300ms，让它先装完，我们立刻重装压到它前面；
+    /// 2. 之后每 3 秒补装一次，防止它后续重装或别的软件插队。
+    ///
+    /// 只在「粘贴会话进行中」做，会话结束线程自行退出——钩子仍然是一次性的。
+    const REMOTE_FOREGROUND_SETTLE_MS: u64 = 300;
+    const REARM_INTERVAL_MS: u64 = 3000;
+    const GUARD_TICK_MS: u64 = 300;
+
+    /// 会「获得前台就吞键」的远控客户端进程名（小写比较）
+    ///
+    /// 只需覆盖「本机作为主控端」的常见客户端；列表外的软件不会重装钩子，
+    /// 退化为原有行为（收不到按键）。新增客户端加进这个数组即可。
+    const REMOTE_CLIENTS: &[&str] = &[
+        "todesk.exe",
+        "sunloginclient.exe",
+        "awesun.exe",
+        "rustdesk.exe",
+        "anydesk.exe",
+        "teamviewer.exe",
+        "gameviewer.exe",
+        "uuremote.exe",
+        "uu_remote.exe",
+        "mstsc.exe",
+        "msrdc.exe",
+        "vncviewer.exe",
+        "tvnviewer.exe",
+        "strwinclt.exe",
+        "nxplayer.exe",
+        "nxplayer.bin",
+        "anyviewer.exe",
+        "parsecd.exe",
+        "moonlight.exe",
+    ];
+
+    /// 是否已经提示过「权限不够」——每个进程只提示一次，避免每 3 秒刷屏
+    static ELEVATION_HINTED: AtomicBool = AtomicBool::new(false);
 
     /// 读取当前剪贴板序号（0 = 读取失败/不可用）
     fn clipboard_seq() -> u32 {
@@ -125,44 +181,42 @@ mod win_impl {
                 HOOK_THREAD_ID.store(GetCurrentThreadId(), Ordering::SeqCst);
 
                 // 注册低级键盘钩子
-                let hook = SetWindowsHookExW(
-                    WH_KEYBOARD_LL,
-                    Some(hook_proc),
-                    None,
-                    0,
-                );
+                if install_hook() {
+                    IS_ACTIVE.store(true, Ordering::SeqCst);
+                    SHUTTING_DOWN.store(false, Ordering::SeqCst);
+                    log::info!(
+                        "Ctrl+V 钩子已激活，句柄={:?}",
+                        HOOK_HANDLE.load(Ordering::SeqCst)
+                    );
 
-                match hook {
-                    Ok(h) => {
-                        HOOK_HANDLE.store(h.0, Ordering::SeqCst);
-                        IS_ACTIVE.store(true, Ordering::SeqCst);
-                        SHUTTING_DOWN.store(false, Ordering::SeqCst);
-                        log::info!("Ctrl+V 钩子已激活，句柄={:?}", h.0);
-
-                        // 关键：运行消息循环（钩子依赖消息循环）；deactivate 发 WM_QUIT 使其返回 0 退出
-                        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-                            let _ = TranslateMessage(&msg);
-                            DispatchMessageW(&msg);
+                    // 关键：运行消息循环（钩子依赖消息循环）；deactivate 发 WM_QUIT 使其返回 0 退出
+                    while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                        // 重装请求：远控客户端抢到前台后，重装才能排到它前面。
+                        // 必须在钩子线程上重装（SetWindowsHookEx 挂到哪个线程的
+                        // 消息队列由调用线程决定），所以用线程消息而不是别的线程直接装。
+                        if msg.message == WM_REARM {
+                            install_hook();
+                            continue;
                         }
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
 
-                        // 消息循环退出，清理钩子
-                        let hook = HOOK_HANDLE.load(Ordering::SeqCst);
-                        if !hook.is_null() {
-                            let _ = UnhookWindowsHookEx(HHOOK(hook));
-                            HOOK_HANDLE.store(ptr::null_mut(), Ordering::SeqCst);
-                        }
-                        IS_ACTIVE.store(false, Ordering::SeqCst);
-                        SHUTTING_DOWN.store(false, Ordering::SeqCst);
-                        HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-                        log::info!("钩子线程退出，钩子已卸载");
+                    // 消息循环退出，清理钩子
+                    let hook = HOOK_HANDLE.load(Ordering::SeqCst);
+                    if !hook.is_null() {
+                        let _ = UnhookWindowsHookEx(HHOOK(hook));
+                        HOOK_HANDLE.store(ptr::null_mut(), Ordering::SeqCst);
                     }
-                    Err(e) => {
-                        log::error!("注册 Ctrl+V 钩子失败: {}", e);
-                        // IS_ACTIVE 已在 activate 里同步置位，失败必须复位
-                        IS_ACTIVE.store(false, Ordering::SeqCst);
-                        SHUTTING_DOWN.store(false, Ordering::SeqCst);
-                        HOOK_THREAD_ID.store(0, Ordering::SeqCst);
-                    }
+                    IS_ACTIVE.store(false, Ordering::SeqCst);
+                    SHUTTING_DOWN.store(false, Ordering::SeqCst);
+                    HOOK_THREAD_ID.store(0, Ordering::SeqCst);
+                    log::info!("钩子线程退出，钩子已卸载");
+                } else {
+                    // IS_ACTIVE 已在 activate 里同步置位，失败必须复位
+                    IS_ACTIVE.store(false, Ordering::SeqCst);
+                    SHUTTING_DOWN.store(false, Ordering::SeqCst);
+                    HOOK_THREAD_ID.store(0, Ordering::SeqCst);
                 }
             }
         });
@@ -212,7 +266,167 @@ mod win_impl {
             }
         });
 
+        // 远控客户端守望：远控窗口在前台时持续把钩子重装到它前面
+        //（ToDesk 等会吞掉物理按键，见 REMOTE_CLIENTS 的说明）
+        std::thread::spawn(spawn_remote_client_guard);
+
         log::info!("钩子线程已启动");
+    }
+
+    /// 安装（或重装）低级键盘钩子——**只能在钩子线程上调用**
+    ///
+    /// 重装是「抢到远控软件前面」的唯一手段：低级钩子后装先调用，没有调优先级的 API。
+    /// 先卸旧句柄再装新的；装失败也不留旧句柄（旧句柄若已被顶掉，留着只是幻觉）。
+    ///
+    /// # Returns
+    /// 是否装成功。失败时 `HOOK_HANDLE` 为空，钩子线程仍继续跑（下一轮重装可能成功）。
+    unsafe fn install_hook() -> bool {
+        let old = HOOK_HANDLE.swap(ptr::null_mut(), Ordering::SeqCst);
+        if !old.is_null() {
+            let _ = UnhookWindowsHookEx(HHOOK(old));
+        }
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
+            Ok(h) => {
+                HOOK_HANDLE.store(h.0, Ordering::SeqCst);
+                true
+            }
+            Err(e) => {
+                log::error!("注册 Ctrl+V 钩子失败: {e}");
+                false
+            }
+        }
+    }
+
+    /// 请求钩子线程重装钩子（线程消息，不在调用线程直接装）
+    fn request_rearm() {
+        let tid = HOOK_THREAD_ID.load(Ordering::SeqCst);
+        if tid == 0 {
+            return;
+        }
+        unsafe {
+            if let Err(e) = PostThreadMessageW(tid, WM_REARM, WPARAM(0), LPARAM(0)) {
+                log::warn!("投递重装钩子消息失败: {e}");
+            }
+        }
+    }
+
+    /// 前台窗口的进程名（小写；归因失败返回 None）
+    ///
+    /// 每 300ms 会被调用一次，所以**不写日志**——失败就当作「不是远控客户端」。
+    /// 归因只需要进程名，不要路径、不落盘。
+    unsafe fn foreground_process_name(hwnd: HWND) -> Option<String> {
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut size = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+        .is_ok();
+        let _ = CloseHandle(handle);
+        if !ok || size == 0 {
+            return None;
+        }
+        let path = String::from_utf16_lossy(&buf[..size as usize]);
+        std::path::Path::new(&path)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+    }
+
+    /// 当前进程是否以管理员（高完整性）运行
+    ///
+    /// 与「重装钩子」是两件事，必须分开判断：远控客户端常以管理员运行，
+    /// UIPI 下普通权限进程**既收不到它前台时的按键，也不能向它发送输入**，
+    /// 这种情况钩子装得再晚也没用。只用于提示，不改变任何行为。
+    fn is_elevated() -> bool {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Security::{
+            GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
+        };
+        use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+        unsafe {
+            let mut token = HANDLE::default();
+            if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+                return false;
+            }
+            let mut elevation = TOKEN_ELEVATION::default();
+            let mut len: u32 = 0;
+            let ok = GetTokenInformation(
+                token,
+                TokenElevation,
+                Some(&mut elevation as *mut _ as *mut _),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut len,
+            )
+            .is_ok();
+            let _ = CloseHandle(token);
+            ok && elevation.TokenIsElevated != 0
+        }
+    }
+
+    /// 远控客户端前台守望：保证钩子始终排在远控软件自己的钩子前面
+    ///
+    /// 只在粘贴会话进行中工作，会话结束（`IS_ACTIVE` 为 false）自行退出；
+    /// 插件语义不变——钩子仍然只在复制密码后的那几十秒存在。
+    fn spawn_remote_client_guard() {
+        use std::time::{Duration, Instant};
+
+        // 上次重装时的前台窗口（用来识别「刚切进远控窗口」）
+        let mut last_hwnd: isize = 0;
+        let mut last_rearm = Instant::now();
+
+        loop {
+            std::thread::sleep(Duration::from_millis(GUARD_TICK_MS));
+            if !IS_ACTIVE.load(Ordering::SeqCst) {
+                return;
+            }
+            // 没有粘贴状态时远控吞不吞键与我们无关，且此时钩子本来就该卸了
+            if !has_paste_state() {
+                last_hwnd = 0;
+                continue;
+            }
+            let hwnd = unsafe { GetForegroundWindow() };
+            if hwnd.is_invalid() {
+                continue;
+            }
+            let Some(name) = (unsafe { foreground_process_name(hwnd) }) else {
+                continue;
+            };
+            if !REMOTE_CLIENTS.contains(&name.as_str()) {
+                last_hwnd = 0;
+                continue;
+            }
+
+            let current = hwnd.0 as isize;
+            if current != last_hwnd {
+                // 刚切进远控窗口：等它先把自己的钩子装完，我们再压上去
+                std::thread::sleep(Duration::from_millis(REMOTE_FOREGROUND_SETTLE_MS));
+                log::info!("[HOOK] 远控客户端在前台（{name}），重装钩子以排到其前面");
+                request_rearm();
+                last_hwnd = current;
+                last_rearm = Instant::now();
+
+                // 权限不够时重装也没用，提示一次（用户需要把「以管理员身份运行」打开）
+                if !is_elevated() && !ELEVATION_HINTED.swap(true, Ordering::SeqCst) {
+                    log::warn!(
+                        "[HOOK] 当前进程未提权，若 {name} 以管理员运行，UIPI 会导致\
+                         收不到它的前台按键——请在设置里开启「以管理员身份运行」"
+                    );
+                }
+            } else if last_rearm.elapsed() >= Duration::from_millis(REARM_INTERVAL_MS) {
+                // 补装：远控软件可能在中途重装了自己的钩子，需要持续压着
+                request_rearm();
+                last_rearm = Instant::now();
+            }
+        }
     }
 
     /// 反激活钩子
@@ -259,45 +473,51 @@ mod win_impl {
 
             // 检测 Ctrl+V
             if is_keydown && kb.vkCode == 'V' as u32 && is_ctrl_pressed() {
-                log::info!("[HOOK] 检测到 Ctrl+V");
-
-                // 检查：有待粘贴密码就拦截。
-                // 自己的窗口同样拦截：密码不进剪贴板，放行只会在本应用内贴出空/旧内容；
-                // 应用内表单（如新建条目里粘贴刚复制的密码）也走注入。
-                // 锁屏/解锁框不受影响：lockdown 已作废 pending。
-                let has_pending = crate::pending::get_active().is_some();
-
-                if has_pending {
-                    // 剪贴板哨兵兜底（轮询间隔内可能漏判）：剪贴板已换过新内容时，
-                    // 本次 Ctrl+V 还给系统做普通粘贴，异步销毁残留会话
-                    if clipboard_changed() {
-                        log::info!("[HOOK] 剪贴板已换新内容，放行 Ctrl+V 并销毁粘贴状态");
-                        let app = get_hook_app();
-                        std::thread::spawn(move || {
-                            match app {
-                                Some(app) => {
-                                    crate::commands::countdown::cancel_paste_state(
-                                        &app,
-                                        "clipboard-changed",
-                                        false,
-                                    );
-                                }
-                                None => crate::pending::revoke("clipboard-changed"),
-                            }
-                        });
-                    } else {
-                        log::info!("[HOOK] 拦截 Ctrl+V，触发注入");
-
-                        // 触发注入（在独立线程执行，避免阻塞钩子）
-                        std::thread::spawn(|| {
-                            crate::inject::trigger_inject();
-                        });
-
-                        // 吞掉这次按键（不传给系统）
-                        return LRESULT(1);
-                    }
+                // 「自动」交付模式：目标进程在前台时放行原生粘贴（密码此刻在剪贴板里）。
+                // 这里绝不能拦截——远控客户端不转发合成按键，拦下来走注入反而送不出去
+                if crate::auto_clipboard::ctrl_v_pass_through() {
+                    log::info!("[HOOK] 自动模式：目标进程在前台，放行 Ctrl+V 给原生粘贴");
                 } else {
-                    log::info!("[HOOK] 不拦截：无待粘贴密码");
+                    log::info!("[HOOK] 检测到 Ctrl+V");
+
+                    // 检查：有待粘贴密码就拦截。
+                    // 自己的窗口同样拦截：密码不进剪贴板，放行只会在本应用内贴出空/旧内容；
+                    // 应用内表单（如新建条目里粘贴刚复制的密码）也走注入。
+                    // 锁屏/解锁框不受影响：lockdown 已作废 pending。
+                    let has_pending = crate::pending::get_active().is_some();
+
+                    if has_pending {
+                        // 剪贴板哨兵兜底（轮询间隔内可能漏判）：剪贴板已换过新内容时，
+                        // 本次 Ctrl+V 还给系统做普通粘贴，异步销毁残留会话
+                        if clipboard_changed() {
+                            log::info!("[HOOK] 剪贴板已换新内容，放行 Ctrl+V 并销毁粘贴状态");
+                            let app = get_hook_app();
+                            std::thread::spawn(move || {
+                                match app {
+                                    Some(app) => {
+                                        crate::commands::countdown::cancel_paste_state(
+                                            &app,
+                                            "clipboard-changed",
+                                            false,
+                                        );
+                                    }
+                                    None => crate::pending::revoke("clipboard-changed"),
+                                }
+                            });
+                        } else {
+                            log::info!("[HOOK] 拦截 Ctrl+V，触发注入");
+
+                            // 触发注入（在独立线程执行，避免阻塞钩子）
+                            std::thread::spawn(|| {
+                                crate::inject::trigger_inject();
+                            });
+
+                            // 吞掉这次按键（不传给系统）
+                            return LRESULT(1);
+                        }
+                    } else {
+                        log::info!("[HOOK] 不拦截：无待粘贴密码");
+                    }
                 }
             }
 
@@ -584,6 +804,13 @@ mod x11_impl {
     /// 2. 剪贴板已换新内容 → 异步销毁会话 + 回放（对齐 Windows「放行做普通粘贴」）
     /// 3. 正常 → 解开抓取、注入（注入后由循环按 pending 决定是否重新抓取）
     fn handle_ctrl_v(conn: &impl Connection, root: u32, v_kc: u8, grabbed: &mut bool) {
+        // 「自动」交付模式：目标进程在前台时回放给原生粘贴（密码此刻在剪贴板里），
+        // 与 Windows 侧语义一致（见 auto_clipboard.rs）
+        if crate::auto_clipboard::ctrl_v_pass_through() {
+            log::info!("[HOOK] 自动模式：目标进程在前台，放行 Ctrl+V 给原生粘贴");
+            replay_key(conn);
+            return;
+        }
         log::info!("[HOOK] X11 检测到 Ctrl+V");
         let active = crate::x11::get_cardinal(conn, root, "_NET_ACTIVE_WINDOW").unwrap_or(0);
         log::info!("[HOOK] 当前前台窗口={}", active);

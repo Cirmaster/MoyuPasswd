@@ -36,6 +36,19 @@ pub mod inject;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
+/// 非 Linux 的会话判定空实现
+///
+/// Wayland 只存在于 Linux，这里恒返回 false。保留同名模块与同名函数，
+/// 是为了让 clipboard / countdown 里「Wayland 才改道」的判断不必加 `cfg`
+/// （该分支在非 Linux 上本来就不成立）。注意只提供 `is_wayland_session`：
+/// 其他 X11 函数在非 Linux 依然编译不过，避免被误用。
+#[cfg(not(target_os = "linux"))]
+pub mod x11 {
+    pub fn is_wayland_session() -> bool {
+        false
+    }
+}
+
 /// 审计模块
 pub mod audit;
 
@@ -63,6 +76,12 @@ pub mod browser_keys;
 /// 统一响应格式模块（所有命令返回 { code, message, data } 包裹）
 pub mod response;
 
+/// 技术日志模块（区别于 audit 的审计日志；见 logging.rs）
+pub mod logging;
+
+/// 「自动」交付模式：目标进程在前台时才把密码写进剪贴板，失焦立刻抹掉（见 auto_clipboard.rs）
+pub mod auto_clipboard;
+
 /// 窗口「设计尺寸」常量（单一来源；见 window_sizes.rs 的维护约定）
 pub mod window_sizes;
 
@@ -73,10 +92,69 @@ pub mod scale;
 pub mod commands;
 
 /// 拖放交付模块（Wayland 下密码不进剪贴板的唯一通道；见 dnd.rs）
+///
+/// 只有 Linux 有这条链路：底层依赖 GTK 的 `drag-begin` / `drag-data-get`。
+/// 非 Linux 的空实现见下方同名模块。
+#[cfg(target_os = "linux")]
 pub mod dnd;
 
 /// 拖拽池窗口（Wayland 下「点复制入池、从池里拖」的载体；见 pool_window.rs）
+///
+/// 同样是纯 GTK 实现，只在 Linux 存在。
+#[cfg(target_os = "linux")]
 pub mod pool_window;
+
+/// 非 Linux 的 `dnd` 空实现
+///
+/// 拖放链路只在 Linux 存在，但它的调用点（剪贴板改道、锁定时清池、拖放命令）
+/// 分布在跨平台代码里。这里按同名模块提供最小 API，让调用点不必到处写 `cfg`：
+/// 非 Linux 上 Wayland 判定恒为 false，这些路径本来就走不到。
+#[cfg(not(target_os = "linux"))]
+pub mod dnd {
+    use crate::pending::DecryptFn;
+
+    /// 拖放武装有效期（与 Linux 实现同值，仅供命令返回值使用）
+    pub const TTL_SECS: u64 = 20;
+
+    /// 池中载荷（与 Linux 实现同构，保证调用点类型一致）
+    #[derive(Clone)]
+    pub enum PoolPayload {
+        /// 密码：延迟解密
+        Secret(DecryptFn),
+        /// 普通文本：随条目一起清零
+        Plain(zeroize::Zeroizing<String>),
+    }
+
+    pub fn arm(_entry_id: &str, _decrypt_fn: DecryptFn) -> u64 {
+        0
+    }
+
+    pub fn revoke(_reason: &str) -> Option<String> {
+        None
+    }
+
+    pub fn pool_put(_id: &str, _title: &str, _username: &str, _payload: PoolPayload) -> u64 {
+        0
+    }
+
+    pub fn text_pool_id(_title: &str, _subtitle: &str, _text: &str) -> String {
+        String::new()
+    }
+
+    pub fn pool_count() -> usize {
+        0
+    }
+}
+
+/// 非 Linux 的 `pool_window` 空实现（浮窗是 GTK 窗口，其他平台没有它）
+#[cfg(not(target_os = "linux"))]
+pub mod pool_window {
+    pub fn toggle(_app: &tauri::AppHandle) {}
+
+    pub fn shutdown(_app: &tauri::AppHandle) {}
+
+    pub fn reveal_with_fly_in(_app: &tauri::AppHandle) {}
+}
 
 use state::AppState;
 use tauri::Manager;
@@ -152,14 +230,9 @@ pub fn run() {
         // 注册生物识别插件（Windows Hello / Touch ID）
         .plugin(tauri_plugin_biometry::init())
         .setup(|app| {
-            // 开发模式下启用日志
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            // 日志：release 也落盘（默认 Warn，异常与失败都能留下痕迹）。
+            // 优先级最高——后面所有模块的失败都靠它留下线索（见 logging.rs）
+            logging::init(app.handle())?;
 
             // 初始化空闲检测模块
             idle::init();
@@ -184,8 +257,7 @@ pub fn run() {
                 }
             }
 
-            // 窗口缩放换算：登记设计尺寸并按渲染缩放应用窗口物理尺寸。
-            // 必须在主窗口 show() 之前完成——用户看不到尺寸跳动（见 scale.rs）
+            // 窗口缩放换算：登记设计尺寸并按渲染缩放应用窗口物理尺寸
             scale::init(app.handle());
 
             // 初始化审计模块
@@ -248,17 +320,23 @@ pub fn run() {
 
             // 创建系统托盘菜单
             let show_item = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
+            // 密码浮窗是 Wayland 拖放交付的载体（纯 GTK）：非 Linux 没有这条链路，
+            // 菜单项整个不出现，免得点了没反应
+            #[cfg(target_os = "linux")]
             let pool_item = MenuItemBuilder::with_id("pool", "显示/隐藏密码浮窗").build(app)?;
             let lock_item = MenuItemBuilder::with_id("lock", "锁定").build(app)?;
             let quit_item = MenuItemBuilder::with_id("quit", "退出").build(app)?;
 
-            let menu = MenuBuilder::new(app)
-                .item(&show_item)
-                .item(&pool_item)
-                .item(&lock_item)
-                .separator()
-                .item(&quit_item)
-                .build()?;
+            let menu = {
+                let builder = MenuBuilder::new(app).item(&show_item);
+                #[cfg(target_os = "linux")]
+                let builder = builder.item(&pool_item);
+                builder
+                    .item(&lock_item)
+                    .separator()
+                    .item(&quit_item)
+                    .build()?
+            };
 
             // 创建系统托盘图标
             let _tray = TrayIconBuilder::new()
@@ -274,6 +352,8 @@ pub fn run() {
                             }
                         }
                         "pool" => {
+                            // 菜单项只在 Linux 建（见上面的 cfg）
+                            #[cfg(target_os = "linux")]
                             pool_window::toggle(app);
                         }
                         "lock" => {
@@ -284,6 +364,7 @@ pub fn run() {
                         "quit" => {
                             crate::pending::revoke("quit");
                             // 退出前把池子和它的窗口一起收掉，别留下一个孤儿浮层
+                            //（浮窗只在 Linux 存在，其他平台是空实现）
                             pool_window::shutdown(app);
                             crate::hotkey::deactivate();
                             if let Err(e) = crate::clipboard::clear_now(app) {
@@ -316,6 +397,14 @@ pub fn run() {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                            }
+                        } else {
+                            // 窗口必须以「可见」创建：隐藏态建窗会让 WebView2 不完成初始化、
+                            // 丢掉创建时的导航，之后 show/reload 全部空转（页面永远空白）。
+                            // 所以「启动不显示」只能在建好之后立刻收进托盘，顺序不能反
+                            //（见 tauri.conf.json 的 visible: true）
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.hide();
                             }
                         }
                     }
@@ -365,6 +454,8 @@ pub fn run() {
             commands::delete_password,
             commands::toggle_favorite,
             commands::copy_password_to_clipboard,
+            // 用户授权的剪贴板交付（注入失败后点提示条才走这里）
+            commands::copy_pending_password_to_clipboard,
             commands::touch_password_usage,
             // 交付能力与拖放交付（Wayland）
             commands::get_capabilities,

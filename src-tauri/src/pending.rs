@@ -30,6 +30,23 @@ static PENDING: Mutex<Option<PendingClip>> = Mutex::new(None);
 /// 代数计数器
 static SEQ_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// 本次待粘贴会话内，注入被触发的次数（诊断用）
+///
+/// 回答一个现场排障绕不开的问题：用户按了 Ctrl+V 却「什么都没发生」时，
+/// 是注入失败了，还是键盘钩子压根没收到按键（被远程控制客户端、输入法安全键盘、
+/// 安全软件的低级钩子先吃掉）？到期时这个数字还是 0，就能直接把后者钉死。
+static INJECT_ATTEMPTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 记一次注入触发（由 `inject::trigger_inject` 入口调用）
+pub fn note_inject_attempt() {
+    INJECT_ATTEMPTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 本次会话至今的注入触发次数
+fn inject_attempts() -> u64 {
+    INJECT_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// 审计事件动作类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AuditAction {
@@ -37,6 +54,11 @@ pub enum AuditAction {
     Pending,
     /// 密码已注入到目标窗口
     Injected,
+    /// 注入失败，已改走剪贴板交付（括号内为原因码与清除秒数）
+    ///
+    /// 与 `Denied` 分开记：这不是「拒绝交付」，而是「换了一条通道交出去」，
+    /// 事后排查时要能一眼分辨失败的真实去向。
+    FallbackClipboard(String),
     /// 拒绝注入
     Denied(String),
     /// 已过期
@@ -81,6 +103,8 @@ const AUDIT_BUFFER_SIZE: usize = 1000;
 pub fn register_with_decrypt(entry_id: &str, ttl_seconds: u32, decrypt_fn: DecryptFn) -> u64 {
     let seq = SEQ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let deadline = Instant::now() + Duration::from_secs(ttl_seconds.max(1) as u64);
+    // 新会话的计数归零（诊断统计按会话算）
+    INJECT_ATTEMPTS.store(0, std::sync::atomic::Ordering::SeqCst);
 
     let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
     // 再次复制：旧 pending 作废（沿用「再次复制后作废」语义，记 Revoked 审计）
@@ -184,7 +208,16 @@ fn expire_if_stale_locked(pending: &mut Option<PendingClip>) -> bool {
                 target_name: None,
                 target_path: None,
             });
-            log::info!("[PENDING] 已过期，清理: seq={}", seq);
+            // 到期却一次注入都没触发过：说明 Ctrl+V 没走到我们的钩子
+            //（被远程控制客户端 / 输入法 / 安全软件先吃掉），不是注入失败
+            if inject_attempts() == 0 {
+                log::warn!(
+                    "[PENDING] 会话到期，期间没有任何注入尝试：Ctrl+V 可能没被钩子收到（seq={}）",
+                    seq
+                );
+            } else {
+                log::info!("[PENDING] 已过期，清理: seq={}", seq);
+            }
             return true;
         }
     }

@@ -47,6 +47,43 @@ pub struct Settings {
     /// 空 = 恢复默认名单（防误清空裸奔），与 inject::load_blacklist 同语义
     #[serde(default)]
     pub inject_blacklist: String,
+    /// 诊断日志（默认关）：打开后技术日志级别升到 Info，记录注入流程细节。
+    /// 关闭时 release 只记 Warn——失败与异常仍然有，不会因为关着而丢失排障线索
+    #[serde(default)]
+    pub diagnostic_log: bool,
+    /// 密码交付方式：`inject`（默认，Ctrl+V 注入，密码不进剪贴板）、
+    /// `clipboard`（直接写系统剪贴板，靠目标端剪贴板同步/原生 Ctrl+V 粘贴）或
+    /// `auto`（名单内的目标进程在前台时才写剪贴板，失焦立刻抹掉）。
+    ///
+    /// clipboard/auto 是给「不转发合成按键」的远控客户端用的（ToDesk 前台时按键在
+    /// 到低级钩子之前就被吃掉，注入怎么调都送不进去，而它的剪贴板同步是通的）。
+    /// 代价是密码明文会经过系统剪贴板，所以必须用户显式选择；默认值永远是 `inject`
+    /// ——安全默认只能是「密码不落剪贴板」。auto 的目标进程名单见
+    /// [`Self::auto_clipboard_processes`]。
+    #[serde(default = "default_password_delivery")]
+    pub password_delivery: String,
+    /// 「自动」交付模式的剪贴板目标进程名单（逗号分隔的完整进程名，如 `ToDesk.exe`）。
+    /// 命中名单的进程获得前台时密码才进剪贴板，失焦立刻抹掉。
+    /// **空 = 使用默认名单**（[`default_auto_clipboard_processes`]，常见远程控制客户端）——
+    /// 占位符容易被当成已填内容，所以宁可给真默认值，也不要让人误以为配好了
+    #[serde(default = "default_auto_clipboard_processes")]
+    pub auto_clipboard_processes: String,
+}
+
+/// `password_delivery` 的默认值（`inject`）
+///
+/// 单独成函数是因为 String 的 `#[serde(default)]` 会给出空串，
+/// 空串得再走一遍「当作 inject」的兜底，不如让默认值本身就是合法值。
+fn default_password_delivery() -> String {
+    "inject".to_string()
+}
+
+/// `auto_clipboard_processes` 的默认名单（常见远程控制客户端）
+///
+/// 这类客户端不转发合成按键、只同步剪贴板，正是「自动」交付模式的服务对象；
+/// 用户可在设置里增删。空名单一律回退到它（见 [`read_auto_clipboard_processes`]）。
+fn default_auto_clipboard_processes() -> String {
+    "ToDesk.exe, SunloginClient.exe".to_string()
 }
 
 impl Default for Settings {
@@ -65,6 +102,9 @@ impl Default for Settings {
             allow_terminal_inject: false,
             run_as_admin: false,
             inject_blacklist: crate::inject::default_blacklist().join(", "),
+            diagnostic_log: false,
+            password_delivery: default_password_delivery(),
+            auto_clipboard_processes: default_auto_clipboard_processes(),
         }
     }
 }
@@ -85,6 +125,9 @@ const KNOWN_SETTING_KEYS: &[&str] = &[
     "allow_terminal_inject",
     "run_as_admin",
     "inject_blacklist",
+    "diagnostic_log",
+    "password_delivery",
+    "auto_clipboard_processes",
     "shortcuts",
 ];
 
@@ -128,9 +171,10 @@ fn validate_setting(key: &str, value: &str) -> Result<(), String> {
                 return Err(format!("{key} 取值非法: {value:?}"));
             }
         }
-        "inject_blacklist" => {
-            // 逗号分隔的进程名（空名单合法 = 恢复默认）；每段限长、
-            // 字符集与 Windows 进程名一致（字母数字 . - _），防塞脚本/路径
+        // 进程名单：逗号分隔的进程名。空名单合法（inject_blacklist = 恢复默认名单，
+        // auto_clipboard_processes = 读取时回退默认远控名单）；每段限长、
+        // 字符集与 Windows 进程名一致（字母数字 . - _），防塞脚本/路径
+        "inject_blacklist" | "auto_clipboard_processes" => {
             for item in value.split(',') {
                 let item = item.trim();
                 if item.is_empty() {
@@ -141,12 +185,18 @@ fn validate_setting(key: &str, value: &str) -> Result<(), String> {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
                 if !ok {
-                    return Err(format!("inject_blacklist 含非法进程名: {item:?}"));
+                    return Err(format!("{key} 含非法进程名: {item:?}"));
                 }
             }
         }
+        "password_delivery" => {
+            // 只有这三种：其余值会让复制密码时悄悄改变密码的去向，必须在这里挡死
+            if value != "inject" && value != "clipboard" && value != "auto" {
+                return Err(format!("{key} 只能是 inject / clipboard / auto"));
+            }
+        }
         "auto_start" | "close_to_tray" | "show_password_strength" | "show_on_startup"
-        | "allow_terminal_inject" | "run_as_admin" => {
+        | "allow_terminal_inject" | "run_as_admin" | "diagnostic_log" => {
             if value != "true" && value != "false" {
                 return Err(format!("{key} 只能是 true/false"));
             }
@@ -218,6 +268,16 @@ pub async fn get_settings(state: State<'_, AppState>) -> ApiResult<Settings> {
                 "show_on_startup" => settings.show_on_startup = value == "true",
                 "allow_terminal_inject" => settings.allow_terminal_inject = value == "true",
                 "run_as_admin" => settings.run_as_admin = value == "true",
+                "diagnostic_log" => settings.diagnostic_log = value == "true",
+                "password_delivery" => settings.password_delivery = value,
+                "auto_clipboard_processes" => {
+                    // 空名单一律回退默认名单：占位符曾被误当成已填内容，宁可给真默认值
+                    settings.auto_clipboard_processes = if value.trim().is_empty() {
+                        default_auto_clipboard_processes()
+                    } else {
+                        value
+                    };
+                }
                 "inject_blacklist" => {
                     // 与 inject::load_blacklist 同语义：解析后为空同样回退默认名单
                     let list: Vec<&str> = value
@@ -346,6 +406,10 @@ pub async fn save_setting(
         if key == "run_as_admin" {
             sync_run_as_admin(value == "true")?;
         }
+        // 诊断日志：开关即生效（运行期改日志级别，不需要重启）
+        if key == "diagnostic_log" {
+            crate::logging::apply_level(value == "true");
+        }
 
         Ok(())
 
@@ -397,6 +461,68 @@ pub fn sync_run_as_admin_from_db(state: &AppState) {
     if let Err(e) = sync_run_as_admin(enabled) {
         log::warn!("解锁后同步管理员启动标记失败: {e}");
     }
+}
+
+/// 解锁后按库里的「诊断日志」开关校正日志级别（失败不影响解锁）
+///
+/// 启动时数据库还没解锁，日志只能按构建类型给默认级别；解锁拿到库后必须立刻校正，
+/// 否则用户开了诊断日志、重启后却要等到打开设置页才生效。
+pub fn apply_log_level_from_db(state: &AppState) {
+    let enabled = {
+        let db = match state.get_db() {
+            Ok(db) => db,
+            Err(_) => return,
+        };
+        // 先落局部变量：让 db 守卫的借用在块尾表达式求值前结束（同 sync_run_as_admin_from_db）
+        let value = db.conn().query_row(
+            "SELECT value FROM settings WHERE key = 'diagnostic_log'",
+            [],
+            |row| row.get::<_, String>(0),
+        );
+        value.map(|v| v == "true").unwrap_or(false)
+    };
+    crate::logging::apply_level(enabled);
+}
+
+/// 读取密码交付方式（`inject` / `clipboard`）
+///
+/// 给 `copy_password_to_clipboard` 在分流前读一次用；取不到或值非法一律按 `inject`——
+/// 安全默认只能是「密码不进剪贴板」，宁可退到注入路径也不要悄悄把明文写进剪贴板。
+pub fn read_password_delivery(conn: &rusqlite::Connection) -> &'static str {
+    let value = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'password_delivery'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    match value.as_deref() {
+        Some("clipboard") => "clipboard",
+        Some("auto") => "auto",
+        _ => "inject",
+    }
+}
+
+/// 读取「自动」交付模式的剪贴板目标进程名单
+///
+/// 逗号分隔 → 去空去空白的 `Vec`（匹配时忽略大小写，见 auto_clipboard.rs）。
+/// 名单缺失或为空时回退默认名单（常见远程控制客户端）——空名单退化为注入的
+/// 老语义容易让人白试一次（配了「自动」却没生效），默认带上更符合直觉。
+pub fn read_auto_clipboard_processes(conn: &rusqlite::Connection) -> Vec<String> {
+    let raw = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = 'auto_clipboard_processes'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(default_auto_clipboard_processes);
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// 查询当前进程是否以管理员身份运行
@@ -463,6 +589,9 @@ pub async fn save_settings(
             ("allow_terminal_inject", settings.allow_terminal_inject.to_string()),
             ("run_as_admin", settings.run_as_admin.to_string()),
             ("inject_blacklist", settings.inject_blacklist),
+            ("diagnostic_log", settings.diagnostic_log.to_string()),
+            ("password_delivery", settings.password_delivery),
+            ("auto_clipboard_processes", settings.auto_clipboard_processes),
         ];
 
         // 逐项校验（键白名单 + 值域），任一非法整体拒绝
@@ -491,6 +620,9 @@ pub async fn save_settings(
 
         // 管理员启动：写库与系统兼容层标记必须一致，否则开关不生效
         sync_run_as_admin(settings.run_as_admin)?;
+
+        // 诊断日志：连批保存也要即时生效
+        crate::logging::apply_level(settings.diagnostic_log);
 
         Ok(())
 

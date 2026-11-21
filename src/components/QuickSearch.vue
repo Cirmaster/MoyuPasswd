@@ -255,7 +255,12 @@ const copyPasswordById = async (id: string) => {
     toast.value = {
       show: true,
       type: 'success',
-      message: mode === 'clipboard' ? '已复制密码到剪贴板，倒计时后自动清除' : '密码就绪，倒计时内按 Ctrl+V 粘贴',
+      message:
+        mode === 'clipboard'
+          ? '已复制密码到剪贴板，倒计时后自动清除'
+          : mode === 'auto'
+            ? '密码就绪：目标进程在前台时自动放入剪贴板'
+            : '密码就绪，倒计时内按 Ctrl+V 粘贴',
     }
     // 后端已记录使用记录；刷新主列表当前页与统计（最近使用计数/排序即时生效）
     void passwordStore.loadPasswords()

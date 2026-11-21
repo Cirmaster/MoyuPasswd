@@ -7,6 +7,8 @@
 //! - 5 分钟内最多 3 次自动重载（防崩溃循环）；重载失败或超限则标记 webview 异常，
 //!   此后「关闭到托盘」放行真正退出（见 lib.rs 的 CloseRequested 分支）
 //! - 窗口隐藏（托盘）/最小化时不开门：WebView2 对后台页定时器节流，心跳变慢属正常
+//! - **debug 构建下整个看门狗不启动**（见 `spawn`）：开发期心跳超时多为误报，
+//!   reload 只会掐断正在加载的模块；release 保留自愈
 //!
 //! 逃生热键 Ctrl+Alt+Shift+R（重载）/ Ctrl+Alt+Shift+E（强退）见
 //! `commands::shortcuts::register_all`，同样不依赖网页存活。
@@ -28,7 +30,15 @@ const RELOAD_WINDOW: Duration = Duration::from_secs(300);
 const MAX_RELOADS: usize = 3;
 
 /// 启动看门狗线程（setup 中调用一次；线程随进程退出）
+///
+/// **debug 构建（`cargo tauri dev`）下不启动**：开发时页面常处在热更新/半加载状态，
+/// 心跳超时几乎总是误报，而 reload 会掐断正在加载的模块，越重载越白屏；
+/// release 保留原行为——崩溃自愈是给最终用户的，开发环境里没人需要它。
 pub fn spawn(app: tauri::AppHandle) {
+    if cfg!(debug_assertions) {
+        log::info!("[WATCHDOG] 开发构建不启用心跳看门狗（心跳照常记录，只是不自动重载）");
+        return;
+    }
     std::thread::spawn(move || {
         // 近期自动重载时间点（滚动预算用）
         let mut reloads: Vec<Instant> = Vec::new();

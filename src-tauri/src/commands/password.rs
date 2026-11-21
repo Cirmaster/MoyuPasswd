@@ -570,6 +570,20 @@ pub(crate) fn decrypt_password(aes_key: &[u8; 32], encrypted: &str) -> Result<St
 ///
 /// # Returns
 /// 可直接存进 `pending` / `dnd` 的 `DecryptFn`
+/// 登记一次密码使用（last_used_at / use_count）
+///
+/// 两种交付方式（inject / clipboard）共用：使用记录只关心「这条密码被用了」，
+/// 与怎么送出去无关。失败只记日志——不能因为统计没记上就把交付动作判失败。
+fn record_password_usage(conn: &rusqlite::Connection, id: &str) {
+    let now = chrono::Utc::now().timestamp_millis();
+    if let Err(e) = conn.execute(
+        "UPDATE passwords SET last_used_at = ?1, use_count = use_count + 1 WHERE id = ?2",
+        params![now, id],
+    ) {
+        log::warn!("[CMD] 登记使用记录失败: id={}, err={}", id, e);
+    }
+}
+
 pub(crate) fn build_decrypt_fn(
     app: &tauri::AppHandle,
     encrypted: String,
@@ -1966,7 +1980,8 @@ pub struct CopyPasswordResult {
     /// 交付有效期（秒）：inject 模式 = pending TTL；clipboard 模式 = 剪贴板自动清除时间
     pub ttl: u32,
     /// 交付方式：`"inject"` = 倒计时内 Ctrl+V 注入（密码不进剪贴板）；
-    /// `"clipboard"` = 已写入剪贴板（倒计时后自动清除）
+    /// `"clipboard"` = 已写入剪贴板（倒计时后自动清除）；
+    /// `"auto"` = 目标进程在前台时才写剪贴板、失焦立刻抹掉（见 auto_clipboard.rs）
     pub mode: String,
 }
 
@@ -2059,6 +2074,50 @@ pub async fn copy_password_to_clipboard(
         // 锁定后任何迟到的调用都会失败（fail closed），杜绝锁定后仍可解密注入。
         let decrypt_fn = build_decrypt_fn(&app, encrypted);
 
+        // 交付方式（设置项 password_delivery）：inject / clipboard / auto
+        let delivery = crate::commands::settings::read_password_delivery(&conn);
+
+        // 交付方式分流 0：设置显式选了 clipboard 时，直接写剪贴板，**不登记 pending、不挂钩子**。
+        //
+        // 这是给「不转发合成按键」的远控客户端留的通道：ToDesk 窗口在前台时，按键在
+        // 到低级键盘钩子之前就被它吃掉（实测管理员身份 + 后装钩子都收不到 Ctrl+V），
+        // 而它的剪贴板同步是通的（用户名走剪贴板能粘到远端就是证据）。注入这条路
+        // 在那个场景下怎么调都送不进去，只能换通道。
+        //
+        // 不挂钩子这点尤其重要：对面按 Ctrl+V 时本机不能拦，拦下来就再也粘不出去了。
+        //
+        // 代价：密码明文会经过系统剪贴板（自动清除前任何进程都能读），所以只能由用户
+        // 在设置里显式选择；默认值永远是 inject，安全默认是「密码不落剪贴板」。
+        if delivery == "clipboard" {
+            // 清除时间沿用「剪贴板自动清除时间」。0（不自动清除）在普通文本复制里
+            // 表示不清，但密码不能无限期躺在剪贴板里，按 30 秒处理
+            let seconds: u32 = if clear_time == 0 {
+                30
+            } else {
+                clear_time.clamp(10, 300)
+            };
+            let plaintext = decrypt_fn(&id)?;
+            // 先拿写入结果，再清零——明文用完立刻抹掉，不能因为写失败就留着
+            let write_result = crate::clipboard::write_secret(
+                &app,
+                &plaintext,
+                seconds,
+                crate::clipboard::SecretConsent::from_user_action(),
+            );
+            crate::inject::zeroize_plaintext(plaintext);
+            write_result?;
+            record_password_usage(&conn, &id);
+            log::info!(
+                "[CMD] copy_password_to_clipboard 完成: id={}, mode=clipboard, {}s 后自动清除",
+                id,
+                seconds
+            );
+            return Ok(CopyPasswordResult {
+                ttl: seconds,
+                mode: "clipboard".to_string(),
+            });
+        }
+
         // 交付方式分流：Windows / Linux X11 走 Ctrl+V 注入（密码不进剪贴板）。
         //
         // Wayland 下没有全局按键注入，**不再回退剪贴板**：那会把明文交给整个桌面
@@ -2073,28 +2132,124 @@ pub async fn copy_password_to_clipboard(
         }
 
         let ttl = pending_ttl;
-        let mode = "inject";
+        let mut mode = "inject";
         log::info!("[CMD] 开始登记 pending: id={}, clear_time={}s, ttl={}s", id, clear_time, pending_ttl);
         // 登记待粘贴密码（带解密闭包）
-        let seq = crate::pending::register_with_decrypt(&id, pending_ttl, decrypt_fn);
+        let seq = crate::pending::register_with_decrypt(&id, pending_ttl, decrypt_fn.clone());
         // 激活 Ctrl+V 钩子（传入句柄，钩子检测到 Ctrl+C / Esc 时销毁粘贴状态）
         crate::hotkey::activate(app.clone());
         log::info!("[CMD] pending 登记完成: id={}, seq={}", id, seq);
 
-        // 成功交付后顺带登记使用记录（交付方式不影响登记结果，故失败只记日志）
-        let now = chrono::Utc::now().timestamp_millis();
-        if let Err(e) = conn.execute(
-            "UPDATE passwords SET last_used_at = ?1, use_count = use_count + 1 WHERE id = ?2",
-            params![now, id],
-        ) {
-            log::warn!("[CMD] 登记使用记录失败: id={}, err={}", id, e);
+        // 交付方式分流 1.5：auto（自动）——名单内的目标进程在前台时才把密码写进剪贴板。
+        //
+        // 登记与钩子和注入模式完全一样（名单外按 Ctrl+V 照常注入，密码不进剪贴板），
+        // 多的只是守望线程（见 auto_clipboard.rs）：进目标进程写剪贴板、失焦立刻抹掉。
+        // 名单缺失/为空由读取层回退默认远控名单（见 read_auto_clipboard_processes）。
+        if delivery == "auto" {
+            mode = "auto";
+            crate::auto_clipboard::start(
+                app.clone(),
+                seq,
+                id.clone(),
+                decrypt_fn,
+                crate::commands::settings::read_auto_clipboard_processes(&conn),
+                pending_ttl,
+            );
         }
+
+        // 成功交付后顺带登记使用记录（交付方式不影响登记结果，故失败只记日志）
+        record_password_usage(&conn, &id);
 
         log::info!("[CMD] copy_password_to_clipboard 完成: id={}, mode={}, ttl={}s", id, mode, ttl);
 
         Ok(CopyPasswordResult {
             ttl,
             mode: mode.to_string(),
+        })
+
+    })}
+
+/// 把当前待粘贴的密码放进系统剪贴板（**用户点击授权**）
+///
+/// # 为什么单独成一个命令
+///
+/// 注入失败时程序**不会**自动把密码写进剪贴板：剪贴板任何进程都能读，而注入只把
+/// 字符送进目标窗口，自动改投等于程序单方面把安全等级降一档，且用户未必察觉。
+/// 前端在提示条上给出「放入剪贴板」入口，用户点一下才走这里——一次点击一次授权，
+/// 审计按 `FallbackClipboard("user-consented")` 单独记一笔，事后能分辨自动与授权。
+///
+/// # Arguments
+///
+/// * `seq` - 前端从 `inject-result` 拿到的会话代数。与当前待粘贴会话不一致就拒绝，
+///   防止「拿着上一轮的提示条点下去」把授权作用到新的密码上。
+///
+/// # Returns
+///
+/// [`CopyPasswordResult`]（`mode = "clipboard"`，`ttl` 为自动清除秒数）
+///
+/// # 前端调用
+///
+/// ```typescript
+/// await invoke('copy_pending_password_to_clipboard', { seq: 12 });
+/// ```
+#[tauri::command]
+pub async fn copy_pending_password_to_clipboard(
+    seq: u64,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> ApiResult<CopyPasswordResult> {
+    respond(|| -> Result<CopyPasswordResult, String> {
+        if !state.is_unlocked() {
+            return Err("应用未解锁".to_string());
+        }
+
+        // 待粘贴槽里只存 entry_id 与解密闭包，明文此刻才解出来
+        let (entry_id, active_seq, decrypt_fn) = crate::pending::get_for_inject()
+            .ok_or_else(|| "待粘贴的密码已失效，请重新复制".to_string())?;
+        if active_seq != seq {
+            return Err("密码会话已变化，请重新复制".to_string());
+        }
+
+        let plaintext = decrypt_fn(&entry_id)?;
+
+        // 清除时间与 inject 模式的 pending TTL 同规则：`0`（不自动清除）按 30 秒处理，
+        // 其余收敛到 10~300 秒——密码不能无限期躺在任何进程都能读的剪贴板里
+        //（读设置的唯一入口在 clipboard.rs，避免两处默认值各写一份）
+        let configured = crate::clipboard::read_clipboard_clear_time(&state);
+        let seconds: u32 = if configured == 0 {
+            30
+        } else {
+            configured.clamp(10, 300)
+        };
+
+        // 写剪贴板必须持 SecretConsent：这是密码落剪贴板的唯一入口
+        let write_result = crate::clipboard::write_secret(
+            &app,
+            &plaintext,
+            seconds,
+            crate::clipboard::SecretConsent::from_user_action(),
+        );
+        // 无论写成功与否，明文副本立刻清零
+        crate::inject::zeroize_plaintext(plaintext);
+        write_result?;
+
+        // 剪贴板里已经有密码：作废待粘贴槽，钩子不再拦 Ctrl+V（交给系统原生粘贴）。
+        // 钩子本身不卸——Esc 仍能立刻擦掉剪贴板残留
+        crate::pending::revoke("user-clipboard");
+        crate::pending::record_audit(crate::pending::InjectAuditEvent {
+            ts: std::time::SystemTime::now(),
+            seq,
+            entry_id,
+            action: crate::pending::AuditAction::FallbackClipboard("user-consented".to_string()),
+            target_pid: None,
+            target_name: None,
+            target_path: None,
+        });
+
+        log::info!("[CMD] 用户授权改投剪贴板: seq={seq}, {seconds}s 后自动清除");
+        Ok(CopyPasswordResult {
+            ttl: seconds,
+            mode: "clipboard".to_string(),
         })
 
     })}

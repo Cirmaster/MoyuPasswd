@@ -83,6 +83,9 @@ onMounted(async () => {
       allow_terminal_inject: boolean
       run_as_admin: boolean
       inject_blacklist: string
+      diagnostic_log?: boolean
+      password_delivery: string
+      auto_clipboard_processes: string
     }>('get_settings')
 
     // 应用通用设置
@@ -92,12 +95,18 @@ onMounted(async () => {
     settings.value.showOnStartup = savedSettings.show_on_startup ?? true
     settings.value.runAsAdmin = savedSettings.run_as_admin ?? false
     settings.value.injectBlacklist = savedSettings.inject_blacklist ?? ''
+    settings.value.autoClipProcesses = savedSettings.auto_clipboard_processes ?? ''
 
     // 应用安全设置
     security.value.autoLockTime = savedSettings.auto_lock_time
     security.value.clipboardClearTime = savedSettings.clipboard_clear_time
     security.value.showPasswordStrength = savedSettings.show_password_strength
     security.value.allowTerminalInject = savedSettings.allow_terminal_inject ?? false
+    security.value.diagnosticLog = savedSettings.diagnostic_log ?? false
+    security.value.passwordDelivery =
+      savedSettings.password_delivery === 'clipboard' || savedSettings.password_delivery === 'auto'
+        ? savedSettings.password_delivery
+        : 'inject'
 
     // 应用主题：localStorage 是明暗模式的实时真源（快捷弹窗等窗口都读它），
     // 只有本地还没有值（首次运行/清过存储）才用后端值兜底；
@@ -179,6 +188,8 @@ const settings = ref({
   runAsAdmin: false,
   /** 注入排除名单（逗号分隔的进程名；空 = 恢复默认名单） */
   injectBlacklist: '',
+  /** 「自动」交付的剪贴板目标进程名单（逗号分隔的进程名，如 ToDesk.exe） */
+  autoClipProcesses: '',
 })
 
 /** 当前进程是否已以管理员身份运行（仅设置项提示用） */
@@ -196,6 +207,11 @@ const security = ref({
   showPasswordStrength: true,
   /** 是否允许向终端注入密码（关闭时命中黑名单需二次确认） */
   allowTerminalInject: false,
+  /** 诊断日志：开启后技术日志记到 Info（记录注入流程细节） */
+  diagnosticLog: false,
+  /** 密码交付方式：inject = Ctrl+V 注入（密码不进剪贴板）；clipboard = 写剪贴板（远控软件用）；
+   *  auto = 名单内目标进程在前台时才写剪贴板，失焦立刻抹掉 */
+  passwordDelivery: 'inject' as 'inject' | 'clipboard' | 'auto',
 })
 
 /**
@@ -582,6 +598,9 @@ const persistSettings = async () => {
         allow_terminal_inject: security.value.allowTerminalInject,
         run_as_admin: settings.value.runAsAdmin,
         inject_blacklist: settings.value.injectBlacklist,
+        diagnostic_log: security.value.diagnosticLog,
+        password_delivery: security.value.passwordDelivery,
+        auto_clipboard_processes: settings.value.autoClipProcesses,
       },
     })
     showToast('success', '设置已保存')
@@ -975,6 +994,37 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                 <p class="text-sm text-muted-foreground">复制密码后自动清除剪贴板</p>
               </div>
 
+              <!-- 密码交付方式 -->
+              <div class="space-y-2">
+                <Label>密码交付方式</Label>
+                <select
+                  v-model="security.passwordDelivery"
+                  class="border-input dark:bg-input/30 h-9 w-full min-w-0 rounded-md border bg-transparent px-3 py-1 text-base shadow-xs outline-none focus-visible:border-ring md:text-sm"
+                >
+                  <option value="inject">自动粘贴（Ctrl+V 注入，密码不进剪贴板）</option>
+                  <option value="clipboard">写入剪贴板（远程控制软件如 ToDesk 用这项）</option>
+                  <option value="auto">自动（目标进程在前台时才写剪贴板）</option>
+                </select>
+                <p class="text-sm text-muted-foreground">
+                  「自动」＝平时照常注入、密码不进剪贴板，只在下方名单里的进程获得前台时写入剪贴板，
+                  失焦立刻抹掉；「写入剪贴板」＝复制后一直在剪贴板里直到清除时间。
+                  ToDesk 这类远程控制软件不转发自动粘贴的按键，密码只能靠剪贴板同步粘到远端
+                </p>
+              </div>
+
+              <!-- 自动模式的剪贴板目标进程 -->
+              <div v-if="security.passwordDelivery === 'auto'" class="space-y-2">
+                <Label>剪贴板目标进程（进程名，逗号分隔）</Label>
+                <Input
+                  v-model="settings.autoClipProcesses"
+                  placeholder="ToDesk.exe, SunloginClient.exe"
+                />
+                <p class="text-sm text-muted-foreground">
+                  名单内进程获得前台时密码才进剪贴板，离开时立刻清除（只删本应用写入的内容，不误删你复制的别的东西）；
+                  名单外按 Ctrl+V 照常自动粘贴。默认已填常见远程控制客户端，清空则恢复默认名单
+                </p>
+              </div>
+
               <!-- 显示密码强度 -->
               <div class="flex items-center justify-between">
                 <div>
@@ -1013,6 +1063,21 @@ const handleBackupToast = (type: 'success' | 'error', message: string) => {
                 <p class="text-sm text-muted-foreground">
                   名单内窗口不做直接注入，需按两次 Ctrl+V 确认（默认含终端类，防密码进命令行历史/回显）；清空则恢复默认名单。开启上方开关后名单整体失效
                 </p>
+              </div>
+
+              <!-- 诊断日志 -->
+              <div class="flex items-center justify-between">
+                <div>
+                  <Label>诊断日志</Label>
+                  <p class="text-sm text-muted-foreground">
+                    记录注入流程细节（前台窗口、失败原因与系统错误码），用于排查「按键没反应」；默认只记录失败与异常
+                  </p>
+                </div>
+                <input
+                  v-model="security.diagnosticLog"
+                  type="checkbox"
+                  class="h-4 w-4"
+                />
               </div>
 
               <!-- 系统快速解锁 -->

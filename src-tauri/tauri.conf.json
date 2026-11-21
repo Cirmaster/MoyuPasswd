@@ -5,7 +5,7 @@
   "identifier": "com.moyu.passwd",
   "build": {
     "frontendDist": "../dist",
-    "devUrl": "http://localhost:5173",
+    "devUrl": "http://127.0.0.1:5173",
     "beforeDevCommand": "pnpm dev",
     "beforeBuildCommand": "pnpm build"
   },
@@ -20,7 +20,7 @@
         "resizable": true,
         "fullscreen": false,
         "center": true,
-        "visible": false,
+        "visible": true,
         "decorations": false,
         "shadow": true
       }
@@ -40,10 +40,6 @@
       "icons/icon.ico"
     ],
     "windows": {
-      "webviewInstallMode": {
-        "type": "fixedRuntime",
-        "path": "webview2-runtime"
-      },
       "nsis": {
         "languages": ["SimpChinese", "English"]
       },

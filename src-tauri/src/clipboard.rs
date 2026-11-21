@@ -150,16 +150,90 @@ pub fn invalidate_scheduled_clear() {
     CLEAR_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
-/// 写入敏感文本并安排自动清除（无注入能力会话的密码回退交付路径）
+/// 剪贴板里仍是本应用最后写入的敏感文本时，立即清除（**只删自己的**）
 ///
-/// 与 [`copy_text_to_clipboard`] 的「写入 + 排除标记 + 指纹 + 兜底清除」同源，
-/// 供 `copy_password_to_clipboard` 在 Wayland 等无法 Ctrl+V 注入的会话直接交付密码。
+/// 用于「自动」交付模式：目标窗口一失焦就抹掉密码，不等定时清除。
+/// 与 [`schedule_clear`] 同一套指纹比对——用户已经复制了别的内容就不动剪贴板，
+/// 不能把人家的新内容删掉；读取失败按「仍是密码」处理（宁可多清一次，不残留）。
+///
+/// # Returns
+/// 是否真的清除了内容
+pub fn clear_if_still_ours(app: &tauri::AppHandle) -> bool {
+    let Some(expected) = *lock_last_written() else {
+        // 没有我们的写入记录：剪贴板里不是密码，无权动它
+        return false;
+    };
+    let still_ours = read_text(app)
+        .map(|t| fingerprint(&t) == expected)
+        .unwrap_or(true);
+    if !still_ours {
+        return false;
+    }
+    // 作废定时清除任务（内容已经清掉，别让旧任务醒来再清一次用户的新内容），
+    // **不发** `clipboard-cleared`：会话可能还在继续（用户只是切出去看一眼），
+    // 倒计时气泡不能因此收掉
+    CLEAR_GENERATION.fetch_add(1, Ordering::SeqCst);
+    *lock_last_written() = None;
+    let ok = clear(app).is_ok();
+    // 自己清的剪贴板不算「用户复制了新内容」：把钩子的哨兵基线对齐到清空后的序号。
+    // 不对齐的话，下次在非目标窗口按 Ctrl+V 会被误判成外部复制，
+    // 整个待粘贴会话（含倒计时）被直接杀掉——会话应该只由 TTL / Ctrl+C / Esc / 用户点掉结束
+    crate::hotkey::rebase_clipboard_sentinel();
+    ok
+}
+
+/// 敏感内容（密码）写入剪贴板的授权凭据
+///
+/// # 为什么需要这个类型
+///
+/// 本项目最核心的不变式是「默认路径上密码永不落剪贴板」：注入模式下密码直接进目标
+/// 窗口，只有那一个应用看得到；而剪贴板是**任何进程都能读**的。把密码写进剪贴板
+/// 必须是一次明确的放宽，不能是程序自作主张的降级。
+///
+/// 所以写密码的入口只接受这个凭据，而它只有两种合法来源（见下方两个构造函数）：
+/// 用户在界面上点了一下，或用户把交付方式显式设成了走剪贴板的模式。以后谁想在
+/// 别的路径上顺手写一次剪贴板，要么显式构造凭据（评审可见），要么编译不过。
+/// **不要给它实现 `Default` / `Clone` / `Copy`。**
+pub struct SecretConsent(());
+
+impl SecretConsent {
+    /// 用户明确要求「放入剪贴板」后，由命令层构造
+    ///
+    /// 只允许在 Tauri 命令里调用（`pub(crate)`），别在内部流程里"顺手"造一个。
+    pub(crate) fn from_user_action() -> Self {
+        Self(())
+    }
+
+    /// 用户把交付方式显式设成「自动（目标进程在前台时写剪贴板）」后，由守望线程构造
+    ///
+    /// 第二种合法来源：设置本身就是一次长期授权（用户自己配的目标进程名单），
+    /// 只有 `auto_clipboard` 的守望线程可以造，且仅在名单进程获得前台时用一次。
+    pub(crate) fn from_explicit_setting() -> Self {
+        Self(())
+    }
+}
+
+/// 把敏感内容写进剪贴板并安排自动清除（**需要用户授权**）
+///
+/// 与 [`write_with_auto_clear`] 同源，多一道授权凭据：这是密码落剪贴板的唯一入口。
+pub fn write_secret(
+    app: &tauri::AppHandle,
+    text: &str,
+    seconds: u32,
+    _consent: SecretConsent,
+) -> Result<(), String> {
+    write_with_auto_clear(app, text, seconds)
+}
+
+/// 写入敏感文本并安排自动清除（内部实现，外部请走 [`write_secret`]）
+///
+/// 与 [`copy_text_to_clipboard`] 的「写入 + 排除标记 + 指纹 + 兜底清除」同源。
 /// 调用方负责解锁门禁与 pending 语义（作废旧 pending 等）。
 ///
 /// `seconds` 语义同 [`copy_text_to_clipboard`]：
 /// - `0`：不自动清除
 /// - `n`：n 秒后自动清空（软失败时压缩到最迟 5 秒）
-pub fn write_with_auto_clear(
+fn write_with_auto_clear(
     app: &tauri::AppHandle,
     text: &str,
     seconds: u32,
@@ -280,7 +354,10 @@ pub async fn copy_text_to_clipboard(
     })}
 
 /// 读取剪贴板清除时间设置（秒），默认 30
-fn read_clipboard_clear_time(state: &crate::state::AppState) -> u32 {
+///
+/// `pub(crate)`：注入失败降级写剪贴板时也要用同一个值（见 `inject::deliver_via_clipboard`），
+/// 两处各写一份默认值迟早会漂。
+pub(crate) fn read_clipboard_clear_time(state: &crate::state::AppState) -> u32 {
     state
         .get_db()
         .ok()

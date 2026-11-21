@@ -764,11 +764,19 @@ const copyPasswordViaBackend = async (id: string, event?: MouseEvent) => {
     // x/y 是 CSS 逻辑屏幕坐标，后端乘渲染缩放换算为物理坐标（见 scale.rs）
     const x = event?.screenX ?? window.screen.width / 2
     const y = event?.screenY ?? window.screen.height / 2
-    const { ttl } = await invoke<{ ttl: number; mode: string }>(
+    const { ttl, mode } = await invoke<{ ttl: number; mode: string }>(
       'copy_password_to_clipboard',
       { id },
     )
-    showToast('success', '密码就绪，倒计时内按 Ctrl+V 粘贴')
+    // 按交付方式区分提示：clipboard/auto 下密码会进剪贴板，等的是「去目标端粘贴」
+    showToast(
+      'success',
+      mode === 'clipboard'
+        ? '已复制密码到剪贴板，倒计时后自动清除'
+        : mode === 'auto'
+          ? '密码就绪：目标进程在前台时自动放入剪贴板'
+          : '密码就绪，倒计时内按 Ctrl+V 粘贴',
+    )
     // 后端已登记使用记录（last_used_at/use_count，契约 4.3）；
     // 刷新当前页与统计，让「最近使用」视图/计数与使用频率排序立即反映本次使用
     void loadPasswords()
