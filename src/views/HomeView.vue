@@ -17,6 +17,7 @@
   7. 收藏/取消收藏、复制用户名/密码、添加/编辑/删除
   8. 密码生成器、快速搜索（Ctrl+K）、快速添加
   9. 锁屏、托盘最小化、主题切换
+  10. 勾选部分密码导出为加密文件（与整库导出同格式，便于共享给其他设备）
 
   路由路径：/home
 -->
@@ -512,6 +513,8 @@ const handleDeletePassword = async (item: PasswordItem) => {
   if (!confirm(`确定删除「${item.title}」？`)) return
   try {
     await deletePassword(item.id)
+    // 同步剔除勾选痕迹，避免「已选 N 条」把已删条目也算进去
+    selectedIds.value.delete(item.id)
     showToast('success', '已删除')
   } catch (e) {
     showToast('error', '删除失败: ' + String(e))
@@ -855,6 +858,96 @@ const handleRowDndStart = (event: DragEvent, id: string, title: string) => {
 /** 拖动结束：后端在 drag-end 里收尾，这里只清本地标记 */
 const handleRowDndEnd = () => {
   dndRowPendingId.value = null
+}
+
+// ==================== 多选与部分导出 ====================
+
+/**
+ * 行勾选集合（存密码 id）
+ *
+ * 跨页/跨筛选保留：用户常是「搜一批 → 勾几条 → 再搜下一批」攒够了一次导出，
+ * 所以翻页、改筛选都不清空；只有删除条目时同步剔除它的 id。
+ */
+const selectedIds = ref<Set<string>>(new Set())
+
+/** 已勾选条数 */
+const selectedCount = computed(() => selectedIds.value.size)
+
+/** 当前页是否全部勾选（表头复选框状态） */
+const allPageSelected = computed(
+  () =>
+    pagedPasswords.value.length > 0 &&
+    pagedPasswords.value.every((i) => selectedIds.value.has(i.id)),
+)
+
+/** 切换单条勾选 */
+const toggleSelect = (id: string) => {
+  if (selectedIds.value.has(id)) {
+    selectedIds.value.delete(id)
+  } else {
+    selectedIds.value.add(id)
+  }
+}
+
+/** 表头复选框：全选/取消选择当前页 */
+const toggleSelectPage = () => {
+  if (allPageSelected.value) {
+    pagedPasswords.value.forEach((i) => selectedIds.value.delete(i.id))
+  } else {
+    pagedPasswords.value.forEach((i) => selectedIds.value.add(i.id))
+  }
+}
+
+/** 清空勾选 */
+const clearSelection = () => {
+  selectedIds.value.clear()
+}
+
+/** 导出所选弹窗开关 */
+const showExportDialog = ref(false)
+
+/** 备份密码（加密导出文件，与设置页「备份密码」同一语义） */
+const exportPassword = ref('')
+
+/** 导出进行中（防重复点击） */
+const exporting = ref(false)
+
+/**
+ * 导出勾选条目为加密文件
+ *
+ * 走设置页整库导出的同一后端命令（export_data）与文件格式，
+ * 只是带上 ids 参数做部分导出；导入端无需任何区分。
+ */
+const handleExportSelected = async () => {
+  if (!exportPassword.value) {
+    showToast('error', '请设置备份密码')
+    return
+  }
+  exporting.value = true
+  try {
+    const data = await invoke<string>('export_data', {
+      exportPassword: exportPassword.value,
+      ids: [...selectedIds.value],
+    })
+
+    // 创建下载链接
+    const blob = new Blob([data], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `moyu-passwd-backup-${new Date().toISOString().slice(0, 10)}.json`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+
+    showToast('success', `已导出 ${selectedIds.value.size} 条密码`)
+    showExportDialog.value = false
+  } catch (e) {
+    showToast('error', '导出失败: ' + String(e))
+  } finally {
+    exporting.value = false
+  }
 }
 
 // ==================== 弹窗 / 窗口操作 ====================
@@ -1298,6 +1391,19 @@ onMounted(async () => {
               清除全部
             </button>
           </div>
+
+          <!-- 勾选操作条：勾选密码行后出现（跨页累计，可随时清除） -->
+          <div v-if="selectedCount > 0" class="flex items-center gap-2">
+            <span class="text-sm text-muted-foreground">已选 {{ selectedCount }} 条</span>
+            <Button variant="outline" size="sm" @click="showExportDialog = true">导出所选</Button>
+            <button
+              type="button"
+              class="text-xs text-muted-foreground hover:text-foreground hover:underline underline-offset-2 transition-colors"
+              @click="clearSelection"
+            >
+              清除选择
+            </button>
+          </div>
         </div>
 
         <!-- 密码列表表格 -->
@@ -1305,7 +1411,8 @@ onMounted(async () => {
           <!-- table-fixed 固定列宽分配：内容超长只截断（title 显全文），不再横向撑破表格 -->
           <Table v-if="totalFiltered > 0" class="table-fixed">
             <colgroup>
-              <!-- 名称吃剩余宽度；其余列定宽，总宽适配 900px 窗口下的内容区 -->
+              <!-- 勾选列定宽；名称吃剩余宽度；其余列定宽，总宽适配 900px 窗口下的内容区 -->
+              <col class="w-[36px]" />
               <col />
               <col class="w-[20%]" />
               <!-- 密码列 = •••• + 强度条 + 复制按钮；Linux 字体 • 字形偏宽，列宽须给足，
@@ -1318,6 +1425,16 @@ onMounted(async () => {
             </colgroup>
             <TableHeader>
               <TableRow>
+                <!-- 表头复选框：全选/取消选择当前页 -->
+                <TableHead>
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 align-middle"
+                    :checked="allPageSelected"
+                    title="全选/取消选择本页"
+                    @change="toggleSelectPage"
+                  />
+                </TableHead>
                 <TableHead>名称</TableHead>
                 <TableHead>用户名</TableHead>
                 <TableHead>密码</TableHead>
@@ -1340,6 +1457,18 @@ onMounted(async () => {
                 @dragstart="handleRowDndStart($event, item.id, item.title)"
                 @dragend="handleRowDndEnd"
               >
+                <!-- 勾选列：pointerdown.stop 不触发整行拖拽武装（Wayland 拖放交付） -->
+                <TableCell>
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4"
+                    :checked="selectedIds.has(item.id)"
+                    :title="selectedIds.has(item.id) ? '取消选择' : '选择这条'"
+                    @pointerdown.stop
+                    @change="toggleSelect(item.id)"
+                  />
+                </TableCell>
+
                 <!-- 名称：收藏星标 + 标题 + 最多 3 个标签小徽章（超出 +N） -->
                 <TableCell class="font-medium overflow-hidden">
                   <div class="flex items-start gap-2 min-w-0">
@@ -1585,6 +1714,33 @@ onMounted(async () => {
             @click="handleSaveCategoryDialog"
           >
             {{ categorySaving ? '保存中...' : (categoryDialogMode === 'rename' ? '保存' : '添加') }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <!-- 导出所选弹窗：备份密码加密勾选条目，文件与整库导出同格式 -->
+    <Dialog v-model:open="showExportDialog">
+      <DialogContent class="sm:max-w-[360px]">
+        <DialogHeader>
+          <DialogTitle>导出所选密码</DialogTitle>
+          <DialogDescription>将勾选的 {{ selectedCount }} 条密码导出为加密文件</DialogDescription>
+        </DialogHeader>
+        <div class="py-4 grid gap-2">
+          <Label for="home-export-password">备份密码</Label>
+          <Input
+            id="home-export-password"
+            v-model="exportPassword"
+            type="password"
+            placeholder="导出/导入时使用的密码"
+            @keydown.enter="handleExportSelected"
+          />
+          <p class="text-sm text-muted-foreground">导出文件将用此密码加密，导入加密文件时需输入相同密码。</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" @click="showExportDialog = false">取消</Button>
+          <Button :disabled="!exportPassword || exporting" @click="handleExportSelected">
+            {{ exporting ? '导出中...' : '导出' }}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -4,11 +4,14 @@
 //! 导出使用导出密码加密（AES-256-GCM，密钥由 Argon2id 派生）；
 //! 导入自动识别加密格式与历史明文格式。
 //!
+//! 导出分两种范围：不传 `ids` 为整库导出（设置页备份），
+//! 传 `ids` 为部分导出（列表勾选共享给其他设备），只带被引用分类及其祖先链。
+//!
 //! 导出/导入包含标签与分类层级；旧导出文件缺字段时按默认值（空标签/顶级分类）处理，
 //! 保持 `moyu-passwd-encrypted-v1` 格式向后兼容。
 
 use crate::response::{respond, ApiResult};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -183,6 +186,37 @@ fn validate_import_id(id: &str, what: &str) -> Result<(), String> {
     }
 }
 
+/// 部分导出时收缩分类集合：只保留导出条目引用到的分类，以及它们的全部祖先
+///
+/// 导出文件里的 parent_id 指向未导出的分类时，导入端会把悬空父级置空、层级断掉，
+/// 所以祖先链必须一并带上；兄弟/无关分类则不带，避免把整个分类树塞进共享文件、
+/// 污染目标库。保持原查询顺序（sort_order）返回。
+fn shrink_categories(
+    categories: Vec<ExportCategory>,
+    used: &HashSet<String>,
+) -> Vec<ExportCategory> {
+    let by_id: HashMap<&str, &ExportCategory> =
+        categories.iter().map(|c| (c.id.as_str(), c)).collect();
+    // 收集用持有所有权的 String：keep 里可能存着借自 categories 的 id，
+    // 而函数末尾要把 categories 整体 move 进过滤器，借用不能横跨那次 move
+    let mut keep: HashSet<String> = HashSet::new();
+    for id in used {
+        // 从引用点沿 parent_id 一路上溯；重复收录即停——既省遍历，
+        // 也兜住脏数据里父子成环的极端情况，绝不死循环
+        let mut cur = Some(id.as_str());
+        while let Some(cid) = cur {
+            if !keep.insert(cid.to_string()) {
+                break;
+            }
+            cur = by_id.get(cid).and_then(|c| c.parent_id.as_deref());
+        }
+    }
+    categories
+        .into_iter()
+        .filter(|c| keep.contains(c.id.as_str()))
+        .collect()
+}
+
 /// 加密导出包裹结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EncryptedExport {
@@ -251,13 +285,15 @@ fn decrypt_export(wrapper: &EncryptedExport, export_password: &str) -> Result<St
     String::from_utf8(decrypted).map_err(|e| e.to_string())
 }
 
-/// 导出所有密码数据（加密）
+/// 导出密码数据（加密）
 ///
-/// 将所有密码和分类导出为 JSON，并使用导出密码加密。
+/// 将密码和分类导出为 JSON，并使用导出密码加密。
+/// 不传 `ids` 导出整库；传 `ids` 只导出指定条目（部分导出）。
 ///
 /// # Arguments
 ///
 /// * `export_password` - 导出密码（用于加密导出文件）
+/// * `ids` - 可选，只导出这些 id 的密码（`None` = 整库导出）
 /// * `state` - 应用状态
 ///
 /// # Returns
@@ -266,6 +302,7 @@ fn decrypt_export(wrapper: &EncryptedExport, export_password: &str) -> Result<St
 #[tauri::command]
 pub async fn export_data(
     export_password: String,
+    ids: Option<Vec<String>>,
     state: State<'_, AppState>,
     window: tauri::WebviewWindow,
 ) -> ApiResult<String> {
@@ -284,6 +321,25 @@ pub async fn export_data(
             return Err("应用未解锁".to_string());
         }
 
+        // 部分导出的 id 校验与导入同一套规则（≤64 位字母数字/-/_），
+        // 条数上限复用导入上限，防止超长 IN 列表拖垮查询。
+        // 空列表是前端选勾交互的异常状态，明确报错而不是悄悄退化成整库导出。
+        if let Some(filter) = &ids {
+            if filter.is_empty() {
+                return Err("未选择要导出的密码".to_string());
+            }
+            if filter.len() > MAX_IMPORT_PASSWORDS {
+                return Err(format!(
+                    "选择条目过多（{} 条，上限 {} 条）",
+                    filter.len(),
+                    MAX_IMPORT_PASSWORDS
+                ));
+            }
+            for id in filter {
+                validate_import_id(id, "密码 id")?;
+            }
+        }
+
         // 导出文件是全量明文（密码/备注/敏感字段全部解密后打包），是整个系统泄露后果
         // 最重的产物。此前只查非空，用户用 "1" 也能导出——Argon2 对 1 位口令的暴破
         // 成本几乎为零。复用主密码同一套强度校验（含弱口令黑名单），
@@ -297,16 +353,23 @@ pub async fn export_data(
         let db = state.get_db()?;
         let conn = db.conn();
 
-        // 查询所有密码（含加密备注/自定义字段/使用统计列）
+        // 查询密码（含加密备注/自定义字段/使用统计列）。
+        // 部分导出按 ids 过滤；参数化 IN 列表，不拼接用户输入
+        let filter_ids: &[String] = ids.as_deref().unwrap_or(&[]);
+        let mut sql = String::from(
+            "SELECT id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at, strength, last_used_at, use_count
+             FROM passwords WHERE deleted_at IS NULL",
+        );
+        if !filter_ids.is_empty() {
+            sql.push_str(" AND id IN (");
+            sql.push_str(&vec!["?"; filter_ids.len()].join(", "));
+            sql.push(')');
+        }
+
         let passwords = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT id, title, username, password_encrypted, url, notes_encrypted, extra_fields_plain, extra_fields_encrypted, category_id, is_favorite, created_at, updated_at, strength, last_used_at, use_count
-                     FROM passwords WHERE deleted_at IS NULL",
-                )
-                .map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
             let rows = stmt
-                .query_map([], |row| {
+                .query_map(rusqlite::params_from_iter(filter_ids.iter()), |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -398,6 +461,12 @@ pub async fn export_data(
             log::warn!("导出完成，但有 {skipped_rows} 条数据因解密失败被跳过");
         }
 
+        // 部分导出兜底：所选条目全部落空（不存在/已删除）时明确报错，
+        // 不给用户一个看似成功的空文件
+        if ids.is_some() && export_passwords.is_empty() {
+            return Err("所选密码均不存在或已删除".to_string());
+        }
+
         // 查询所有分类（含分类树父节点）
         let categories = {
             let mut stmt = conn
@@ -418,6 +487,15 @@ pub async fn export_data(
                 .map_err(|e| e.to_string())?;
             drop(stmt);
             rows
+        };
+
+        // 部分导出只带被引用的分类及其祖先链（保住层级又不污染目标库）；
+        // 整库导出保持原样带全部分类
+        let categories = if ids.is_some() {
+            let used: HashSet<String> = export_passwords.iter().map(|p| p.category.clone()).collect();
+            shrink_categories(categories, &used)
+        } else {
+            categories
         };
 
         // 构建导出数据
@@ -641,3 +719,52 @@ pub async fn import_data(
         Ok(result)
 
     })}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cat(id: &str, parent: Option<&str>) -> ExportCategory {
+        ExportCategory {
+            id: id.to_string(),
+            name: id.to_string(),
+            icon: None,
+            sort_order: 0,
+            parent_id: parent.map(|p| p.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_shrink_categories_keeps_used_and_ancestors() {
+        let categories = vec![
+            cat("work", None),
+            cat("dev", Some("work")),
+            cat("ops", Some("dev")),
+            cat("life", None),
+        ];
+        let used: HashSet<String> = vec!["ops".to_string()].into_iter().collect();
+        let kept = shrink_categories(categories, &used);
+        // 只留 ops 及其祖先链，兄弟分类 life 不带；保持原 sort_order 查询顺序
+        let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["work", "dev", "ops"]);
+    }
+
+    #[test]
+    fn test_shrink_categories_ignores_dangling_refs() {
+        // 引用了不存在的分类、父分类悬空：不 panic、不误带无关分类
+        let categories = vec![cat("a", Some("missing")), cat("b", None)];
+        let used: HashSet<String> = vec!["a".to_string(), "ghost".to_string()].into_iter().collect();
+        let kept = shrink_categories(categories, &used);
+        let ids: Vec<&str> = kept.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, vec!["a"]);
+    }
+
+    #[test]
+    fn test_shrink_categories_survives_parent_cycle() {
+        // 脏数据兜底：父子成环也不能死循环，环上条目都保留
+        let categories = vec![cat("x", Some("y")), cat("y", Some("x"))];
+        let used: HashSet<String> = vec!["x".to_string()].into_iter().collect();
+        let kept = shrink_categories(categories, &used);
+        assert_eq!(kept.len(), 2);
+    }
+}
