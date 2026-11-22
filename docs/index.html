@@ -1,0 +1,1097 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>默语密码管理器 · MoyuPasswd — 密码不进剪贴板的桌面密码库</title>
+<meta name="description" content="默语密码管理器（MoyuPasswd）是一款基于 Tauri 2 + Rust + Vue 3 的本地桌面密码库：Argon2id + AES-256-GCM 加密，Ctrl+V 直接注入、密码不进系统剪贴板，支持标签分类、全局快速搜索与明暗双维度主题。" />
+<meta name="keywords" content="密码管理器,密码库,MoyuPasswd,默语,Tauri,Rust,本地加密,开源密码管理" />
+<meta property="og:title" content="默语密码管理器 · MoyuPasswd" />
+<meta property="og:description" content="本地存储、离线可用、开源的桌面密码库。密码不进剪贴板，Ctrl+V 直接注入。" />
+<meta property="og:type" content="website" />
+<link rel="icon" href="./images/icon.png" />
+<style>
+  /* ==================== 设计令牌 ====================
+   * 配色直接取自应用自身「Islands 暗色」主题（src/assets/themes/islands.css），
+   * 让宣传页与软件界面观感一致：框架底 #26282C、内容岛 #191A1C、品牌蓝 #3871E1。
+   */
+  :root {
+    --bg: #26282c;
+    --bg-deep: #1e2023;
+    --card: #191a1c;
+    --card-2: #202225;
+    --border: #3a3d43;
+    --border-soft: #2e3136;
+    --text: #dcdde1;
+    --text-strong: #f2f3f5;
+    --muted: #a6a9ae;
+    --muted-dim: #7f838a;
+    --brand: #3871e1;
+    --brand-ink: #8fb0f2;
+    --brand-glow: rgba(56, 113, 225, 0.35);
+    --green: #4ec9a4;
+    --radius: 14px;
+    --max: 1120px;
+    --font: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", "Noto Sans SC",
+      -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Courier New", monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; scroll-padding-top: 80px; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 16px;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  /* 顶部一层极淡的品牌色光晕，避免大面积纯色发闷 */
+  body::before {
+    content: "";
+    position: fixed;
+    top: -320px;
+    left: 50%;
+    width: 1100px;
+    height: 700px;
+    transform: translateX(-50%);
+    background: radial-gradient(closest-side, rgba(56, 113, 225, 0.2), transparent 72%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  a { color: var(--brand-ink); text-decoration: none; }
+  a:hover { color: #b8ccf7; }
+
+  ::selection { background: #2a4371; color: #fff; }
+
+  .wrap {
+    width: 100%;
+    max-width: var(--max);
+    margin: 0 auto;
+    padding: 0 24px;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* ==================== 顶栏 ==================== */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(30, 32, 35, 0.82);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    height: 64px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--text-strong);
+    font-weight: 600;
+    font-size: 16px;
+    letter-spacing: 0.2px;
+    white-space: nowrap;
+  }
+  .brand img { width: 28px; height: 28px; border-radius: 7px; }
+  .nav-links {
+    display: flex;
+    gap: 22px;
+    margin-left: auto;
+    font-size: 14.5px;
+  }
+  .nav-links a { color: var(--muted); }
+  .nav-links a:hover { color: var(--text-strong); }
+  .nav-cta {
+    padding: 7px 16px;
+    border-radius: 8px;
+    background: var(--brand);
+    color: #fff !important;
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .nav-cta:hover { background: #4a80ea; }
+
+  /* ==================== 通用区块 ==================== */
+  section { padding: 92px 0; position: relative; z-index: 1; }
+  section.tight { padding: 64px 0; }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--brand-ink);
+    font-weight: 600;
+    margin-bottom: 14px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 18px;
+    height: 1px;
+    background: var(--brand-ink);
+    opacity: 0.7;
+  }
+  h2 {
+    font-size: clamp(26px, 3.4vw, 36px);
+    line-height: 1.3;
+    margin: 0 0 12px;
+    color: var(--text-strong);
+    letter-spacing: -0.4px;
+    text-wrap: balance;
+  }
+  .lead {
+    color: var(--muted);
+    margin: 0;
+    max-width: 720px;
+    font-size: 16.5px;
+    text-wrap: pretty;
+  }
+  .lead code,
+  .note code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    background: #26282c;
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    padding: 1px 6px;
+    color: #c3c7ce;
+  }
+
+  /* ==================== Hero ==================== */
+  .hero { padding: 76px 0 88px; }
+  .hero-grid {
+    display: grid;
+    grid-template-columns: 1.02fr 1.1fr;
+    gap: 56px;
+    align-items: center;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 12px 5px 8px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: rgba(25, 26, 28, 0.7);
+    font-size: 13px;
+    color: var(--muted);
+    margin-bottom: 22px;
+  }
+  .badge b {
+    background: var(--brand);
+    color: #fff;
+    font-size: 11.5px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 999px;
+    letter-spacing: 0.3px;
+  }
+
+  h1 {
+    font-size: clamp(38px, 5.6vw, 58px);
+    line-height: 1.12;
+    margin: 0 0 20px;
+    color: var(--text-strong);
+    letter-spacing: -1.4px;
+    font-weight: 700;
+  }
+  h1 .accent {
+    background: linear-gradient(96deg, #8fb0f2 0%, #4ec9a4 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero p.sub {
+    font-size: 17.5px;
+    color: var(--muted);
+    margin: 0 0 30px;
+    max-width: 520px;
+  }
+
+  .cta-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    padding: 12px 22px;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary {
+    background: var(--brand);
+    color: #fff;
+    box-shadow: 0 8px 26px -10px var(--brand-glow);
+  }
+  .btn-primary:hover { background: #4a80ea; color: #fff; }
+  .btn-ghost {
+    background: rgba(25, 26, 28, 0.6);
+    border-color: var(--border);
+    color: var(--text);
+  }
+  .btn-ghost:hover { border-color: #4b4f57; background: var(--card-2); color: var(--text-strong); }
+
+  .hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin-top: 26px;
+    font-size: 13.5px;
+    color: var(--muted-dim);
+  }
+  .hero-meta span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); }
+
+  /* 截图框 */
+  .shot-frame {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    overflow: hidden;
+    box-shadow: 0 30px 70px -30px rgba(0, 0, 0, 0.85), 0 0 0 6px rgba(255, 255, 255, 0.015);
+  }
+  .shot-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-soft);
+    background: var(--card-2);
+  }
+  .shot-bar i {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #43474e; display: block;
+  }
+  .shot-title {
+    margin-left: 6px;
+    font-size: 12px;
+    color: var(--muted-dim);
+    letter-spacing: 0.4px;
+  }
+  .shot-toggle {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+    background: var(--bg-deep);
+    border: 1px solid var(--border-soft);
+    border-radius: 7px;
+    padding: 2px;
+  }
+  .shot-toggle button {
+    border: 0;
+    background: transparent;
+    color: var(--muted-dim);
+    font-size: 12px;
+    font-family: inherit;
+    padding: 3px 10px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  .shot-toggle button.on { background: #2f3a4d; color: #cfddf6; }
+  .shot-body { display: block; }
+  .shot-body img { display: block; width: 100%; height: auto; }
+  .shot-body img.hide { display: none; }
+
+  /* ==================== 数据条 ==================== */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1px;
+    background: var(--border-soft);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    overflow: hidden;
+  }
+  .stat { background: var(--card); padding: 26px 24px; }
+  .stat b {
+    display: block;
+    font-size: 24px;
+    color: var(--text-strong);
+    letter-spacing: -0.5px;
+    line-height: 1.4;
+  }
+  .stat span { font-size: 13.5px; color: var(--muted-dim); }
+
+  /* ==================== 特性卡 ==================== */
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 44px;
+  }
+  .feature {
+    background: var(--card);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 26px 24px;
+    transition: border-color 0.18s ease, transform 0.18s ease, background 0.18s ease;
+  }
+  .feature:hover {
+    border-color: #454a52;
+    background: var(--card-2);
+    transform: translateY(-2px);
+  }
+  .feature .ico {
+    width: 38px; height: 38px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: 9px;
+    background: rgba(56, 113, 225, 0.12);
+    border: 1px solid rgba(56, 113, 225, 0.24);
+    color: var(--brand-ink);
+    margin-bottom: 16px;
+  }
+  .feature h3 {
+    margin: 0 0 8px;
+    font-size: 16px;
+    color: var(--text-strong);
+    font-weight: 600;
+    letter-spacing: 0.1px;
+  }
+  .feature p { margin: 0; font-size: 14.5px; color: var(--muted); line-height: 1.7; }
+
+  /* ==================== 生命周期流程 ==================== */
+  .flow {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 14px;
+    margin-top: 40px;
+  }
+  .step {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--border-soft);
+    border-radius: 12px;
+    padding: 20px 18px;
+  }
+  .step::after {
+    content: "›";
+    position: absolute;
+    right: -12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #4a4e56;
+    font-size: 20px;
+  }
+  .step:last-child::after { display: none; }
+  .step em {
+    display: block;
+    font-style: normal;
+    font-size: 11.5px;
+    letter-spacing: 1.2px;
+    color: var(--brand-ink);
+    margin-bottom: 8px;
+  }
+  .step b { display: block; font-size: 14.5px; color: var(--text-strong); margin-bottom: 6px; }
+  .step span { font-size: 13px; color: var(--muted-dim); line-height: 1.6; display: block; }
+
+  /* ==================== 安全清单 ==================== */
+  .split {
+    display: grid;
+    grid-template-columns: 0.95fr 1.05fr;
+    gap: 56px;
+    align-items: start;
+  }
+  .chain {
+    background: var(--card);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 26px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 2.1;
+    color: var(--muted);
+    overflow-x: auto;
+    /* 链路图里的箭头必须整行不断开：窄屏改为横向滚动，不用折行毁掉对齐 */
+    white-space: nowrap;
+  }
+  .chain .k { color: var(--text-strong); }
+  .chain .b { color: var(--brand-ink); }
+  .chain .g { color: var(--green); }
+  .chain .c { color: #5f636b; }
+
+  .checks { list-style: none; padding: 0; margin: 0; }
+  .checks li {
+    position: relative;
+    padding-left: 30px;
+    margin-bottom: 14px;
+    font-size: 14.8px;
+    color: var(--muted);
+  }
+  .checks li b { color: var(--text-strong); font-weight: 600; }
+  .checks li::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 7px;
+    width: 17px; height: 17px;
+    border-radius: 5px;
+    background: rgba(78, 201, 164, 0.14);
+    border: 1px solid rgba(78, 201, 164, 0.38);
+  }
+  .checks li::after {
+    content: "";
+    position: absolute;
+    left: 5.5px; top: 11px;
+    width: 5px; height: 8px;
+    border: solid var(--green);
+    border-width: 0 1.6px 1.6px 0;
+    transform: rotate(42deg);
+  }
+
+  /* ==================== 平台支持 ==================== */
+  .plat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-top: 44px;
+  }
+  .plat {
+    background: var(--card);
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    padding: 24px;
+  }
+  .plat-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 16px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .plat-head b { color: var(--text-strong); font-size: 15.5px; font-weight: 600; }
+  .tag {
+    font-size: 11.5px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+  .tag.ok {
+    color: var(--green);
+    background: rgba(78, 201, 164, 0.12);
+    border: 1px solid rgba(78, 201, 164, 0.32);
+  }
+  .tag.warn {
+    color: #e3b34d;
+    background: rgba(227, 179, 77, 0.12);
+    border: 1px solid rgba(227, 179, 77, 0.3);
+  }
+  .plat ul { list-style: none; padding: 0; margin: 0; }
+  .plat li {
+    font-size: 14px;
+    color: var(--muted);
+    line-height: 1.7;
+    margin-bottom: 12px;
+    padding-left: 0;
+  }
+  .plat li:last-child { margin-bottom: 0; }
+  .plat li i {
+    display: block;
+    font-style: normal;
+    font-size: 11.5px;
+    letter-spacing: 1px;
+    color: var(--muted-dim);
+    margin-bottom: 2px;
+  }
+  .note {
+    display: flex;
+    gap: 14px;
+    margin-top: 16px;
+    padding: 20px 24px;
+    border: 1px solid var(--border-soft);
+    border-left: 2px solid var(--brand);
+    border-radius: 10px;
+    background: rgba(25, 26, 28, 0.6);
+    font-size: 14.3px;
+    color: var(--muted);
+    line-height: 1.75;
+  }
+  .note b { color: var(--text-strong); font-weight: 600; }
+  .note svg { flex: 0 0 auto; margin-top: 3px; color: var(--brand-ink); }
+
+  /* ==================== 快捷键 ==================== */
+  .table-card {
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin-top: 36px;
+    background: var(--card);
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; }
+  thead th {
+    text-align: left;
+    padding: 13px 22px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: 0.8px;
+    color: var(--muted-dim);
+    background: var(--card-2);
+    border-bottom: 1px solid var(--border-soft);
+  }
+  tbody td {
+    padding: 14px 22px;
+    border-bottom: 1px solid var(--border-soft);
+    color: var(--muted);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody td:first-child { color: var(--text-strong); }
+  kbd {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: #26282c;
+    border: 1px solid #454a52;
+    border-bottom-width: 2px;
+    color: #dfe3ea;
+    white-space: nowrap;
+  }
+
+  /* ==================== 技术栈 ==================== */
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+  .chip {
+    padding: 8px 15px;
+    border-radius: 8px;
+    border: 1px solid var(--border-soft);
+    background: var(--card);
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .chip b { color: var(--text-strong); font-weight: 600; }
+
+  /* ==================== 版本记录 ==================== */
+  .timeline { margin-top: 40px; border-left: 1px solid var(--border); padding-left: 26px; }
+  .tl-item { position: relative; padding-bottom: 26px; }
+  .tl-item:last-child { padding-bottom: 0; }
+  .tl-item::before {
+    content: "";
+    position: absolute;
+    left: -31px; top: 8px;
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid #4a4e56;
+  }
+  .tl-item.current::before { border-color: var(--brand); background: var(--brand); box-shadow: 0 0 0 4px rgba(56, 113, 225, 0.16); }
+  .tl-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .tl-head b { color: var(--text-strong); font-size: 15.5px; }
+  .tl-head i { font-style: normal; font-size: 12.5px; color: var(--muted-dim); font-family: var(--mono); }
+  .tl-item p { margin: 5px 0 0; font-size: 14px; color: var(--muted); }
+
+  /* ==================== 下载区 ==================== */
+  .download {
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    background:
+      radial-gradient(120% 140% at 88% 0%, rgba(56, 113, 225, 0.16), transparent 60%),
+      var(--card);
+    padding: 52px;
+    text-align: center;
+  }
+  .download h2 { margin-bottom: 10px; }
+  .download .lead { margin: 0 auto 30px; text-wrap: balance; }
+  .dl-meta {
+    margin-top: 22px;
+    font-size: 13px;
+    color: var(--muted-dim);
+  }
+  .dl-meta code {
+    font-family: var(--mono);
+    background: #26282c;
+    border: 1px solid var(--border-soft);
+    border-radius: 5px;
+    padding: 1px 6px;
+    color: #c3c7ce;
+  }
+
+  /* ==================== 页脚 ==================== */
+  footer {
+    border-top: 1px solid var(--border-soft);
+    padding: 40px 0 56px;
+    font-size: 13.5px;
+    color: var(--muted-dim);
+  }
+  .foot {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .foot-links { display: flex; gap: 20px; flex-wrap: wrap; }
+
+  /* ==================== 响应式 ==================== */
+  @media (max-width: 960px) {
+    .hero-grid, .split { grid-template-columns: 1fr; gap: 40px; }
+    .feature-grid { grid-template-columns: repeat(2, 1fr); }
+    .plat-grid { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .flow { grid-template-columns: repeat(2, 1fr); }
+    .step::after { display: none; }
+    .nav-links { display: none; }
+    .nav-cta { margin-left: auto; }
+    section { padding: 68px 0; }
+    .download { padding: 36px 24px; }
+  }
+  @media (max-width: 620px) {
+    .feature-grid, .flow { grid-template-columns: 1fr; }
+    .hero { padding: 48px 0 60px; }
+    .stats { grid-template-columns: 1fr; }
+    thead th, tbody td { padding: 12px 14px; }
+    .cta-row .btn { width: 100%; justify-content: center; }
+    /* 链路图窄屏缩字号，让箭头图尽量整行放下，避免横向滚动 */
+    .chain { font-size: 10.5px; padding: 18px 16px; line-height: 2; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="#top">
+      <img src="./images/icon.png" alt="MoyuPasswd 图标" />
+      默语密码管理器
+    </a>
+    <nav class="nav-links">
+      <a href="#features">特性</a>
+      <a href="#security">安全</a>
+      <a href="#platform">平台</a>
+      <a href="#shortcuts">快捷键</a>
+      <a href="#stack">技术栈</a>
+      <a href="#changelog">版本</a>
+    </nav>
+    <a class="nav-cta" href="https://gitee.com/moyu_boy/moyu-passwd/releases" target="_blank" rel="noopener">下载</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ==================== Hero ==================== -->
+  <section class="hero">
+    <div class="wrap hero-grid">
+      <div>
+        <div class="badge"><b>v0.4.0</b> Windows / Linux · 开源 MIT</div>
+        <h1>密码存本地，<br /><span class="accent">Ctrl+V 直接注入</span></h1>
+        <p class="sub">
+          默语密码管理器（MoyuPasswd）是一款基于 Tauri 2 + Rust 构建的跨平台桌面密码库。
+          全库加密离线存放，复制密码时不进系统剪贴板——Windows 与 Linux（X11）下切到目标窗口按一下
+          Ctrl+V 直接落字，Wayland 下改为拖放交付。
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://gitee.com/moyu_boy/moyu-passwd/releases" target="_blank" rel="noopener">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            下载 Windows 安装包
+          </a>
+          <a class="btn btn-ghost" href="https://gitee.com/moyu_boy/moyu-passwd" target="_blank" rel="noopener">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            查看源码
+          </a>
+        </div>
+        <div class="hero-meta">
+          <span><i class="dot"></i>无需联网</span>
+          <span><i class="dot"></i>AES-256-GCM</span>
+          <span><i class="dot"></i>Windows + Linux</span>
+        </div>
+      </div>
+
+      <div class="shot-frame">
+        <div class="shot-bar">
+          <i></i><i></i><i></i>
+          <span class="shot-title">MoyuPasswd</span>
+          <div class="shot-toggle">
+            <button id="btn-dark" class="on" type="button">暗色</button>
+            <button id="btn-light" type="button">明亮</button>
+          </div>
+        </div>
+        <div class="shot-body">
+          <img id="shot-dark" src="./images/main-dark.png" alt="MoyuPasswd 主界面（暗色）" />
+          <img id="shot-light" class="hide" src="./images/main-light.png" alt="MoyuPasswd 主界面（明亮）" />
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 数据条 ==================== -->
+  <section class="tight">
+    <div class="wrap">
+      <div class="stats">
+        <div class="stat"><b>0 次明文外传</b><span>密码不进剪贴板、不写云端</span></div>
+        <div class="stat"><b>Ctrl+K</b><span>任何应用中呼出快速搜索</span></div>
+        <div class="stat"><b>4 × 2</b><span>4 套色系 × 明暗两套主题</span></div>
+        <div class="stat"><b>30s → 15min</b><span>连续输错渐进锁定</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 特性 ==================== -->
+  <section id="features">
+    <div class="wrap">
+      <span class="eyebrow">Features</span>
+      <h2>该有的都有，多余的一个不加</h2>
+      <p class="lead">
+        不追求功能堆砌，只把「存、找、用」这三件事做到顺手：密码落在本地加密库里，
+        用的时候一次按键就到位，其余时间它安静地待在托盘里。
+      </p>
+
+      <div class="feature-grid">
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></div>
+          <h3>主密码 + 双层加密</h3>
+          <p>Argon2id 派生密钥，SQLCipher 全库加密，条目再以 AES-256-GCM 单独加密，盘上找不到半段明文。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><line x1="12" y1="8" x2="12" y2="16"/></svg></div>
+          <h3>Ctrl+V 注入，不碰剪贴板</h3>
+          <p>倒计时内切到目标窗口按 Ctrl+V，密码由后端直接输入并立刻清零。Windows 走 SendInput，Linux X11 走 XTest；Wayland 改为拖放交付，同样不进剪贴板。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg></div>
+          <h3>全局快速搜索</h3>
+          <p>Ctrl+K 随时唤起，标题、用户名、URL、标签、拼音一起模糊匹配；搜索与筛选由 Rust 侧执行，库再大也不卡。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M20.6 13.4 12 22l-9-9V3h10z"/><circle cx="7.5" cy="7.5" r="1.2"/></svg></div>
+          <h3>分类 + 标签双维</h3>
+          <p>分类管「这是哪个系统的」，标签管「这条属于哪种用途」，侧栏标签多选取交集，比层层文件夹好用。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="14" y2="12"/><line x1="4" y1="17" x2="17" y2="17"/></svg></div>
+          <h3>自定义字段</h3>
+          <p>连接地址、端口、连接命令都能挂上；标记为「敏感」的字段同样加密存储，快捷查询里按 → 展开逐个复制。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M3 12h3"/><path d="M18 12h3"/><circle cx="12" cy="12" r="3.4"/></svg></div>
+          <h3>密码生成器</h3>
+          <p>长度与字符集可调，实时给出强度评级；生成即用，不必自己憋一个强密码再背下来。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 16 14"/></svg></div>
+          <h3>空闲才锁定</h3>
+          <p>按系统空闲时间判断，离开电脑才锁，键鼠一动就重置；锁定同时清掉内存里的密钥。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg></div>
+          <h3>爆破防护 + 系统认证</h3>
+          <p>连续输错按 30s 起渐进锁定，计数落盘重启不清零；Windows 上支持 Windows Hello 指纹/面容解锁，改密后密钥自动轮换，Linux 下以主密码解锁。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.2-8.6"/><polyline points="21 3 21 9 15 9"/></svg></div>
+          <h3>备份与恢复</h3>
+          <p>改主密码前自动留副本，可一键恢复也可回退；导出为带备份密码的加密包，导入整包事务、冲突默认跳过。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+          <h3>托盘 + 全局快捷键</h3>
+          <p>关闭即最小化到托盘继续待命，开机可自启；Ctrl+K 搜索、Ctrl+Shift+N 添加、Ctrl+Shift+G 生成器都可改键。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg></div>
+          <h3>双维度主题</h3>
+          <p>明暗模式独立于色系，经典中性 / 电光青 / 暮光黄昏 / Islands 四套各有明暗两版，设置页卡片实时预览。</p>
+        </div>
+
+        <div class="feature">
+          <div class="ico"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 11 14 10 22 21 10 13 10 13 2"/></svg></div>
+          <h3>界面自愈与逃生通道</h3>
+          <p>webview 心跳看门狗发现无响应自动重载；真卡死了还有 Ctrl+Alt+Shift+R 重载、Ctrl+Alt+Shift+E 强制退出。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 安全 ==================== -->
+  <section id="security">
+    <div class="wrap">
+      <span class="eyebrow">Security</span>
+      <h2>明文只活在最必要的那一瞬间</h2>
+      <p class="lead">
+        密码管理器最容易被问的一句是「它自己安全吗」。这里的答案写在代码里：
+        入库即加密，用时才解密，用完立刻清零，锁定后一律作废。
+      </p>
+
+      <div class="flow">
+        <div class="step">
+          <em>STEP 01</em>
+          <b>录入 / 修改</b>
+          <span>表单里输入的明文通过 IPC 交给后端，写入前完成加密。</span>
+        </div>
+        <div class="step">
+          <em>STEP 02</em>
+          <b>明文终结</b>
+          <span>参数随即释放，磁盘上只剩密文，内存里不留副本。</span>
+        </div>
+        <div class="step">
+          <em>STEP 03</em>
+          <b>复制只登记 ID</b>
+          <span>待粘贴槽里只有条目 ID 和解密闭包，没有明文。</span>
+        </div>
+        <div class="step">
+          <em>STEP 04</em>
+          <b>注入时解密</b>
+          <span>按 Ctrl+V 才现场解密，SendInput 送出后立刻 zeroize 清零。</span>
+        </div>
+        <div class="step">
+          <em>STEP 05</em>
+          <b>超时即销毁</b>
+          <span>超时、Esc、Ctrl+C 或应用锁定，闭包销毁，再也生不出明文。</span>
+        </div>
+      </div>
+
+      <div class="split" style="margin-top: 56px;">
+        <div class="chain">
+<span class="c">// 密钥派生与数据链路</span><br />
+<span class="k">主密码</span> ──► <span class="b">Argon2id</span> ──► <span class="k">哈希（仅用于校验）</span><br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└──► <span class="b">AES-256 密钥</span> ──► <span class="k">SQLCipher 全库加密</span><br />
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└──► <span class="g">条目级加密</span><br />
+<br />
+<span class="c">// 存放位置</span><br />
+<span class="k">%APPDATA%/com.moyu.passwd/</span><br />
+├─ moyu_passwd.db &nbsp;<span class="c">全库加密</span><br />
+├─ audit.log &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="c">注入审计，不含明文</span><br />
+├─ lockout.json &nbsp;&nbsp;<span class="c">失败计数，重启不清</span><br />
+└─ backup/ &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="c">改密前自动副本</span>
+        </div>
+
+        <ul class="checks">
+          <li><b>密码不进剪贴板</b>：注入式交付，剪贴板管理器、云同步、历史记录都看不到。锁定时还会禁止写剪贴板，防劫持。</li>
+          <li><b>注入前先认目标</b>：记录目标进程，默认拒绝向终端注入（防命令行历史与回显泄露），5 秒内再按一次才放行；归因失败一律不注入。</li>
+          <li><b>文本复制会自清</b>：用户名、URL 等复制后按设置 10 / 30 / 60 秒自动清除，且用指纹比对只清本应用写入的内容，不误删你新复制的东西。</li>
+          <li><b>敏感命令有门禁</b>：未解锁状态下敏感指令一律拒绝，首跑未设主密码时同样拒绝。</li>
+          <li><b>改密崩溃安全</b>：修改主密码失败或断电自动回滚，不会留下半新半旧的数据。</li>
+          <li><b>文件权限加固</b>：数据库与审计日志的文件权限限制访问（Windows 收紧 ACL，Linux 置为 0600），同机其他账户读不到。</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 平台支持 ==================== -->
+  <section id="platform">
+    <div class="wrap">
+      <span class="eyebrow">Platform</span>
+      <h2>同一套密码库，两个系统各自最合适的交付方式</h2>
+      <p class="lead">
+        Windows 与 Linux 共用同一份加密库和界面代码，差异只在「密码怎么送到目标输入框」这一层。
+        每一条平台限制都写在下面对应位置，不做模糊宣传。
+      </p>
+
+      <div class="plat-grid">
+        <div class="plat">
+          <div class="plat-head"><b>Windows 10 / 11</b><span class="tag ok">完整支持</span></div>
+          <ul>
+            <li><i>密码交付</i>Ctrl+V 注入（SendInput 合成按键），密码不进剪贴板</li>
+            <li><i>目标校验</i>前台进程归因 + 终端黑名单，归因失败不注入</li>
+            <li><i>解锁</i>主密码 / Windows Hello 指纹·面容</li>
+            <li><i>其它</i>全局快捷键、托盘、系统空闲自动锁定、管理员启动</li>
+          </ul>
+        </div>
+
+        <div class="plat">
+          <div class="plat-head"><b>Linux · X11</b><span class="tag ok">完整支持</span></div>
+          <ul>
+            <li><i>密码交付</i>Ctrl+V 注入（XTest 合成按键，x11rb 用户态免提权）</li>
+            <li><i>目标校验</i>EWMH 活动窗口 + /proc 进程归因，语义与 Windows 一致</li>
+            <li><i>解锁</i>主密码（生物识别暂不支持）</li>
+            <li><i>注意</i>非 ASCII 密码映射不到当前键盘布局时整次放弃，回退剪贴板粘贴</li>
+          </ul>
+        </div>
+
+        <div class="plat">
+          <div class="plat-head"><b>Linux · Wayland</b><span class="tag warn">降级交付</span></div>
+          <ul>
+            <li><i>密码交付</i>置顶浮窗拖放：点复制 → 条目进浮窗 → 拖到目标输入框</li>
+            <li><i>目标校验</i>无（协议不提供目标身份），落点由你选定</li>
+            <li><i>解锁</i>主密码</li>
+            <li><i>注意</i>全局快捷键与快速搜索独立窗暂不可用；浮窗只存标题、用户名</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="note">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="16" x2="12" y2="11"/><line x1="12" y1="8" x2="12" y2="8.01"/></svg>
+        <div>
+          <b>用 ToDesk、向日葵这类远控软件？</b>
+          它们不转发「自动粘贴」合成的按键，密码粘不过去。到「设置 → 密码交付方式」切到
+          <b>自动</b>即可：平时照常注入、密码不进剪贴板，只有名单内的远控进程占据前台时才写剪贴板，一失焦立刻抹掉。
+          需要一直留在剪贴板就选<b>写入剪贴板</b>，仍按设定的时间自动清除。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 快捷键 ==================== -->
+  <section id="shortcuts">
+    <div class="wrap">
+      <span class="eyebrow">Shortcuts</span>
+      <h2>手不离键盘</h2>
+      <p class="lead">全局快捷键在任何应用里都能用，键位可在「设置 → 快捷键」里改（Linux Wayland 会话暂不支持全局快捷键）；底部两条是系统级逃生通道，不可改、也不会被界面卡死影响。</p>
+
+      <div class="table-card">
+        <table>
+          <thead>
+            <tr><th style="width: 34%;">功能</th><th style="width: 30%;">默认按键</th><th>说明</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>快速搜索</td><td><kbd>Ctrl</kbd> + <kbd>K</kbd></td><td>弹出独立搜索窗口，回车直接复制并进入注入待命</td></tr>
+            <tr><td>快速添加</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>N</kbd></td><td>不打断当前工作，直接录入新密码</td></tr>
+            <tr><td>密码生成器</td><td><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>G</kbd></td><td>随时生成一个可用的强密码</td></tr>
+            <tr><td>展开字段详情</td><td><kbd>→</kbd> / <kbd>Tab</kbd></td><td>快捷查询中展开自定义字段，<kbd>←</kbd> 收起</td></tr>
+            <tr><td>紧急重载网页</td><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>R</kbd></td><td>界面卡死或显示异常时强制重载主窗口</td></tr>
+            <tr><td>强制退出</td><td><kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>E</kbd></td><td>完全无响应时退出应用，退出前自动清空剪贴板</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 技术栈 ==================== -->
+  <section id="stack" class="tight">
+    <div class="wrap">
+      <span class="eyebrow">Stack</span>
+      <h2>界面交给系统 WebView，不打包 Chromium</h2>
+      <p class="lead">
+        界面交给系统自带的 WebView 渲染（Windows 用 WebView2、Linux 用 WebKitGTK），不打包一份 Chromium；
+        加密、数据库、进程归因与按键注入全在 Rust 侧，前端只负责画界面。
+      </p>
+      <div class="chips">
+        <span class="chip"><b>Tauri 2</b> 桌面框架</span>
+        <span class="chip"><b>Rust</b> 后端</span>
+        <span class="chip"><b>Vue 3</b> 前端</span>
+        <span class="chip"><b>TypeScript</b></span>
+        <span class="chip"><b>Vite</b></span>
+        <span class="chip"><b>Pinia</b></span>
+        <span class="chip"><b>Tailwind CSS</b></span>
+        <span class="chip"><b>shadcn-vue</b></span>
+        <span class="chip"><b>SQLite / SQLCipher</b></span>
+        <span class="chip"><b>AES-256-GCM</b></span>
+        <span class="chip"><b>Argon2id</b></span>
+        <span class="chip"><b>WebView2</b> Windows</span>
+        <span class="chip"><b>WebKitGTK</b> Linux</span>
+        <span class="chip"><b>x11rb + XTest</b> X11 注入</span>
+        <span class="chip"><b>Windows Hello</b></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 版本记录 ==================== -->
+  <section id="changelog">
+    <div class="wrap">
+      <span class="eyebrow">Changelog</span>
+      <h2>从 0.1 到 0.4，再到 Linux</h2>
+
+      <div class="timeline">
+        <div class="tl-item current">
+          <div class="tl-head"><b>Linux 支持</b><i>开发中</i></div>
+          <p>X11 下完成整条 Ctrl+V 注入链路（XTest 合成 + EWMH 归因 + 会话内抓键），Wayland 改为置顶浮窗拖放交付；新增密码交付方式设置（自动 / 写入剪贴板，适配远控客户端）；窗口缩放模型统一、自绘缩放热区、原生下拉替换为主题自绘，文件权限统一收紧到 0600。</p>
+        </div>
+        <div class="tl-item">
+          <div class="tl-head"><b>v0.4.0</b><i>2026-10</i></div>
+          <p>标签与后端驱动搜索、明暗 × 色系双维度主题、备份与恢复、设置自动保存、管理员启动开关、单实例守卫、系统固定快捷键逃生通道、解锁门禁、webview 心跳看门狗、自绘标题栏、双变体安装包。</p>
+        </div>
+        <div class="tl-item">
+          <div class="tl-head"><b>v0.3.0</b><i>2026-10</i></div>
+          <p>密码注入与安全架构重构、自定义字段、统一图标组件。</p>
+        </div>
+        <div class="tl-item">
+          <div class="tl-head"><b>v0.2.0</b><i>2026-10</i></div>
+          <p>备注零解密、安全密码粘贴、主密码修改一致性。</p>
+        </div>
+        <div class="tl-item">
+          <div class="tl-head"><b>v0.1.0</b><i>2026-08</i></div>
+          <p>首个可用版本：密码库、快速搜索、设置、打包与系统认证。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 下载 ==================== -->
+  <section id="download">
+    <div class="wrap">
+      <div class="download">
+        <h2>现在就把密码收进本地</h2>
+        <p class="lead">Windows 安装包提供「自带 WebView2」与「依赖系统 WebView2」两个版本；Linux 在源码目录执行 <code>pnpm tauri build</code>，产出 <code>.deb</code> / <code>.rpm</code> / <code>.AppImage</code>。</p>
+        <div class="cta-row" style="justify-content: center;">
+          <a class="btn btn-primary" href="https://gitee.com/moyu_boy/moyu-passwd/releases" target="_blank" rel="noopener">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            下载 Windows 安装包
+          </a>
+          <a class="btn btn-ghost" href="https://gitee.com/moyu_boy/moyu-passwd" target="_blank" rel="noopener">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.9a3.4 3.4 0 0 0-1-2.6c3.1-.3 6.3-1.5 6.3-7A5.4 5.4 0 0 0 19.9 4 5 5 0 0 0 19.8 .5S18.6 0 15.5 2a13 13 0 0 0-7 0C5.4 0 4.2 .5 4.2 .5A5 5 0 0 0 4.1 4 5.4 5.4 0 0 0 2.7 7.7c0 5.4 3.2 6.6 6.3 7a3.4 3.4 0 0 0-1 2.6V22"/></svg>
+            源码与 Linux 构建
+          </a>
+        </div>
+        <div class="dl-meta">
+          当前版本 <code>v0.4.0</code> · Windows 10/11 · Linux（X11 / Wayland）· macOS 规划中 · MIT License
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <div>© 2026 默语密码管理器 MoyuPasswd · 采用 MIT 许可证开源</div>
+    <div class="foot-links">
+      <a href="https://gitee.com/moyu_boy/moyu-passwd" target="_blank" rel="noopener">Gitee</a>
+      <a href="https://github.com/Cirmaster/MoyuPasswd" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://gitee.com/moyu_boy/moyu-passwd/issues" target="_blank" rel="noopener">问题反馈</a>
+      <a href="https://gitee.com/moyu_boy/moyu-passwd/releases" target="_blank" rel="noopener">版本下载</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // 截图明暗切换：只切图片显隐，不引入任何框架
+  (function () {
+    var dark = document.getElementById('shot-dark');
+    var light = document.getElementById('shot-light');
+    var btnDark = document.getElementById('btn-dark');
+    var btnLight = document.getElementById('btn-light');
+
+    function show(mode) {
+      var isDark = mode === 'dark';
+      dark.classList.toggle('hide', !isDark);
+      light.classList.toggle('hide', isDark);
+      btnDark.classList.toggle('on', isDark);
+      btnLight.classList.toggle('on', !isDark);
+    }
+
+    btnDark.addEventListener('click', function () { show('dark'); });
+    btnLight.addEventListener('click', function () { show('light'); });
+  })();
+</script>
+
+</body>
+</html>
